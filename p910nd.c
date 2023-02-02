@@ -18,15 +18,15 @@
  *
  *	Version 0.97
  *	Patches by Stefan Sichler.
- *	Stream to printer is only closed after EOF from network if 
- *	it is no more busy, otherwise printer driver may discard data of last 
+ *	Stream to printer is only closed after EOF from network if
+ *	it is no more busy, otherwise printer driver may discard data of last
  *	write() at close().
  *
  *	Version 0.96
  *	Patches by Stefan Sichler.
  *	Fixed bi-directional mode to stay alive until connection is closed.
  *	Fixed timeout value in select() (controlling in/out balancing).
- *	Fixed network-to-printer buffer reporting EOF although there was data 
+ *	Fixed network-to-printer buffer reporting EOF although there was data
  *	left in the buffer.
  *	Added log-to-stdout option (-d).
  *
@@ -107,61 +107,62 @@
  *	I'd be happy to receive your patches.
  */
 
-#include	<unistd.h>
-#include	<stdlib.h>
-#include	<stdio.h>
-#include	<getopt.h>
-#include	<ctype.h>
-#include	<string.h>
-#include	<fcntl.h>
-#include	<netdb.h>
-#include	<syslog.h>
-#include	<errno.h>
-#include	<stdarg.h>
-#include	<sys/types.h>
-#include	<sys/time.h>
-#include	<sys/resource.h>
-#include	<sys/stat.h>
-#include	<sys/socket.h>
-#include	<netinet/in.h>
-#include	<arpa/inet.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <getopt.h>
+#include <ctype.h>
+#include <string.h>
+#include <fcntl.h>
+#include <netdb.h>
+#include <syslog.h>
+#include <errno.h>
+#include <stdarg.h>
+#include <sys/types.h>
+#include <sys/time.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
-#ifdef	USE_LIBWRAP
-#include	"tcpd.h"
+#ifdef USE_LIBWRAP
+#include "tcpd.h"
 int allow_severity, deny_severity;
 extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *client_user);
 #endif
 
-#define		BASEPORT	9100
-#define		PIDFILE		"/var/run/p910%cd.pid"
-#ifdef		LOCKFILE_DIR
-#define		LOCKFILE	LOCKFILE_DIR "/p910%cd"
+#define BASEPORT 9100
+#define PIDFILE "/var/run/p910%cd.pid"
+#ifdef LOCKFILE_DIR
+#define LOCKFILE LOCKFILE_DIR "/p910%cd"
 #else
-#define		LOCKFILE	"/var/lock/subsys/p910%cd"
+#define LOCKFILE "/var/lock/subsys/p910%cd"
 #endif
-#ifndef		PRINTERFILE
-#define         PRINTERFILE     "/dev/lp%c"
+#ifndef PRINTERFILE
+#define PRINTERFILE "/dev/lp%c"
 #endif
-#define		LOGOPTS		LOG_ERR
+#define LOGOPTS LOG_ERR
 
-#define		BUFFER_SIZE	8192
+#define BUFFER_SIZE 8192
 
 /* Circular buffer used for each direction. */
-typedef struct {
-	int detectEof;		/* If nonzero, EOF is marked when read returns 0 bytes. */
-	int infd;		/* Input file descriptor. */
-	int outfd;		/* Output file descriptor. */
-	int startidx;		/* Index of the start of valid data. */
-	int endidx;		/* Index of the end of valid data. */
-	int bytes;		/* The number of bytes currently buffered. */
-	int totalin;		/* Total bytes that have been read. */
-	int totalout;		/* Total bytes that have been written. */
-	int eof_read;		/* Nonzero indicates the input file has reached EOF. */
-	int eof_sent;		/* Nonzero indicates the output file has fully received all data. */
-	int err;		/* Nonzero indicates an error detected on the output file. */
-#define READ_ERR  0x01
+typedef struct
+{
+	int detectEof; /* If nonzero, EOF is marked when read returns 0 bytes. */
+	int infd;	   /* Input file descriptor. */
+	int outfd;	   /* Output file descriptor. */
+	int startidx;  /* Index of the start of valid data. */
+	int endidx;	   /* Index of the end of valid data. */
+	int bytes;	   /* The number of bytes currently buffered. */
+	int totalin;   /* Total bytes that have been read. */
+	int totalout;  /* Total bytes that have been written. */
+	int eof_read;  /* Nonzero indicates the input file has reached EOF. */
+	int eof_sent;  /* Nonzero indicates the output file has fully received all data. */
+	int err;	   /* Nonzero indicates an error detected on the output file. */
+#define READ_ERR 0x01
 #define WRITE_ERR 0x02
-	char buffer[BUFFER_SIZE];	/* Buffered data goes here. */
+	char buffer[BUFFER_SIZE]; /* Buffered data goes here. */
 } Buffer_t;
 
 static char *progname;
@@ -173,19 +174,19 @@ static int bidir = 0;
 static char *bindaddr = 0;
 static int log_to_stdout = 0;
 
-
 /* Helper function: convert a struct sockaddr address (IPv4 and IPv6) to a string */
 char *get_ip_str(const struct sockaddr *sa, char *s, size_t maxlen)
 {
-	switch(sa->sa_family) {
-		case AF_INET:
-			inet_ntop(AF_INET, &(((struct sockaddr_in *)sa)->sin_addr), s, maxlen);
-			break;
-		case AF_INET6:
-			inet_ntop(AF_INET6, &(((struct sockaddr_in6 *)sa)->sin6_addr), s, maxlen);
-			break;
-		default:
-			strncpy(s, "Unknown AF", maxlen);
+	switch (sa->sa_family)
+	{
+	case AF_INET:
+		inet_ntop(AF_INET, &(((struct sockaddr_in *)sa)->sin_addr), s, maxlen);
+		break;
+	case AF_INET6:
+		inet_ntop(AF_INET6, &(((struct sockaddr_in6 *)sa)->sin6_addr), s, maxlen);
+		break;
+	default:
+		strncpy(s, "Unknown AF", maxlen);
 		return NULL;
 	}
 	return s;
@@ -194,15 +195,16 @@ char *get_ip_str(const struct sockaddr *sa, char *s, size_t maxlen)
 uint16_t get_port(const struct sockaddr *sa)
 {
 	uint16_t port;
-	switch(sa->sa_family) {
-		case AF_INET:
-			port = ntohs(((struct sockaddr_in *)sa)->sin_port);
-			break;
-		case AF_INET6:
-			port = ntohs(((struct sockaddr_in6 *)sa)->sin6_port);
-			break;
-		default:
-			return 0;
+	switch (sa->sa_family)
+	{
+	case AF_INET:
+		port = ntohs(((struct sockaddr_in *)sa)->sin_port);
+		break;
+	case AF_INET6:
+		port = ntohs(((struct sockaddr_in6 *)sa)->sin6_port);
+		break;
+	default:
+		return 0;
 	}
 	return port;
 }
@@ -219,7 +221,7 @@ void show_version(void)
 	fprintf(stdout, "%s %s\n", progname, version);
 }
 
-void dolog(int level, char* msg, ...)
+void dolog(int level, char *msg, ...)
 {
 	va_list argp;
 	va_start(argp, msg);
@@ -227,7 +229,7 @@ void dolog(int level, char* msg, ...)
 		vfprintf(stdout, msg, argp);
 	else if (level != LOG_DEBUG)
 		vsyslog(level, msg, argp);
-	va_end(argp);	
+	va_end(argp);
 }
 
 int open_printer(int lpnumber)
@@ -235,14 +237,15 @@ int open_printer(int lpnumber)
 	int lp;
 	char lpname[sizeof(PRINTERFILE)];
 
-#ifdef	TESTING
+#ifdef TESTING
 	(void)snprintf(lpname, sizeof(lpname), "/dev/tty");
 #else
 	(void)snprintf(lpname, sizeof(lpname), PRINTERFILE, lpnumber);
 #endif
 	if (device == 0)
 		device = lpname;
-	if ((lp = open(device, bidir ? (O_RDWR|O_NONBLOCK) : O_WRONLY)) == -1) {
+	if ((lp = open(device, bidir ? (O_RDWR | O_NONBLOCK) : O_WRONLY)) == -1)
+	{
 		if (errno != EBUSY)
 			dolog(LOGOPTS, "%s: %m\n", device);
 		dolog(LOGOPTS, "%s: %m, will try opening later\n", device);
@@ -256,14 +259,16 @@ int get_lock(int lpnumber)
 	struct flock lplock;
 
 	(void)snprintf(lockname, sizeof(lockname), LOCKFILE, lpnumber);
-	if ((lockfd = open(lockname, O_CREAT | O_RDWR, 0666)) < 0) {
+	if ((lockfd = open(lockname, O_CREAT | O_RDWR, 0666)) < 0)
+	{
 		dolog(LOGOPTS, "%s: %m\n", lockname);
 		return (0);
 	}
 	memset(&lplock, 0, sizeof(lplock));
 	lplock.l_type = F_WRLCK;
 	lplock.l_pid = getpid();
-	if (fcntl(lockfd, F_SETLKW, &lplock) < 0) {
+	if (fcntl(lockfd, F_SETLKW, &lplock) < 0)
+	{
 		dolog(LOGOPTS, "%s: %m\n", lockname);
 		return (0);
 	}
@@ -277,7 +282,7 @@ void free_lock(void)
 }
 
 /* Initializes the buffer, at the start. */
-void initBuffer(Buffer_t * b, int infd, int outfd, int detectEof)
+void initBuffer(Buffer_t *b, int infd, int outfd, int detectEof)
 {
 	b->detectEof = detectEof;
 	b->infd = infd;
@@ -293,55 +298,71 @@ void initBuffer(Buffer_t * b, int infd, int outfd, int detectEof)
 }
 
 /* Sets the readfds and writefds (used by select) based on current buffer state. */
-void prepBuffer(Buffer_t * b, fd_set * readfds, fd_set * writefds)
+void prepBuffer(Buffer_t *b, fd_set *readfds, fd_set *writefds)
 {
-	if (b->outfd>=0 && (!(b->err & WRITE_ERR)) && (b->bytes != 0 || b->eof_read)) {
+	if (b->outfd >= 0 && (!(b->err & WRITE_ERR)) && (b->bytes != 0 || b->eof_read))
+	{
 		FD_SET(b->outfd, writefds);
 	}
-	if (b->infd>=0 && !b->eof_read && b->bytes < sizeof(b->buffer)) {
+	if (b->infd >= 0 && !b->eof_read && b->bytes < sizeof(b->buffer))
+	{
 		FD_SET(b->infd, readfds);
 	}
 }
 
 /* Reads data into a buffer from its input file. */
-ssize_t readBuffer(Buffer_t * b)
+ssize_t readBuffer(Buffer_t *b)
 {
 	int avail;
 	ssize_t result = 0;
 	/* If err, the data will not be written, so no need to store it. */
-	if (b->bytes == 0 || b->err) {
+	if (b->bytes == 0 || b->err)
+	{
 		/* The buffer is empty. */
 		b->startidx = b->endidx = 0;
 		avail = sizeof(b->buffer);
-	} else if (b->bytes == sizeof(b->buffer)) {
+	}
+	else if (b->bytes == sizeof(b->buffer))
+	{
 		/* The buffer is full. */
 		avail = 0;
-	} else if (b->endidx > b->startidx) {
+	}
+	else if (b->endidx > b->startidx)
+	{
 		/* The buffer is not wrapped: from endidx to end of buffer is free. */
 		avail = sizeof(b->buffer) - b->endidx;
-	} else {
+	}
+	else
+	{
 		/* The buffer is wrapped: gap between endidx and startidx is free. */
 		avail = b->startidx - b->endidx;
 	}
-	if (avail) {
+	if (avail)
+	{
 		result = read(b->infd, b->buffer + b->endidx, avail);
-		if (result > 0) {
+		if (result > 0)
+		{
 			/* Some data was read. Update accordingly. */
 			b->endidx += result;
 			b->totalin += result;
 			b->bytes += result;
-			if (b->endidx == sizeof(b->buffer)) {
+			if (b->endidx == sizeof(b->buffer))
+			{
 				/* Time to wrap the buffer. */
 				b->endidx = 0;
 			}
-		} else if (result < 0) {
+		}
+		else if (result < 0)
+		{
 			dolog(LOGOPTS, "read: %m\n");
 			b->err |= READ_ERR;
 		}
-		else if (b->detectEof) {
+		else if (b->detectEof)
+		{
 			dolog(LOG_DEBUG, "read: eof\n");
 			b->eof_read = 1;
-		} else
+		}
+		else
 			result = 0; // in case there is still data in the buffer, ignore the error by now
 	}
 	/* Return the value returned by read(), which is -1 (error), or #bytes read. */
@@ -349,42 +370,51 @@ ssize_t readBuffer(Buffer_t * b)
 }
 
 /* Writes data from a buffer to the output file or discard if no output file is set. */
-ssize_t writeBuffer(Buffer_t * b)
+ssize_t writeBuffer(Buffer_t *b)
 {
 	int avail;
 	ssize_t result = 0;
-	if (b->bytes == 0 || (b->err & WRITE_ERR)) {
+	if (b->bytes == 0 || (b->err & WRITE_ERR))
+	{
 		/* Buffer is empty. */
 		avail = 0;
-	} else {
+	}
+	else
+	{
 		avail = b->bytes;
 	}
-	if (avail) {
-		if (b->outfd>=0)
+	if (avail)
+	{
+		if (b->outfd >= 0)
 			result = write(b->outfd, b->buffer + b->startidx, avail);
 		else
 			result = avail;
-		if (result < 0) {
+		if (result < 0)
+		{
 			/* Mark the output file in an error condition. */
 			dolog(LOGOPTS, "write: %m\n");
 			b->err |= WRITE_ERR;
-		} else {
+		}
+		else
+		{
 			/* Zero or more bytes were written. */
 			b->startidx += result;
-			if (b->outfd>=0)
+			if (b->outfd >= 0)
 				b->totalout += result;
 			b->bytes -= result;
-			if (b->startidx == sizeof(b->buffer)) {
+			if (b->startidx == sizeof(b->buffer))
+			{
 				/* Unwrap the buffer. */
 				b->startidx = 0;
 			}
 		}
 	}
-	else if (b->eof_read) {
+	else if (b->eof_read)
+	{
 		b->eof_sent = 1;
 		dolog(LOG_DEBUG, "write: eof\n");
 	}
-	
+
 	/* Return the write() result, -1 (error) or #bytes written. */
 	return result;
 }
@@ -398,7 +428,8 @@ int copy_stream(int fd, int lp)
 	Buffer_t networkToPrinterBuffer;
 	initBuffer(&networkToPrinterBuffer, fd, lp, 1);
 
-	if (bidir) {
+	if (bidir)
+	{
 		struct timeval now;
 		struct timeval then;
 		struct timeval timeout;
@@ -411,14 +442,16 @@ int copy_stream(int fd, int lp)
 		gettimeofday(&last_read_time, 0);
 		/* Finish when network sent EOF. */
 		/* Although the printer to network stream may not be finished (does this matter?) */
-		while (!networkToPrinterBuffer.eof_sent && !(networkToPrinterBuffer.err & WRITE_ERR) && !(printerToNetworkBuffer.err & WRITE_ERR)) {
+		while (!networkToPrinterBuffer.eof_sent && !(networkToPrinterBuffer.err & WRITE_ERR) && !(printerToNetworkBuffer.err & WRITE_ERR))
+		{
 			FD_ZERO(&readfds);
 			FD_ZERO(&writefds);
 			prepBuffer(&networkToPrinterBuffer, &readfds, &writefds);
 			prepBuffer(&printerToNetworkBuffer, &readfds, &writefds);
 
 			int maxfd = lp > fd ? lp : fd;
-			if (timer) {
+			if (timer)
+			{
 				/* Delay after reading from the printer, so the */
 				/* return stream cannot dominate. */
 				/* Don't read from the printer until the timer expires. */
@@ -434,40 +467,50 @@ int copy_stream(int fd, int lp)
 			result = select(maxfd + 1, &readfds, &writefds, 0, &timeout);
 			if (result < 0)
 				return (result);
-			if (FD_ISSET(fd, &readfds)) {
+			if (FD_ISSET(fd, &readfds))
+			{
 				/* Read network data. */
 				result = readBuffer(&networkToPrinterBuffer);
-				if (result > 0) {
-					dolog(LOG_DEBUG,"%d.%d: read %d bytes from network\n", (int)now.tv_sec, (int)now.tv_usec, result);
+				if (result > 0)
+				{
+					dolog(LOG_DEBUG, "%d.%d: read %d bytes from network\n", (int)now.tv_sec, (int)now.tv_usec, result);
 					gettimeofday(&last_read_time, 0);
 				}
 			}
-			if (now.tv_sec - last_read_time.tv_sec >= 30) {
-				dolog(LOG_NOTICE,"read no data from network for 30s, stop copy stream\n");
+			if (now.tv_sec - last_read_time.tv_sec >= 30)
+			{
+				dolog(LOG_NOTICE, "read no data from network for 30s, stop copy stream\n");
 				break;
 			}
-			if (FD_ISSET(lp, &readfds)) {
+			if (FD_ISSET(lp, &readfds))
+			{
 				/* Read printer data, but pace it more slowly. */
 				result = readBuffer(&printerToNetworkBuffer);
-				if (result > 0) {
-					dolog(LOG_DEBUG,"%d.%d: read %d bytes from printer\n", (int)now.tv_sec, (int)now.tv_usec, result);
+				if (result > 0)
+				{
+					dolog(LOG_DEBUG, "%d.%d: read %d bytes from printer\n", (int)now.tv_sec, (int)now.tv_usec, result);
 					gettimeofday(&then, 0);
 					// wait 100 msec before reading again.
 					then.tv_usec += 100000;
-					if (then.tv_usec > 1000000) {
+					if (then.tv_usec > 1000000)
+					{
 						then.tv_usec -= 1000000;
 						then.tv_sec++;
 					}
-					if (!need_clear_lp) {
+					if (!need_clear_lp)
+					{
 						timer = 1;
 					}
 				}
 			}
-			if (FD_ISSET(lp, &writefds)) {
+			if (FD_ISSET(lp, &writefds))
+			{
 				/* Write data to printer. */
 				result = writeBuffer(&networkToPrinterBuffer);
-				if (result > 0) {
-					if (need_clear_lp) {
+				if (result > 0)
+				{
+					if (need_clear_lp)
+					{
 						need_clear_lp = 0;
 						printerToNetworkBuffer.startidx = 0;
 						printerToNetworkBuffer.endidx = 0;
@@ -475,11 +518,13 @@ int copy_stream(int fd, int lp)
 						printerToNetworkBuffer.totalin = 0;
 						printerToNetworkBuffer.totalout = 0;
 					}
-					dolog(LOG_DEBUG,"%d.%d: wrote %d bytes to printer\n", (int)now.tv_sec, (int)now.tv_usec, result);
+					dolog(LOG_DEBUG, "%d.%d: wrote %d bytes to printer\n", (int)now.tv_sec, (int)now.tv_usec, result);
 				}
 			}
-			if (FD_ISSET(fd, &writefds) || printerToNetworkBuffer.outfd == -1) {
-				if (need_clear_lp) {
+			if (FD_ISSET(fd, &writefds) || printerToNetworkBuffer.outfd == -1)
+			{
+				if (need_clear_lp)
+				{
 					printerToNetworkBuffer.startidx = 0;
 					printerToNetworkBuffer.endidx = 0;
 					printerToNetworkBuffer.bytes = 0;
@@ -490,41 +535,47 @@ int copy_stream(int fd, int lp)
 				/* Write data to network. */
 				result = writeBuffer(&printerToNetworkBuffer);
 				/* If socket write error, discard further data from printer */
-				if (result < 0) {
+				if (result < 0)
+				{
 					printerToNetworkBuffer.outfd = -1;
 					printerToNetworkBuffer.err = 0;
 					result = 0;
-					dolog(LOG_DEBUG,"network write error, discarding further printer data\n",result);
+					dolog(LOG_DEBUG, "network write error, discarding further printer data\n", result);
 					break;
 				}
-				else if (result > 0) {
+				else if (result > 0)
+				{
 					if (printerToNetworkBuffer.outfd == -1)
-						dolog(LOG_DEBUG,"discarded %d bytes from printer\n",result);				
+						dolog(LOG_DEBUG, "discarded %d bytes from printer\n", result);
 					else
-						dolog(LOG_DEBUG,"%d.%d: wrote %d bytes to network\n", (int)now.tv_sec, (int)now.tv_usec, result);
+						dolog(LOG_DEBUG, "%d.%d: wrote %d bytes to network\n", (int)now.tv_sec, (int)now.tv_usec, result);
 				}
 			}
-			if ((networkToPrinterBuffer.err & READ_ERR) && now.tv_sec - last_read_time.tv_sec >= 10) {
-				dolog(LOG_NOTICE,"read no data from network err, stop copy stream in 10s\n");
+			if ((networkToPrinterBuffer.err & READ_ERR) && now.tv_sec - last_read_time.tv_sec >= 10)
+			{
+				dolog(LOG_NOTICE, "read no data from network err, stop copy stream in 10s\n");
 				break;
 			}
 		}
 		dolog(LOG_NOTICE,
-		       "Finished job: %d/%d bytes sent to printer, %d/%d bytes sent to network\n",
-		       networkToPrinterBuffer.totalout,networkToPrinterBuffer.totalin, printerToNetworkBuffer.totalout, printerToNetworkBuffer.totalin);
-	} else {
+			  "Finished job: %d/%d bytes sent to printer, %d/%d bytes sent to network\n",
+			  networkToPrinterBuffer.totalout, networkToPrinterBuffer.totalin, printerToNetworkBuffer.totalout, printerToNetworkBuffer.totalin);
+	}
+	else
+	{
 		/* Unidirectional: simply read from network, and write to printer. */
-		while (!networkToPrinterBuffer.eof_sent && !networkToPrinterBuffer.err) {
+		while (!networkToPrinterBuffer.eof_sent && !networkToPrinterBuffer.err)
+		{
 			result = readBuffer(&networkToPrinterBuffer);
 			if (result > 0)
-				dolog(LOG_DEBUG,"read %d bytes from network\n",result);
+				dolog(LOG_DEBUG, "read %d bytes from network\n", result);
 			result = writeBuffer(&networkToPrinterBuffer);
 			if (result > 0)
-				dolog(LOG_DEBUG,"wrote %d bytes to printer\n",result);
+				dolog(LOG_DEBUG, "wrote %d bytes to printer\n", result);
 		}
 		dolog(LOG_NOTICE, "Finished job: %d/%d bytes sent to printer\n", networkToPrinterBuffer.totalout, networkToPrinterBuffer.totalin);
 	}
-	return (networkToPrinterBuffer.err?-1:0);
+	return (networkToPrinterBuffer.err ? -1 : 0);
 }
 
 void one_job(int lpnumber)
@@ -533,7 +584,8 @@ void one_job(int lpnumber)
 	struct sockaddr_storage client;
 	socklen_t clientlen = sizeof(client);
 
-	if (getpeername(0, (struct sockaddr *)&client, &clientlen) >= 0) {
+	if (getpeername(0, (struct sockaddr *)&client, &clientlen) >= 0)
+	{
 		char host[INET6_ADDRSTRLEN];
 		dolog(LOG_NOTICE, "Connection from %s port %hu\n", get_ip_str((struct sockaddr *)&client, host, sizeof(host)), get_port((struct sockaddr *)&client));
 	}
@@ -551,7 +603,7 @@ void one_job(int lpnumber)
 void server(int lpnumber)
 {
 	struct rlimit resourcelimit;
-#ifdef	USE_GETPROTOBYNAME
+#ifdef USE_GETPROTOBYNAME
 	struct protoent *proto;
 #endif
 	int netfd = -1, fd, lp, one = 1;
@@ -559,41 +611,45 @@ void server(int lpnumber)
 	struct sockaddr_storage client;
 	struct addrinfo hints, *res, *ressave;
 	char pidfilename[sizeof(PIDFILE)];
-	char service[sizeof(BASEPORT+lpnumber-'0')+1];
+	char service[sizeof(BASEPORT + lpnumber - '0') + 1];
 	FILE *f;
 	const int bufsiz = 65536;
 
-#ifndef	TESTING
+#ifndef TESTING
 	if (!log_to_stdout)
 	{
-		switch (fork()) {
+		switch (fork())
+		{
 		case -1:
 			dolog(LOGOPTS, "fork: %m\n");
 			exit(1);
-		case 0:		/* child */
+		case 0: /* child */
 			break;
-		default:		/* parent */
+		default: /* parent */
 			exit(0);
 		}
 		/* Now in child process */
 		resourcelimit.rlim_max = 0;
-		if (getrlimit(RLIMIT_NOFILE, &resourcelimit) < 0) {
+		if (getrlimit(RLIMIT_NOFILE, &resourcelimit) < 0)
+		{
 			dolog(LOGOPTS, "getrlimit: %m\n");
 			exit(1);
 		}
 		for (fd = 0; fd < resourcelimit.rlim_max; ++fd)
 			(void)close(fd);
-		if (setsid() < 0) {
+		if (setsid() < 0)
+		{
 			dolog(LOGOPTS, "setsid: %m\n");
 			exit(1);
 		}
 		(void)chdir("/");
 		(void)umask(022);
-		fd = open("/dev/null", O_RDWR);	/* stdin */
-		(void)dup(fd);		/* stdout */
-		(void)dup(fd);		/* stderr */
+		fd = open("/dev/null", O_RDWR); /* stdin */
+		(void)dup(fd);					/* stdout */
+		(void)dup(fd);					/* stderr */
 		(void)snprintf(pidfilename, sizeof(pidfilename), PIDFILE, lpnumber);
-		if ((f = fopen(pidfilename, "w")) == NULL) {
+		if ((f = fopen(pidfilename, "w")) == NULL)
+		{
 			dolog(LOGOPTS, "%s: %m\n", pidfilename);
 			exit(1);
 		}
@@ -608,15 +664,19 @@ void server(int lpnumber)
 	hints.ai_flags = AI_PASSIVE;
 	hints.ai_socktype = SOCK_STREAM;
 	(void)snprintf(service, sizeof(service), "%hu", (BASEPORT + lpnumber - '0'));
-	if (getaddrinfo(bindaddr, service, &hints, &res) != 0) {
+	if (getaddrinfo(bindaddr, service, &hints, &res) != 0)
+	{
 		dolog(LOGOPTS, "getaddr: %m\n");
 		exit(1);
 	}
 	ressave = res;
-	while (res) {
-#ifdef	USE_GETPROTOBYNAME
-		if ((proto = getprotobyname("tcp6")) == NULL) {
-			if ((proto = getprotobyname("tcp")) == NULL) {
+	while (res)
+	{
+#ifdef USE_GETPROTOBYNAME
+		if ((proto = getprotobyname("tcp6")) == NULL)
+		{
+			if ((proto = getprotobyname("tcp")) == NULL)
+			{
 				dolog(LOGOPTS, "Cannot find protocol for TCP!\n");
 				exit(1);
 			}
@@ -631,27 +691,32 @@ void server(int lpnumber)
 			res = res->ai_next;
 			continue;
 		}
-		if (setsockopt(netfd, SOL_SOCKET, SO_RCVBUF, &bufsiz, sizeof(bufsiz)) < 0) {
+		if (setsockopt(netfd, SOL_SOCKET, SO_RCVBUF, &bufsiz, sizeof(bufsiz)) < 0)
+		{
 			dolog(LOGOPTS, "setsocketopt: SO_RCVBUF: %m\n");
 			/* not fatal if it fails */
 		}
-		if (setsockopt(netfd, SOL_SOCKET, SO_SNDBUF, &bufsiz, sizeof(bufsiz)) < 0) {
+		if (setsockopt(netfd, SOL_SOCKET, SO_SNDBUF, &bufsiz, sizeof(bufsiz)) < 0)
+		{
 			dolog(LOGOPTS, "setsocketopt: SO_SNDBUF: %m\n");
 			/* not fatal if it fails */
 		}
-		if (setsockopt(netfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) < 0) {
+		if (setsockopt(netfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) < 0)
+		{
 			dolog(LOGOPTS, "setsocketopt: SO_REUSEADDR: %m\n");
 			close(netfd);
 			res = res->ai_next;
 			continue;
 		}
-		if (bind(netfd, res->ai_addr, res->ai_addrlen) < 0) {
+		if (bind(netfd, res->ai_addr, res->ai_addrlen) < 0)
+		{
 			dolog(LOGOPTS, "bind: %m\n");
 			close(netfd);
 			res = res->ai_next;
 			continue;
 		}
-		if (listen(netfd, 30) < 0) {
+		if (listen(netfd, 30) < 0)
+		{
 			dolog(LOGOPTS, "listen: %m\n");
 			close(netfd);
 			res = res->ai_next;
@@ -662,12 +727,14 @@ void server(int lpnumber)
 	freeaddrinfo(ressave);
 	clientlen = sizeof(client);
 	memset(&client, 0, sizeof(client));
-	while ((fd = accept(netfd, (struct sockaddr *)&client, &clientlen)) >= 0) {
+	while ((fd = accept(netfd, (struct sockaddr *)&client, &clientlen)) >= 0)
+	{
 		char host[INET6_ADDRSTRLEN];
-#ifdef	USE_LIBWRAP
-		if (hosts_ctl("p910nd", STRING_UNKNOWN, get_ip_str((struct sockaddr *)&client, host, sizeof(host)), STRING_UNKNOWN) == 0) {
+#ifdef USE_LIBWRAP
+		if (hosts_ctl("p910nd", STRING_UNKNOWN, get_ip_str((struct sockaddr *)&client, host, sizeof(host)), STRING_UNKNOWN) == 0)
+		{
 			dolog(LOGOPTS,
-			       "Connection from %s port %hu rejected\n", get_ip_str((struct sockaddr *)&client, host, sizeof(host)), get_port((struct sockaddr *)&client));
+				  "Connection from %s port %hu rejected\n", get_ip_str((struct sockaddr *)&client, host, sizeof(host)), get_port((struct sockaddr *)&client));
 			close(fd);
 			continue;
 		}
@@ -703,8 +770,8 @@ int is_standalone(void)
 	 */
 	ba_len = sizeof(bind_addr);
 	if (getsockname(0, (struct sockaddr *)&bind_addr, &ba_len) == 0)
-		return (0);	/* under (x)inetd */
-	if (errno != ENOTSOCK)	/* strange... */
+		return (0);		   /* under (x)inetd */
+	if (errno != ENOTSOCK) /* strange... */
 		dolog(LOGOPTS, "getsockname: %m\n");
 	return (1);
 }
@@ -714,16 +781,19 @@ int main(int argc, char *argv[])
 	int c, lpnumber;
 	char *p;
 
-	if (argc <= 0)		/* in case not provided in (x)inetd config */
+	if (argc <= 0) /* in case not provided in (x)inetd config */
 		progname = "p910nd";
-	else {
+	else
+	{
 		progname = argv[0];
 		if ((p = strrchr(progname, '/')) != 0)
 			progname = p + 1;
 	}
 	lpnumber = '0';
-	while ((c = getopt(argc, argv, "bdi:f:v")) != EOF) {
-		switch (c) {
+	while ((c = getopt(argc, argv, "bdi:f:v")) != EOF)
+	{
+		switch (c)
+		{
 		case 'b':
 			bidir = 1;
 			break;
@@ -746,7 +816,8 @@ int main(int argc, char *argv[])
 	}
 	argc -= optind;
 	argv += optind;
-	if (argc > 0) {
+	if (argc > 0)
+	{
 		if (isdigit(argv[0][0]))
 			lpnumber = argv[0][0];
 	}
