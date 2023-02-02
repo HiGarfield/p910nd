@@ -473,7 +473,8 @@ int copy_stream(int fd, int lp)
 				result = readBuffer(&networkToPrinterBuffer);
 				if (result > 0)
 				{
-					dolog(LOG_DEBUG, "%d.%d: read %d bytes from network\n", (int)now.tv_sec, (int)now.tv_usec, result);
+					dolog(LOG_DEBUG, "%.2f: read %d bytes from network\n",
+						  now.tv_sec + now.tv_usec / 1e6, result);
 					gettimeofday(&last_read_time, 0);
 				}
 			}
@@ -488,7 +489,8 @@ int copy_stream(int fd, int lp)
 				result = readBuffer(&printerToNetworkBuffer);
 				if (result > 0)
 				{
-					dolog(LOG_DEBUG, "%d.%d: read %d bytes from printer\n", (int)now.tv_sec, (int)now.tv_usec, result);
+					dolog(LOG_DEBUG, "%.2f: read %d bytes from printer\n",
+						  now.tv_sec + now.tv_usec / 1e6, result);
 					gettimeofday(&then, 0);
 					// wait 100 msec before reading again.
 					then.tv_usec += 100000;
@@ -518,7 +520,8 @@ int copy_stream(int fd, int lp)
 						printerToNetworkBuffer.totalin = 0;
 						printerToNetworkBuffer.totalout = 0;
 					}
-					dolog(LOG_DEBUG, "%d.%d: wrote %d bytes to printer\n", (int)now.tv_sec, (int)now.tv_usec, result);
+					dolog(LOG_DEBUG, "%.2f: wrote %d bytes to printer\n",
+						  now.tv_sec + now.tv_usec / 1e6, result);
 				}
 			}
 			if (FD_ISSET(fd, &writefds) || printerToNetworkBuffer.outfd == -1)
@@ -548,7 +551,8 @@ int copy_stream(int fd, int lp)
 					if (printerToNetworkBuffer.outfd == -1)
 						dolog(LOG_DEBUG, "discarded %d bytes from printer\n", result);
 					else
-						dolog(LOG_DEBUG, "%d.%d: wrote %d bytes to network\n", (int)now.tv_sec, (int)now.tv_usec, result);
+						dolog(LOG_DEBUG, "%.2f: wrote %d bytes to network\n",
+							  now.tv_sec + now.tv_usec / 1e6, result);
 				}
 			}
 			if ((networkToPrinterBuffer.err & READ_ERR) && now.tv_sec - last_read_time.tv_sec >= 10)
