@@ -287,17 +287,10 @@ void free_lock(void)
 /* Initializes the buffer, at the start. */
 void initBuffer(Buffer_t *b, int infd, int outfd, int detectEof)
 {
+	memset(b, 0, sizeof(*b));
 	b->detectEof = detectEof;
 	b->infd = infd;
 	b->outfd = outfd;
-	b->startidx = 0;
-	b->endidx = 0;
-	b->bytes = 0;
-	b->totalin = 0;
-	b->totalout = 0;
-	b->eof_read = 0;
-	b->eof_sent = 0;
-	b->err = 0;
 }
 
 /* Sets the readfds and writefds (used by select) based on current buffer state. */
