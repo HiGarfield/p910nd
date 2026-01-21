@@ -583,6 +583,9 @@ int copy_stream(int fd, int lp)
 		}
 		dolog(LOG_NOTICE, "Finished job: %d/%d bytes sent to printer\n", networkToPrinterBuffer.totalout, networkToPrinterBuffer.totalin);
 	}
+	/* Add a short delay to allow flushing */
+	if (networkToPrinterBuffer.eof_sent)
+		usleep(200000); /* 200ms */
 	return (networkToPrinterBuffer.err ? -1 : 0);
 }
 
