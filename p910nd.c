@@ -465,7 +465,11 @@ int copy_stream(int fd, int lp)
 			timeout.tv_usec = 100000;
 			result = select(maxfd + 1, &readfds, &writefds, 0, &timeout);
 			if (result < 0)
+			{
+				if (errno == EINTR)
+					continue;
 				return (result);
+			}
 			if (FD_ISSET(fd, &readfds))
 			{
 				/* Read network data. */
