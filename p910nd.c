@@ -625,6 +625,7 @@ void server(int lpnumber)
 	char service[8];
 	FILE *f;
 	const int bufsiz = 65536;
+	int gai_err;
 
 #ifndef TESTING
 	if (!log_to_stdout)
@@ -675,9 +676,10 @@ void server(int lpnumber)
 	hints.ai_flags = AI_PASSIVE;
 	hints.ai_socktype = SOCK_STREAM;
 	(void)snprintf(service, sizeof(service), "%hu", (BASEPORT + lpnumber - '0'));
-	if (getaddrinfo(bindaddr, service, &hints, &res) != 0)
+	gai_err = getaddrinfo(bindaddr, service, &hints, &res);
+	if (gai_err != 0)
 	{
-		dolog(LOGOPTS, "getaddr: %m\n");
+		dolog(LOGOPTS, "getaddrinfo: %s\n", gai_strerror(gai_err));
 		exit(1);
 	}
 	ressave = res;
