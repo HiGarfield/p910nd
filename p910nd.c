@@ -365,8 +365,6 @@ ssize_t readBuffer(Buffer_t *b)
 			dolog(LOG_DEBUG, "read: eof\n");
 			b->eof_read = 1;
 		}
-		else
-			result = 0; // in case there is still data in the buffer, ignore the error by now
 	}
 	/* Return the value returned by read(), which is -1 (error), or #bytes read. */
 	return result;
