@@ -736,11 +736,14 @@ void server(int lpnumber)
 		break;
 	}
 	freeaddrinfo(ressave);
-	clientlen = sizeof(client);
 	memset(&client, 0, sizeof(client));
-	while ((fd = accept(netfd, (struct sockaddr *)&client, &clientlen)) >= 0)
+	while (1)
 	{
 		char host[INET6_ADDRSTRLEN];
+		clientlen = sizeof(client);
+		fd = accept(netfd, (struct sockaddr *)&client, &clientlen);
+		if (fd < 0)
+			break;
 #ifdef USE_LIBWRAP
 		if (hosts_ctl("p910nd", STRING_UNKNOWN, get_ip_str((struct sockaddr *)&client, host, sizeof(host)), STRING_UNKNOWN) == 0)
 		{
