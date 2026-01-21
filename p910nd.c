@@ -235,7 +235,7 @@ void dolog(int level, char *msg, ...)
 int open_printer(int lpnumber)
 {
 	int lp;
-	char lpname[sizeof(PRINTERFILE)];
+	static char lpname[sizeof(PRINTERFILE)];
 
 #ifdef TESTING
 	(void)snprintf(lpname, sizeof(lpname), "/dev/tty");
