@@ -679,6 +679,11 @@ void server(int lpnumber)
 	hints.ai_family = PF_UNSPEC;
 	hints.ai_flags = AI_PASSIVE;
 	hints.ai_socktype = SOCK_STREAM;
+	if (lpnumber < '0' || lpnumber > '9')
+	{
+		dolog(LOGOPTS, "invalid lpnumber '%c', defaulting to 0\n", lpnumber);
+		exit(1);
+	}
 	(void)snprintf(service, sizeof(service), "%hu", (BASEPORT + lpnumber - '0'));
 	gai_err = getaddrinfo(bindaddr, service, &hints, &res);
 	if (gai_err != 0)
