@@ -741,6 +741,7 @@ void server(int lpnumber)
 	while ((fd = accept(netfd, (struct sockaddr *)&client, &clientlen)) >= 0)
 	{
 		char host[INET6_ADDRSTRLEN];
+		clientlen = sizeof(client);
 #ifdef USE_LIBWRAP
 		if (hosts_ctl("p910nd", STRING_UNKNOWN, get_ip_str((struct sockaddr *)&client, host, sizeof(host)), STRING_UNKNOWN) == 0)
 		{
