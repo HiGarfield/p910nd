@@ -452,7 +452,13 @@ int copy_stream(int fd, int lp)
 			prepBuffer(&networkToPrinterBuffer, &readfds, &writefds);
 			prepBuffer(&printerToNetworkBuffer, &readfds, &writefds);
 
-			int maxfd = lp > fd ? lp : fd;
+			int maxfd = fd;
+			if (lp > maxfd)
+				maxfd = lp;
+			if (networkToPrinterBuffer.infd > maxfd)
+				maxfd = networkToPrinterBuffer.infd;
+			if (printerToNetworkBuffer.infd > maxfd)
+				maxfd = printerToNetworkBuffer.infd;
 			if (timer)
 			{
 				/* Delay after reading from the printer, so the */
