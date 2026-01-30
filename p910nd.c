@@ -364,7 +364,11 @@ ssize_t readBuffer(Buffer_t *b)
 		}
 		else if (result < 0)
 		{
-			dolog(LOGOPTS, "read: %m\n");
+			if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+			{
+				return 0;
+			}
+			dolog(LOGOPTS, "read error: %m\n");
 			b->err |= READ_ERR;
 		}
 		else if (b->detectEof)
