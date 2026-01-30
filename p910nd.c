@@ -312,11 +312,16 @@ ssize_t readBuffer(Buffer_t *b)
 	int avail;
 	ssize_t result = 0;
 	/* If err, the data will not be written, so no need to store it. */
-	if (b->bytes == 0 || b->err)
+	if (b->bytes == 0)
 	{
 		/* The buffer is empty. */
 		b->startidx = b->endidx = 0;
 		avail = sizeof(b->buffer);
+	}
+	else if (b->err)
+	{
+		/* Do not overwrite buffered data after error */
+		return -1;
 	}
 	else if (b->bytes == sizeof(b->buffer))
 	{
