@@ -122,6 +122,7 @@
 #include <syslog.h>
 #include <errno.h>
 #include <stdarg.h>
+#include <sys/param.h>
 #include <sys/types.h>
 #include <sys/time.h>
 #include <sys/resource.h>
@@ -129,6 +130,10 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+
+#ifndef MAX
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#endif
 
 #ifdef USE_LIBWRAP
 #include "tcpd.h"
@@ -456,12 +461,12 @@ int copy_stream(int fd, int lp)
 			prepBuffer(&printerToNetworkBuffer, &readfds, &writefds);
 
 			int maxfd = fd;
-			if (lp > maxfd)
-				maxfd = lp;
-			if (networkToPrinterBuffer.infd > maxfd)
-				maxfd = networkToPrinterBuffer.infd;
-			if (printerToNetworkBuffer.infd > maxfd)
-				maxfd = printerToNetworkBuffer.infd;
+			maxfd = MAX(maxfd, lp);
+			maxfd = MAX(maxfd, networkToPrinterBuffer.infd);
+			maxfd = MAX(maxfd, networkToPrinterBuffer.outfd);
+			maxfd = MAX(maxfd, printerToNetworkBuffer.infd);
+			maxfd = MAX(maxfd, printerToNetworkBuffer.outfd);
+
 			if (timer)
 			{
 				/* Delay after reading from the printer, so the */
