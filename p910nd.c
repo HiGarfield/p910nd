@@ -450,18 +450,26 @@ int copy_stream(int fd, int lp)
 		/* Although the printer to network stream may not be finished (does this matter?) */
 		while (!networkToPrinterBuffer.eof_sent && !(networkToPrinterBuffer.err & WRITE_ERR) && !(printerToNetworkBuffer.err & WRITE_ERR))
 		{
+			int maxfd = -1;
 			FD_ZERO(&readfds);
 			FD_ZERO(&writefds);
 			prepBuffer(&networkToPrinterBuffer, &readfds, &writefds);
 			prepBuffer(&printerToNetworkBuffer, &readfds, &writefds);
 
-			int maxfd = fd;
-			if (lp > maxfd)
-				maxfd = lp;
-			if (networkToPrinterBuffer.infd > maxfd)
-				maxfd = networkToPrinterBuffer.infd;
-			if (printerToNetworkBuffer.infd > maxfd)
-				maxfd = printerToNetworkBuffer.infd;
+#define UPDATE_MAXFD(x)              \
+	do                               \
+	{                                \
+		if ((x) >= 0 && (x) > maxfd) \
+			maxfd = (x);             \
+	} while (0)
+
+			UPDATE_MAXFD(fd);
+			UPDATE_MAXFD(lp);
+			UPDATE_MAXFD(networkToPrinterBuffer.infd);
+			UPDATE_MAXFD(networkToPrinterBuffer.outfd);
+			UPDATE_MAXFD(printerToNetworkBuffer.infd);
+			UPDATE_MAXFD(printerToNetworkBuffer.outfd);
+#undef UPDATE_MAXFD
 			if (timer)
 			{
 				/* Delay after reading from the printer, so the */
