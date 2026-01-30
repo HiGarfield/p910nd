@@ -262,7 +262,7 @@ int get_lock(int lpnumber)
 	struct flock lplock;
 
 	(void)snprintf(lockname, sizeof(lockname), LOCKFILE, lpnumber);
-	if ((lockfd = open(lockname, O_CREAT | O_RDWR, 0666)) < 0)
+	if ((lockfd = open(lockname, O_CREAT | O_RDWR, 0644)) < 0)
 	{
 		dolog(LOGOPTS, "%s: %m\n", lockname);
 		return (0);
