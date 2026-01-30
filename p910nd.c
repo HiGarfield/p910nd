@@ -714,7 +714,7 @@ void server(int lpnumber)
 		}
 		if ((netfd = socket(res->ai_family, res->ai_socktype, proto->p_proto)) < 0)
 #else
-		if ((netfd = socket(res->ai_family, res->ai_socktype, IPPROTO_IP)) < 0)
+		if ((netfd = socket(res->ai_family, res->ai_socktype, 0)) < 0)
 #endif
 		{
 			dolog(LOGOPTS, "socket: %m\n");
