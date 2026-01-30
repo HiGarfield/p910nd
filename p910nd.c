@@ -403,8 +403,11 @@ ssize_t writeBuffer(Buffer_t *b)
 			result = avail;
 		if (result < 0)
 		{
-			/* Mark the output file in an error condition. */
-			dolog(LOGOPTS, "write: %m\n");
+			if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+			{
+				return 0;
+			}
+			dolog(LOGOPTS, "write error: %m\n");
 			b->err |= WRITE_ERR;
 		}
 		else
