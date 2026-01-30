@@ -405,8 +405,11 @@ ssize_t writeBuffer(Buffer_t *b)
 	}
 	else if (b->eof_read)
 	{
-		b->eof_sent = 1;
-		dolog(LOG_DEBUG, "write: eof\n");
+		if (b->bytes == 0)
+		{
+			b->eof_sent = 1;
+			dolog(LOG_DEBUG, "write: eof\n");
+		}
 	}
 
 	/* Return the write() result, -1 (error) or #bytes written. */
