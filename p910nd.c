@@ -296,11 +296,15 @@ void initBuffer(Buffer_t *b, int infd, int outfd, int detectEof)
 /* Sets the readfds and writefds (used by select) based on current buffer state. */
 void prepBuffer(Buffer_t *b, fd_set *readfds, fd_set *writefds)
 {
-	if (b->outfd >= 0 && (!(b->err & WRITE_ERR)) && (b->bytes != 0 || b->eof_read))
+	if (b->outfd >= 0 && b->outfd < FD_SETSIZE &&
+		(!(b->err & WRITE_ERR)) &&
+		(b->bytes != 0 || b->eof_read))
 	{
 		FD_SET(b->outfd, writefds);
 	}
-	if (b->infd >= 0 && !b->eof_read && b->bytes < sizeof(b->buffer))
+	if (b->infd >= 0 && b->infd < FD_SETSIZE &&
+		!b->eof_read &&
+		b->bytes < sizeof(b->buffer))
 	{
 		FD_SET(b->infd, readfds);
 	}
