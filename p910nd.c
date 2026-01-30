@@ -477,6 +477,7 @@ int copy_stream(int fd, int lp)
 			timeout.tv_sec = 0;
 			timeout.tv_usec = 100000;
 			result = select(maxfd + 1, &readfds, &writefds, 0, &timeout);
+			gettimeofday(&now, 0);
 			if (result < 0)
 			{
 				if (errno == EINTR)
