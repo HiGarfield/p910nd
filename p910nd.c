@@ -855,6 +855,7 @@ int main(int argc, char *argv[])
 			break;
 		case 'v':
 			show_version();
+			exit(0);
 			break;
 		default:
 			usage();
