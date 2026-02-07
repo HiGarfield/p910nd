@@ -730,7 +730,6 @@ void server(int lpnumber)
 #endif
 		{
 			dolog(LOGOPTS, "socket: %m\n");
-			close(netfd);
 			res = res->ai_next;
 			continue;
 		}
