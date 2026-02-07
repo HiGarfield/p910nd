@@ -524,7 +524,7 @@ int copy_stream(int fd, int lp)
 					gettimeofday(&then, 0);
 					// wait 100 msec before reading again.
 					then.tv_usec += 100000;
-					if (then.tv_usec > 1000000)
+					if (then.tv_usec >= 1000000)
 					{
 						then.tv_usec -= 1000000;
 						then.tv_sec++;
