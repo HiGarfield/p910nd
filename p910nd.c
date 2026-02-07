@@ -776,7 +776,11 @@ void server(int lpnumber)
 		clientlen = sizeof(client);
 		fd = accept(netfd, (struct sockaddr *)&client, &clientlen);
 		if (fd < 0)
+		{
+			if (errno == EINTR)
+				continue;
 			break;
+		}
 #ifdef USE_LIBWRAP
 		if (hosts_ctl("p910nd", STRING_UNKNOWN, get_ip_str((struct sockaddr *)&client, host, sizeof(host)), STRING_UNKNOWN) == 0)
 		{
