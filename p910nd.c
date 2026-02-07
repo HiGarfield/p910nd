@@ -279,6 +279,8 @@ int get_lock(int lpnumber)
 	if (fcntl(lockfd, F_SETLKW, &lplock) < 0)
 	{
 		dolog(LOGOPTS, "%s: %m\n", lockname);
+		close(lockfd);
+		lockfd = -1;
 		return (0);
 	}
 	return (1);
