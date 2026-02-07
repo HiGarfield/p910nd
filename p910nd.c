@@ -826,6 +826,7 @@ int main(int argc, char *argv[])
 {
 	int c, lpnumber;
 	char *p;
+	char *log_ident;
 
 	if (argc <= 0) /* in case not provided in (x)inetd config */
 		progname = "p910nd";
@@ -871,12 +872,14 @@ int main(int argc, char *argv[])
 	if ((p = strstr(progname, "p910n")) != NULL)
 		p[4] = lpnumber;
 
+	log_ident = p ? p : progname;
+
 	/* We used to pass (LOG_PERROR|LOG_PID|LOG_LPR|LOG_ERR) to syslog, but
 	 * syslog ignored the LOG_PID and LOG_PERROR option.  I.e. the intention
 	 * was to add both options but the effect was to have neither.
 	 * I disagree with the intention to add PERROR.  --Stef  */
 	if (!log_to_stdout)
-		openlog(p, LOG_PID, LOG_LPR);
+		openlog(log_ident, LOG_PID, LOG_LPR);
 
 	if (log_to_stdout || is_standalone())
 		server(lpnumber);
