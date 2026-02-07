@@ -471,12 +471,20 @@ int copy_stream(int fd, int lp)
 			prepBuffer(&networkToPrinterBuffer, &readfds, &writefds);
 			prepBuffer(&printerToNetworkBuffer, &readfds, &writefds);
 
-			int maxfd = fd;
-			maxfd = MAX(maxfd, lp);
-			maxfd = MAX(maxfd, networkToPrinterBuffer.infd);
-			maxfd = MAX(maxfd, networkToPrinterBuffer.outfd);
-			maxfd = MAX(maxfd, printerToNetworkBuffer.infd);
-			maxfd = MAX(maxfd, printerToNetworkBuffer.outfd);
+			int maxfd = -1;
+#define MAYBE_MAX(x)                      \
+	do                                    \
+	{                                     \
+		if ((x) >= 0 && (x) < FD_SETSIZE) \
+			maxfd = MAX(maxfd, (x));      \
+	} while (0)
+			MAYBE_MAX(fd);
+			MAYBE_MAX(lp);
+			MAYBE_MAX(networkToPrinterBuffer.infd);
+			MAYBE_MAX(networkToPrinterBuffer.outfd);
+			MAYBE_MAX(printerToNetworkBuffer.infd);
+			MAYBE_MAX(printerToNetworkBuffer.outfd);
+#undef MAYBE_MAX
 
 			if (timer)
 			{
