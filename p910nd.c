@@ -411,7 +411,7 @@ ssize_t writeBuffer(Buffer_t *b)
 		}
 		else if ((size_t)b->startidx + avail > sizeof(b->buffer))
 		{
-			avail = sizeof(b->buffer) - b->startidx;
+			avail = sizeof(b->buffer) - (size_t)b->startidx;
 		}
 	}
 	if (avail)
