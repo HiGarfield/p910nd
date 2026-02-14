@@ -402,7 +402,14 @@ ssize_t writeBuffer(Buffer_t *b)
 		 * The remaining bytes will be sent in a subsequent write.
 		 */
 		avail = b->bytes;
-		if (b->startidx + avail > (int)sizeof(b->buffer))
+		/* Validate startidx is within bounds before performing arithmetic */
+		if (b->startidx < 0 || (size_t)b->startidx >= sizeof(b->buffer))
+		{
+			dolog(LOGOPTS, "writeBuffer: invalid startidx=%d\n", b->startidx);
+			b->err |= WRITE_ERR;
+			avail = 0;
+		}
+		else if ((size_t)b->startidx + avail > sizeof(b->buffer))
 		{
 			avail = sizeof(b->buffer) - b->startidx;
 		}
