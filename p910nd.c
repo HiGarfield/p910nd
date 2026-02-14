@@ -397,7 +397,15 @@ ssize_t writeBuffer(Buffer_t *b)
 	}
 	else
 	{
+		/*
+		 * The circular buffer may wrap, so only write a contiguous chunk.
+		 * The remaining bytes will be sent in a subsequent write.
+		 */
 		avail = b->bytes;
+		if (b->startidx + avail > (int)sizeof(b->buffer))
+		{
+			avail = sizeof(b->buffer) - b->startidx;
+		}
 	}
 	if (avail)
 	{
