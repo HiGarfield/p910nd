@@ -659,6 +659,7 @@ void one_job(int lpnumber)
 void server(int lpnumber)
 {
 	struct rlimit resourcelimit;
+	rlim_t max_close_fd;
 #ifdef USE_GETPROTOBYNAME
 	struct protoent *proto;
 #endif
@@ -692,7 +693,15 @@ void server(int lpnumber)
 			dolog(LOGOPTS, "getrlimit: %m\n");
 			exit(1);
 		}
-		for (fd = 0; fd < resourcelimit.rlim_max; ++fd)
+		max_close_fd = resourcelimit.rlim_cur;
+		if (max_close_fd == RLIM_INFINITY)
+		{
+			long open_max = sysconf(_SC_OPEN_MAX);
+			if (open_max < 0)
+				open_max = 1024;
+			max_close_fd = (rlim_t)open_max;
+		}
+		for (fd = 0; (rlim_t)fd < max_close_fd; ++fd)
 			(void)close(fd);
 		if (setsid() < 0)
 		{
