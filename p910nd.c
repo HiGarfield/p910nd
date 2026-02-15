@@ -265,6 +265,36 @@ int open_printer(int lpnumber)
 	return (lp);
 }
 
+/* Duplicate fd into the select()-safe range [0, FD_SETSIZE). */
+int dup_fd_below_fdsetsize(int fd, const char *name)
+{
+	int target;
+
+	if (FD_VALID(fd))
+		return fd;
+
+	for (target = 0; target < FD_SETSIZE; ++target)
+	{
+		if (fcntl(target, F_GETFD) == -1 && errno == EBADF)
+		{
+			if (dup2(fd, target) < 0)
+			{
+				dolog(LOGOPTS, "dup2(%s fd=%d -> fd=%d): %m\n", name, fd, target);
+				return -1;
+			}
+			dolog(LOG_DEBUG, "using duplicate %s fd=%d for select() (original=%d)\n",
+			      name, target, fd);
+			return target;
+		}
+	}
+
+	errno = EMFILE;
+	dolog(LOGOPTS,
+	      "%s fd=%d is not selectable and no free descriptor exists below %d\n",
+	      name, fd, FD_SETSIZE);
+	return -1;
+}
+
 int get_lock(int lpnumber)
 {
 	char lockname[sizeof(LOCKFILE)];
@@ -461,7 +491,12 @@ ssize_t writeBuffer(Buffer_t *b)
 /* If bidir, also copy data from printer (lp) to network (fd). */
 int copy_stream(int fd, int lp)
 {
+	int io_fd = fd;
+	int io_lp = lp;
+	int close_io_fd = 0;
+	int close_io_lp = 0;
 	int need_clear_lp = 0;
+	int rc = 0;
 	int result;
 	Buffer_t networkToPrinterBuffer;
 
@@ -469,16 +504,26 @@ int copy_stream(int fd, int lp)
 	 * Bidirectional mode relies on select()/fd_set. Descriptors beyond
 	 * FD_SETSIZE cannot be monitored safely and would make the stream stall.
 	 */
-	if (bidir && (!FD_VALID(fd) || !FD_VALID(lp)))
+	if (bidir)
 	{
-		dolog(LOGOPTS,
-		      "bidirectional mode requires file descriptors < %d (got network=%d, printer=%d)\n",
-		      FD_SETSIZE, fd, lp);
-		errno = EINVAL;
-		return (-1);
+		io_fd = dup_fd_below_fdsetsize(fd, "network");
+		if (io_fd < 0)
+		{
+			rc = -1;
+			goto out;
+		}
+		close_io_fd = (io_fd != fd);
+
+		io_lp = dup_fd_below_fdsetsize(lp, "printer");
+		if (io_lp < 0)
+		{
+			rc = -1;
+			goto out;
+		}
+		close_io_lp = (io_lp != lp);
 	}
 
-	initBuffer(&networkToPrinterBuffer, fd, lp, 1);
+	initBuffer(&networkToPrinterBuffer, io_fd, io_lp, 1);
 
 	if (bidir)
 	{
@@ -488,7 +533,7 @@ int copy_stream(int fd, int lp)
 		struct timeval last_read_time;
 		int timer = 0;
 		Buffer_t printerToNetworkBuffer;
-		initBuffer(&printerToNetworkBuffer, lp, fd, 0);
+		initBuffer(&printerToNetworkBuffer, io_lp, io_fd, 0);
 		fd_set readfds;
 		fd_set writefds;
 		gettimeofday(&last_read_time, 0);
@@ -508,8 +553,8 @@ int copy_stream(int fd, int lp)
 		if ((x) >= 0 && (x) < FD_SETSIZE) \
 			maxfd = MAX(maxfd, (x));      \
 	} while (0)
-			MAYBE_MAX(fd);
-			MAYBE_MAX(lp);
+			MAYBE_MAX(io_fd);
+			MAYBE_MAX(io_lp);
 			MAYBE_MAX(networkToPrinterBuffer.infd);
 			MAYBE_MAX(networkToPrinterBuffer.outfd);
 			MAYBE_MAX(printerToNetworkBuffer.infd);
@@ -531,8 +576,8 @@ int copy_stream(int fd, int lp)
 					 * If lp >= FD_SETSIZE, touching fd_set is undefined and
 					 * can corrupt memory.
 					 */
-					if (FD_VALID(lp))
-						FD_CLR(lp, &readfds);
+					if (FD_VALID(io_lp))
+						FD_CLR(io_lp, &readfds);
 				}
 			}
 			gettimeofday(&now, 0);
@@ -544,9 +589,10 @@ int copy_stream(int fd, int lp)
 			{
 				if (errno == EINTR)
 					continue;
-				return (result);
+				rc = result;
+				goto out;
 			}
-			if (FD_VALID(fd) && FD_ISSET(fd, &readfds))
+			if (FD_VALID(io_fd) && FD_ISSET(io_fd, &readfds))
 			{
 				/* Read network data. */
 				result = readBuffer(&networkToPrinterBuffer);
@@ -562,7 +608,7 @@ int copy_stream(int fd, int lp)
 				dolog(LOG_NOTICE, "read no data from network for 30s, stop copy stream\n");
 				break;
 			}
-			if (FD_VALID(lp) && FD_ISSET(lp, &readfds))
+			if (FD_VALID(io_lp) && FD_ISSET(io_lp, &readfds))
 			{
 				/* Read printer data, but pace it more slowly. */
 				result = readBuffer(&printerToNetworkBuffer);
@@ -584,7 +630,7 @@ int copy_stream(int fd, int lp)
 					}
 				}
 			}
-			if (FD_VALID(lp) && FD_ISSET(lp, &writefds))
+			if (FD_VALID(io_lp) && FD_ISSET(io_lp, &writefds))
 			{
 				/* Write data to printer. */
 				result = writeBuffer(&networkToPrinterBuffer);
@@ -603,7 +649,7 @@ int copy_stream(int fd, int lp)
 						  now.tv_sec + now.tv_usec / 1e6, result);
 				}
 			}
-			if ((FD_VALID(fd) && FD_ISSET(fd, &writefds)) || printerToNetworkBuffer.outfd == -1)
+			if ((FD_VALID(io_fd) && FD_ISSET(io_fd, &writefds)) || printerToNetworkBuffer.outfd == -1)
 			{
 				if (need_clear_lp)
 				{
@@ -661,7 +707,13 @@ int copy_stream(int fd, int lp)
 	/* Add a short delay to allow flushing */
 	if (networkToPrinterBuffer.eof_sent)
 		usleep(200000); /* 200ms */
-	return (networkToPrinterBuffer.err ? -1 : 0);
+	rc = networkToPrinterBuffer.err ? -1 : rc;
+out:
+	if (close_io_lp)
+		(void)close(io_lp);
+	if (close_io_fd)
+		(void)close(io_fd);
+	return rc;
 }
 
 void one_job(int lpnumber)
