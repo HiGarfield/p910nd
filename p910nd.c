@@ -798,6 +798,13 @@ void server(int lpnumber)
 		break;
 	}
 	freeaddrinfo(ressave);
+	if (netfd < 0)
+	{
+		dolog(LOGOPTS, "failed to create and bind a listening socket on %s:%s\n",
+		      bindaddr ? bindaddr : "*", service);
+		free_lock();
+		exit(1);
+	}
 	memset(&client, 0, sizeof(client));
 	while (1)
 	{
