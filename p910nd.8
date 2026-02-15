@@ -6,14 +6,14 @@ p910nd \- port 9100+n printer daemon
 [\fB-f device\fR]
 [\fB-i bindaddr\fR]
 [\fB-bvd\fR]
-[\fB0|1|2\fR]
+[\fB0|...|9\fR]
 .SH DESCRIPTION
 .I p910nd
 is a small daemon that copies any data received on the port
 it is listening on to the corresponding printer port.
 It is primarily intended for diskless Linux hosts running as printer drivers
 but there is no reason why it could not be used on diskful hosts.
-Port 9100 is copied to /dev/lp0, 9101 to /dev/lp1 and 9102 to /dev/lp2.
+Ports 9100 through 9109 are copied to /dev/lp0 through /dev/lp9.
 The default is port 9100 to /dev/lp0.
 .LP
 The \fB-f\fR option can be used to specify a different printer device,
@@ -38,9 +38,9 @@ A sample SysVinit script,
 is provided for operation as a daemon.
 .I p910nd
 will change its name under ps to match the printer port, i.e.
-.I p9100d, p9101d
-and
-.IR p9102d .
+.I p9100d
+through
+.IR p9109d .
 .LP
 When running under (x)inetd, the
 .I /etc/inetd.conf

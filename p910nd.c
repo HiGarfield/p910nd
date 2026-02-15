@@ -1,16 +1,16 @@
 /*
  *	Port 9100+n daemon
  *	Accepts a connection from port 9100+n and copy stream to
- *	/dev/lpn, where n = 0,1,2.
+ *	/dev/lpn, where n = 0..9.
  *
  *	GPLv2 license, read COPYING
  *
- *	Run standalone as: p910nd [0|1|2]
+ *	Run standalone as: p910nd [0|...|9]
  *
  *	Run under inetd as:
- *	p910n stream tcp nowait root /usr/sbin/tcpd p910nd [0|1|2]
+ *	p910n stream tcp nowait root /usr/sbin/tcpd p910nd [0|...|9]
  *	 where p910n is an /etc/services entry for
- *	 port 9100, 9101 or 9102 as the case may be.
+ *	 port 9100 through 9109 as the case may be.
  *	 root can be replaced by any uid with rw permission on /dev/lpn
  *
  *	Port 9100+n will then be passively opened
@@ -223,7 +223,7 @@ uint16_t get_port(const struct sockaddr *sa)
 void usage(void)
 {
 	fprintf(stderr, "%s %s %s\n", progname, version, copyright);
-	fprintf(stderr, "Usage: %s [-f device] [-i bindaddr] [-bvd] [0|1|2]\n", progname);
+	fprintf(stderr, "Usage: %s [-f device] [-i bindaddr] [-bvd] [0|...|9]\n", progname);
 	exit(1);
 }
 
@@ -739,7 +739,7 @@ void server(int lpnumber)
 	hints.ai_socktype = SOCK_STREAM;
 	if (lpnumber < '0' || lpnumber > '9')
 	{
-		dolog(LOGOPTS, "invalid lpnumber '%c', defaulting to 0\n", lpnumber);
+		dolog(LOGOPTS, "invalid lpnumber '%c' (must be 0-9)\n", lpnumber);
 		exit(1);
 	}
 	(void)snprintf(service, sizeof(service), "%hu", (BASEPORT + lpnumber - '0'));
@@ -921,6 +921,11 @@ int main(int argc, char *argv[])
 	{
 		if (isdigit(argv[0][0]))
 			lpnumber = argv[0][0];
+	}
+	if (lpnumber < '0' || lpnumber > '9')
+	{
+		dolog(LOGOPTS, "invalid printer number '%c' (must be 0-9)\n", lpnumber);
+		usage();
 	}
 	/* change the n in argv[0] to match the port so ps will show that */
 	if ((p = strstr(progname, "p910n")) != NULL)
