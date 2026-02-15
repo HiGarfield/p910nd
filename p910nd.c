@@ -535,11 +535,12 @@ int copy_stream(int fd, int lp)
 					gettimeofday(&last_read_time, 0);
 				}
 			}
-			if (now.tv_sec - last_read_time.tv_sec >= 30)
-			{
-				dolog(LOG_NOTICE, "read no data from network for 30s, stop copy stream\n");
-				break;
-			}
+			/*
+			 * Do not abort an active bidirectional session only because there
+			 * has been no recent network->printer data.  Some clients keep the
+			 * socket open to receive delayed printer status, which may arrive
+			 * well after 30 seconds.
+			 */
 			if (FD_VALID(lp) && FD_ISSET(lp, &readfds))
 			{
 				/* Read printer data, but pace it more slowly. */
