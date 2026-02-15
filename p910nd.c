@@ -401,7 +401,6 @@ ssize_t writeBuffer(Buffer_t *b)
 		 * The circular buffer may wrap, so only write a contiguous chunk.
 		 * The remaining bytes will be sent in a subsequent write.
 		 */
-		avail = b->bytes;
 		/* Validate startidx and bytes are within bounds before performing arithmetic */
 		if (b->startidx < 0 || b->startidx >= (int)sizeof(b->buffer))
 		{
@@ -415,9 +414,14 @@ ssize_t writeBuffer(Buffer_t *b)
 			b->err |= WRITE_ERR;
 			avail = 0;
 		}
-		else if ((size_t)b->startidx + (size_t)avail > sizeof(b->buffer))
+		else
 		{
-			avail = sizeof(b->buffer) - (size_t)b->startidx;
+			/* Both startidx and bytes are valid, safe to use */
+			avail = b->bytes;
+			if ((size_t)b->startidx + (size_t)avail > sizeof(b->buffer))
+			{
+				avail = sizeof(b->buffer) - (size_t)b->startidx;
+			}
 		}
 	}
 	if (avail)
