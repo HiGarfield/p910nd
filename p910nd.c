@@ -269,9 +269,15 @@ int open_printer(int lpnumber)
 int dup_fd_below_fdsetsize(int fd, const char *name)
 {
 	int target;
+	int saved_errno;
+
+	saved_errno = errno;
 
 	if (FD_VALID(fd))
+	{
+		errno = saved_errno;
 		return fd;
+	}
 
 	for (target = 0; target < FD_SETSIZE; ++target)
 	{
@@ -284,6 +290,7 @@ int dup_fd_below_fdsetsize(int fd, const char *name)
 			}
 			dolog(LOG_DEBUG, "using duplicate %s fd=%d for select() (original=%d)\n",
 			      name, target, fd);
+			errno = saved_errno;
 			return target;
 		}
 	}
