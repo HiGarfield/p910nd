@@ -511,7 +511,15 @@ int copy_stream(int fd, int lp)
 				if ((now.tv_sec > then.tv_sec) || (now.tv_sec == then.tv_sec && now.tv_usec > then.tv_usec))
 					timer = 0;
 				else
-					FD_CLR(lp, &readfds);
+				{
+					/*
+					 * Guard FD_CLR just like FD_SET/FD_ISSET use FD_VALID.
+					 * If lp >= FD_SETSIZE, touching fd_set is undefined and
+					 * can corrupt memory.
+					 */
+					if (FD_VALID(lp))
+						FD_CLR(lp, &readfds);
+				}
 			}
 			gettimeofday(&now, 0);
 			timeout.tv_sec = 0;
