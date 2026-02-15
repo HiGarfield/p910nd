@@ -122,6 +122,7 @@
 #include <syslog.h>
 #include <errno.h>
 #include <stdarg.h>
+#include <signal.h>
 #include <sys/param.h>
 #include <sys/types.h>
 #include <sys/time.h>
@@ -859,6 +860,12 @@ int main(int argc, char *argv[])
 	int c, lpnumber;
 	char *p;
 	char *log_ident;
+
+	/*
+	 * Broken peer connections can happen while writing in bidirectional mode.
+	 * Ignore SIGPIPE so write() reports EPIPE and the daemon can continue.
+	 */
+	(void)signal(SIGPIPE, SIG_IGN);
 
 	if (argc <= 0) /* in case not provided in (x)inetd config */
 		progname = "p910nd";
