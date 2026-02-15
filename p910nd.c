@@ -159,7 +159,9 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
 
 #define BUFFER_SIZE 8192
 /* Maximum number of file descriptors to close during daemonization.
- * This prevents excessive iterations and integer overflow when casting to int. */
+ * This is a practical upper bound (typical systems rarely exceed this)
+ * that prevents excessive iterations and ensures the value fits within int
+ * range when passed to close(). */
 #define MAX_SAFE_FD 65536
 
 /* Circular buffer used for each direction. */
