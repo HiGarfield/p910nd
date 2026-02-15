@@ -377,6 +377,11 @@ ssize_t readBuffer(Buffer_t *b)
 			}
 			dolog(LOGOPTS, "read error: %m\n");
 			b->err |= READ_ERR;
+			/*
+			 * Treat hard read failures like an end-of-input condition so any
+			 * already-buffered bytes can still be drained to the output.
+			 */
+			b->eof_read = 1;
 		}
 		else if (b->detectEof)
 		{
@@ -620,7 +625,7 @@ int copy_stream(int fd, int lp)
 	else
 	{
 		/* Unidirectional: simply read from network, and write to printer. */
-		while (!networkToPrinterBuffer.eof_sent && !networkToPrinterBuffer.err)
+		while (!networkToPrinterBuffer.eof_sent && !(networkToPrinterBuffer.err & WRITE_ERR))
 		{
 			result = readBuffer(&networkToPrinterBuffer);
 			if (result > 0)
