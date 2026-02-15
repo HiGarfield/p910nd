@@ -464,6 +464,20 @@ int copy_stream(int fd, int lp)
 	int need_clear_lp = 0;
 	int result;
 	Buffer_t networkToPrinterBuffer;
+
+	/*
+	 * Bidirectional mode relies on select()/fd_set. Descriptors beyond
+	 * FD_SETSIZE cannot be monitored safely and would make the stream stall.
+	 */
+	if (bidir && (!FD_VALID(fd) || !FD_VALID(lp)))
+	{
+		dolog(LOGOPTS,
+		      "bidirectional mode requires file descriptors < %d (got network=%d, printer=%d)\n",
+		      FD_SETSIZE, fd, lp);
+		errno = EINVAL;
+		return (-1);
+	}
+
 	initBuffer(&networkToPrinterBuffer, fd, lp, 1);
 
 	if (bidir)
