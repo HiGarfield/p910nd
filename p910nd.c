@@ -939,10 +939,17 @@ int main(int argc, char *argv[])
 	}
 	argc -= optind;
 	argv += optind;
-	if (argc > 0)
+	if (argc > 1)
+		usage();
+	if (argc == 1)
 	{
-		if (isdigit(argv[0][0]))
+		if (argv[0][0] >= '0' && argv[0][0] <= '9' && argv[0][1] == '\0')
 			lpnumber = argv[0][0];
+		else
+		{
+			dolog(LOGOPTS, "invalid printer number '%s' (must be a single digit 0-9)\n", argv[0]);
+			usage();
+		}
 	}
 	if (lpnumber < '0' || lpnumber > '9')
 	{
