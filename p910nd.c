@@ -135,6 +135,8 @@
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #endif
 
+#define FD_VALID(fd) ((fd) >= 0 && (fd) < FD_SETSIZE)
+
 #ifdef USE_LIBWRAP
 #include "tcpd.h"
 int allow_severity, deny_severity;
@@ -516,7 +518,7 @@ int copy_stream(int fd, int lp)
 					continue;
 				return (result);
 			}
-			if (FD_ISSET(fd, &readfds))
+			if (FD_VALID(fd) && FD_ISSET(fd, &readfds))
 			{
 				/* Read network data. */
 				result = readBuffer(&networkToPrinterBuffer);
@@ -532,7 +534,7 @@ int copy_stream(int fd, int lp)
 				dolog(LOG_NOTICE, "read no data from network for 30s, stop copy stream\n");
 				break;
 			}
-			if (FD_ISSET(lp, &readfds))
+			if (FD_VALID(lp) && FD_ISSET(lp, &readfds))
 			{
 				/* Read printer data, but pace it more slowly. */
 				result = readBuffer(&printerToNetworkBuffer);
@@ -554,7 +556,7 @@ int copy_stream(int fd, int lp)
 					}
 				}
 			}
-			if (FD_ISSET(lp, &writefds))
+			if (FD_VALID(lp) && FD_ISSET(lp, &writefds))
 			{
 				/* Write data to printer. */
 				result = writeBuffer(&networkToPrinterBuffer);
@@ -573,7 +575,7 @@ int copy_stream(int fd, int lp)
 						  now.tv_sec + now.tv_usec / 1e6, result);
 				}
 			}
-			if (FD_ISSET(fd, &writefds) || printerToNetworkBuffer.outfd == -1)
+			if ((FD_VALID(fd) && FD_ISSET(fd, &writefds)) || printerToNetworkBuffer.outfd == -1)
 			{
 				if (need_clear_lp)
 				{
