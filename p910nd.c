@@ -135,6 +135,10 @@
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #endif
 
+#ifndef MIN
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#endif
+
 #ifdef USE_LIBWRAP
 #include "tcpd.h"
 int allow_severity, deny_severity;
@@ -154,6 +158,9 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
 #define LOGOPTS LOG_ERR
 
 #define BUFFER_SIZE 8192
+/* Maximum number of file descriptors to close during daemonization.
+ * This prevents excessive iterations and integer overflow when casting to int. */
+#define MAX_SAFE_FD 65536
 
 /* Circular buffer used for each direction. */
 typedef struct
@@ -693,6 +700,9 @@ void server(int lpnumber)
 				open_max = 1024;
 			max_close_fd = (rlim_t)open_max;
 		}
+		/* Cap max_close_fd to prevent overflow when casting to int
+		 * and avoid excessive iterations for very large finite limits. */
+		max_close_fd = MIN(max_close_fd, (rlim_t)MAX_SAFE_FD);
 		for (rlim_t rfd = 0; rfd < max_close_fd; ++rfd)
 			(void)close((int)rfd);
 		if (setsid() < 0)
