@@ -689,12 +689,12 @@ void server(int lpnumber)
 		if (max_close_fd == RLIM_INFINITY)
 		{
 			long open_max = sysconf(_SC_OPEN_MAX);
-			if (open_max < 0)
+			if (open_max < 0 || (rlim_t)open_max == RLIM_INFINITY)
 				open_max = 1024;
 			max_close_fd = (rlim_t)open_max;
 		}
-		for (fd = 0; (rlim_t)fd < max_close_fd; ++fd)
-			(void)close(fd);
+		for (rlim_t rfd = 0; rfd < max_close_fd; ++rfd)
+			(void)close((int)rfd);
 		if (setsid() < 0)
 		{
 			dolog(LOGOPTS, "setsid: %m\n");
