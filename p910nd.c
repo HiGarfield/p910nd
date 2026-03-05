@@ -580,7 +580,6 @@ int copy_stream(int fd, int lp)
 						FD_CLR(io_lp, &readfds);
 				}
 			}
-			gettimeofday(&now, 0);
 			timeout.tv_sec = 0;
 			timeout.tv_usec = 100000;
 			result = select(maxfd + 1, &readfds, &writefds, 0, &timeout);
