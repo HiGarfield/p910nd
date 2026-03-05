@@ -419,7 +419,8 @@ ssize_t readBuffer(Buffer_t *b)
 			b->eof_read = 1;
 		}
 	}
-	/* Return the value returned by read(), which is -1 (error), or #bytes read. */
+	/* Returns 0 for temporary errors (EAGAIN/EWOULDBLOCK/EINTR), -1 for hard errors,
+	 * or the number of bytes read (>0). */
 	return result;
 }
 
