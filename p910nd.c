@@ -794,6 +794,11 @@ void server(int lpnumber)
 		(void)chdir("/");
 		(void)umask(022);
 		fd = open("/dev/null", O_RDWR); /* stdin */
+		if (fd < 0)
+		{
+			dolog(LOGOPTS, "/dev/null: %m\n");
+			exit(1);
+		}
 		(void)dup(fd);					/* stdout */
 		(void)dup(fd);					/* stderr */
 		(void)snprintf(pidfilename, sizeof(pidfilename), PIDFILE, lpnumber);
