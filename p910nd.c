@@ -232,7 +232,7 @@ void show_version(void)
 	fprintf(stdout, "%s %s\n", progname, version);
 }
 
-void dolog(int level, char *msg, ...)
+void dolog(int level, const char *msg, ...)
 {
 	va_list argp;
 	va_start(argp, msg);
