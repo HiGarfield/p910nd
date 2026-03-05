@@ -167,8 +167,8 @@ typedef struct
 	int startidx;  /* Index of the start of valid data. */
 	int endidx;	   /* Index of the end of valid data. */
 	int bytes;	   /* The number of bytes currently buffered. */
-	int totalin;   /* Total bytes that have been read. */
-	int totalout;  /* Total bytes that have been written. */
+	long totalin;   /* Total bytes that have been read. */
+	long totalout;  /* Total bytes that have been written. */
 	int eof_read;  /* Nonzero indicates the input file has reached EOF. */
 	int eof_sent;  /* Nonzero indicates the output file has fully received all data. */
 	int err;	   /* Nonzero indicates an error detected on the output file. */
@@ -687,7 +687,7 @@ int copy_stream(int fd, int lp)
 			}
 		}
 		dolog(LOG_NOTICE,
-			  "Finished job: %d/%d bytes sent to printer, %d/%d bytes sent to network\n",
+			  "Finished job: %ld/%ld bytes sent to printer, %ld/%ld bytes sent to network\n",
 			  networkToPrinterBuffer.totalout, networkToPrinterBuffer.totalin, printerToNetworkBuffer.totalout, printerToNetworkBuffer.totalin);
 	}
 	else
@@ -702,7 +702,7 @@ int copy_stream(int fd, int lp)
 			if (result > 0)
 				dolog(LOG_DEBUG, "wrote %d bytes to printer\n", result);
 		}
-		dolog(LOG_NOTICE, "Finished job: %d/%d bytes sent to printer\n", networkToPrinterBuffer.totalout, networkToPrinterBuffer.totalin);
+		dolog(LOG_NOTICE, "Finished job: %ld/%ld bytes sent to printer\n", networkToPrinterBuffer.totalout, networkToPrinterBuffer.totalin);
 	}
 	/* Add a short delay to allow flushing */
 	if (networkToPrinterBuffer.eof_sent)
