@@ -419,7 +419,8 @@ ssize_t readBuffer(Buffer_t *b)
 			b->eof_read = 1;
 		}
 	}
-	/* Returns 0 for temporary errors (EAGAIN/EWOULDBLOCK/EINTR), -1 for hard errors,
+	/* Returns 0 when no data could be read (buffer full, temporary I/O condition
+	 * EAGAIN/EWOULDBLOCK/EINTR, or non-EOF zero-length read), -1 for hard errors,
 	 * or the number of bytes read (>0). */
 	return result;
 }
