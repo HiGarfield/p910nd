@@ -345,7 +345,7 @@ void prepBuffer(Buffer_t *b, fd_set *readfds, fd_set *writefds)
 	}
 	if (b->infd >= 0 && b->infd < FD_SETSIZE &&
 		!b->eof_read &&
-		b->bytes < sizeof(b->buffer) &&
+		b->bytes < BUFFER_SIZE &&
 		!(b->err & READ_ERR))
 	{
 		FD_SET(b->infd, readfds);
@@ -362,14 +362,14 @@ ssize_t readBuffer(Buffer_t *b)
 	{
 		/* The buffer is empty. */
 		b->startidx = b->endidx = 0;
-		avail = sizeof(b->buffer);
+		avail = BUFFER_SIZE;
 	}
 	else if (b->err)
 	{
 		/* Do not overwrite buffered data after error */
 		return -1;
 	}
-	else if (b->bytes == sizeof(b->buffer))
+	else if (b->bytes == BUFFER_SIZE)
 	{
 		/* The buffer is full. */
 		avail = 0;
@@ -377,7 +377,7 @@ ssize_t readBuffer(Buffer_t *b)
 	else if (b->endidx > b->startidx)
 	{
 		/* The buffer is not wrapped: from endidx to end of buffer is free. */
-		avail = sizeof(b->buffer) - b->endidx;
+		avail = BUFFER_SIZE - b->endidx;
 	}
 	else
 	{
@@ -393,7 +393,7 @@ ssize_t readBuffer(Buffer_t *b)
 			b->endidx += result;
 			b->totalin += result;
 			b->bytes += result;
-			if (b->endidx == sizeof(b->buffer))
+			if (b->endidx == BUFFER_SIZE)
 			{
 				/* Time to wrap the buffer. */
 				b->endidx = 0;
@@ -440,9 +440,9 @@ ssize_t writeBuffer(Buffer_t *b)
 		 * The remaining bytes will be sent in a subsequent write.
 		 */
 		avail = b->bytes;
-		if (b->startidx + avail > (int)sizeof(b->buffer))
+		if (b->startidx + avail > BUFFER_SIZE)
 		{
-			avail = sizeof(b->buffer) - b->startidx;
+			avail = BUFFER_SIZE - b->startidx;
 		}
 	}
 	if (avail)
@@ -467,7 +467,7 @@ ssize_t writeBuffer(Buffer_t *b)
 			if (b->outfd >= 0)
 				b->totalout += result;
 			b->bytes -= result;
-			if (b->startidx == sizeof(b->buffer))
+			if (b->startidx == BUFFER_SIZE)
 			{
 				/* Unwrap the buffer. */
 				b->startidx = 0;
