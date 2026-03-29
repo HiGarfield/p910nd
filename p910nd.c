@@ -181,13 +181,13 @@ static char *progname;
 static char version[] = "Version 0.97";
 static char copyright[] = "Copyright (c) 2008-2014 Ken Yap and others, GPLv2";
 static int lockfd = -1;
-static char *device = 0;
+static char *device = NULL;
 static int bidir = 0;
-static char *bindaddr = 0;
+static char *bindaddr = NULL;
 static int log_to_stdout = 0;
 
 /* Helper function: convert a struct sockaddr address (IPv4 and IPv6) to a string */
-char *get_ip_str(const struct sockaddr *sa, char *s, size_t maxlen)
+static char *get_ip_str(const struct sockaddr *sa, char *s, size_t maxlen)
 {
 	if (maxlen > 0)
 		s[0] = '\0';
@@ -207,7 +207,7 @@ char *get_ip_str(const struct sockaddr *sa, char *s, size_t maxlen)
 	return s;
 }
 
-uint16_t get_port(const struct sockaddr *sa)
+static uint16_t get_port(const struct sockaddr *sa)
 {
 	uint16_t port;
 	switch (sa->sa_family)
@@ -224,30 +224,33 @@ uint16_t get_port(const struct sockaddr *sa)
 	return port;
 }
 
-void usage(void)
+static void usage(void)
 {
 	fprintf(stderr, "%s %s %s\n", progname, version, copyright);
 	fprintf(stderr, "Usage: %s [-f device] [-i bindaddr] [-bvd] [0|...|9]\n", progname);
 	exit(1);
 }
 
-void show_version(void)
+static void show_version(void)
 {
 	fprintf(stdout, "%s %s\n", progname, version);
 }
 
-void dolog(int level, const char *msg, ...)
+static void dolog(int level, const char *msg, ...)
 {
 	va_list argp;
 	va_start(argp, msg);
 	if (log_to_stdout)
+	{
 		vfprintf(stdout, msg, argp);
+		fflush(stdout);
+	}
 	else if (level != LOG_DEBUG)
 		vsyslog(level, msg, argp);
 	va_end(argp);
 }
 
-int open_printer(int lpnumber)
+static int open_printer(int lpnumber)
 {
 	int lp;
 	static char lpname[sizeof(PRINTERFILE)];
@@ -257,7 +260,7 @@ int open_printer(int lpnumber)
 #else
 	(void)snprintf(lpname, sizeof(lpname), PRINTERFILE, lpnumber);
 #endif
-	if (device == 0)
+	if (device == NULL)
 		device = lpname;
 	if ((lp = open(device, bidir ? (O_RDWR | O_NONBLOCK) : O_WRONLY)) == -1)
 	{
@@ -270,7 +273,7 @@ int open_printer(int lpnumber)
 }
 
 /* Duplicate fd into the select()-safe range [0, FD_SETSIZE). */
-int dup_fd_below_fdsetsize(int fd, const char *name)
+static int dup_fd_below_fdsetsize(int fd, const char *name)
 {
 	int target;
 
@@ -299,7 +302,7 @@ int dup_fd_below_fdsetsize(int fd, const char *name)
 	return -1;
 }
 
-int get_lock(int lpnumber)
+static int get_lock(int lpnumber)
 {
 	char lockname[sizeof(LOCKFILE)];
 	struct flock lplock;
@@ -323,14 +326,14 @@ int get_lock(int lpnumber)
 	return (1);
 }
 
-void free_lock(void)
+static void free_lock(void)
 {
 	if (lockfd >= 0)
 		(void)close(lockfd);
 }
 
 /* Initializes the buffer, at the start. */
-void initBuffer(Buffer_t *b, int infd, int outfd, int detectEof)
+static void initBuffer(Buffer_t *b, int infd, int outfd, int detectEof)
 {
 	memset(b, 0, sizeof(*b));
 	b->detectEof = detectEof;
@@ -339,7 +342,7 @@ void initBuffer(Buffer_t *b, int infd, int outfd, int detectEof)
 }
 
 /* Sets the readfds and writefds (used by select) based on current buffer state. */
-void prepBuffer(Buffer_t *b, fd_set *readfds, fd_set *writefds)
+static void prepBuffer(Buffer_t *b, fd_set *readfds, fd_set *writefds)
 {
 	if (b->outfd >= 0 && b->outfd < FD_SETSIZE &&
 		(!(b->err & WRITE_ERR)) &&
@@ -357,9 +360,9 @@ void prepBuffer(Buffer_t *b, fd_set *readfds, fd_set *writefds)
 }
 
 /* Reads data into a buffer from its input file. */
-ssize_t readBuffer(Buffer_t *b)
+static ssize_t readBuffer(Buffer_t *b)
 {
-	int avail;
+	size_t avail;
 	ssize_t result = 0;
 	/* Do not read once any error flag is set. */
 	if (b->err & (READ_ERR | WRITE_ERR))
@@ -427,9 +430,9 @@ ssize_t readBuffer(Buffer_t *b)
 }
 
 /* Writes data from a buffer to the output file or discard if no output file is set. */
-ssize_t writeBuffer(Buffer_t *b)
+static ssize_t writeBuffer(Buffer_t *b)
 {
-	int avail;
+	size_t avail;
 	ssize_t result = 0;
 	if (b->bytes == 0 || (b->err & WRITE_ERR))
 	{
@@ -442,10 +445,10 @@ ssize_t writeBuffer(Buffer_t *b)
 		 * The circular buffer may wrap, so only write a contiguous chunk.
 		 * The remaining bytes will be sent in a subsequent write.
 		 */
-		avail = b->bytes;
+		avail = (b->bytes > 0) ? (size_t)b->bytes : 0;
 		if (b->startidx + avail > BUFFER_SIZE)
 		{
-			avail = BUFFER_SIZE - b->startidx;
+			avail = BUFFER_SIZE - (size_t)b->startidx;
 		}
 	}
 	if (avail)
@@ -492,7 +495,7 @@ ssize_t writeBuffer(Buffer_t *b)
 
 /* Copy network data from file descriptor fd (network) to lp (printer) until EOS */
 /* If bidir, also copy data from printer (lp) to network (fd). */
-int copy_stream(int fd, int lp)
+static int copy_stream(int fd, int lp)
 {
 	int io_fd = fd;
 	int io_lp = lp;
@@ -539,7 +542,7 @@ int copy_stream(int fd, int lp)
 		initBuffer(&printerToNetworkBuffer, io_lp, io_fd, 0);
 		fd_set readfds;
 		fd_set writefds;
-		gettimeofday(&last_read_time, 0);
+		gettimeofday(&last_read_time, NULL);
 		/* Finish when network sent EOF. */
 		/* Although the printer to network stream may not be finished (does this matter?) */
 		while (!networkToPrinterBuffer.eof_sent && !(networkToPrinterBuffer.err & WRITE_ERR) && !(printerToNetworkBuffer.err & WRITE_ERR))
@@ -569,7 +572,7 @@ int copy_stream(int fd, int lp)
 				/* Delay after reading from the printer, so the */
 				/* return stream cannot dominate. */
 				/* Don't read from the printer until the timer expires. */
-				gettimeofday(&now, 0);
+				gettimeofday(&now, NULL);
 				if ((now.tv_sec > then.tv_sec) || (now.tv_sec == then.tv_sec && now.tv_usec > then.tv_usec))
 					timer = 0;
 				else
@@ -585,8 +588,8 @@ int copy_stream(int fd, int lp)
 			}
 			timeout.tv_sec = 0;
 			timeout.tv_usec = 100000;
-			result = select(maxfd + 1, &readfds, &writefds, 0, &timeout);
-			gettimeofday(&now, 0);
+			result = select(maxfd + 1, &readfds, &writefds, NULL, &timeout);
+			gettimeofday(&now, NULL);
 			if (result < 0)
 			{
 				if (errno == EINTR)
@@ -602,7 +605,7 @@ int copy_stream(int fd, int lp)
 				{
 					dolog(LOG_DEBUG, "%.2f: read %d bytes from network\n",
 						  now.tv_sec + now.tv_usec / 1e6, result);
-					gettimeofday(&last_read_time, 0);
+					gettimeofday(&last_read_time, NULL);
 				}
 			}
 			if (now.tv_sec - last_read_time.tv_sec >= 30)
@@ -618,8 +621,8 @@ int copy_stream(int fd, int lp)
 				{
 					dolog(LOG_DEBUG, "%.2f: read %d bytes from printer\n",
 						  now.tv_sec + now.tv_usec / 1e6, result);
-					gettimeofday(&then, 0);
-					// wait 100 msec before reading again.
+					gettimeofday(&then, NULL);
+					/* wait 100 msec before reading again. */
 					then.tv_usec += 100000;
 					if (then.tv_usec >= 1000000)
 					{
@@ -718,7 +721,7 @@ out:
 	return rc;
 }
 
-void one_job(int lpnumber)
+static void one_job(int lpnumber)
 {
 	int lp;
 	struct sockaddr_storage client;
@@ -740,7 +743,7 @@ void one_job(int lpnumber)
 	free_lock();
 }
 
-void server(int lpnumber)
+static void server(int lpnumber)
 {
 	struct rlimit resourcelimit;
 	rlim_t max_close_fd;
@@ -771,7 +774,6 @@ void server(int lpnumber)
 			exit(0);
 		}
 		/* Now in child process */
-		resourcelimit.rlim_max = 0;
 		if (getrlimit(RLIMIT_NOFILE, &resourcelimit) < 0)
 		{
 			dolog(LOGOPTS, "getrlimit: %m\n");
@@ -954,7 +956,7 @@ void server(int lpnumber)
 	exit(1);
 }
 
-int is_standalone(void)
+static int is_standalone(void)
 {
 	struct sockaddr_storage bind_addr;
 	socklen_t ba_len;
@@ -991,7 +993,7 @@ int main(int argc, char *argv[])
 	else
 	{
 		progname = argv[0];
-		if ((p = strrchr(progname, '/')) != 0)
+		if ((p = strrchr(progname, '/')) != NULL)
 			progname = p + 1;
 	}
 	lpnumber = '0';
