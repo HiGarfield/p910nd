@@ -361,8 +361,8 @@ ssize_t readBuffer(Buffer_t *b)
 {
 	int avail;
 	ssize_t result = 0;
-	/* Do not read from a failed or write-errored fd. */
-	if (b->err)
+	/* Do not read once any error flag is set. */
+	if (b->err & (READ_ERR | WRITE_ERR))
 		return -1;
 	if (b->bytes == 0)
 	{
@@ -800,14 +800,14 @@ void server(int lpnumber)
 			dolog(LOGOPTS, "/dev/null: %m\n");
 			exit(1);
 		}
-		if (dup(fd) < 0) /* stdout */
+		if (dup2(fd, STDOUT_FILENO) < 0) /* stdout */
 		{
-			dolog(LOGOPTS, "dup: %m\n");
+			dolog(LOGOPTS, "dup2 stdout: %m\n");
 			exit(1);
 		}
-		if (dup(fd) < 0) /* stderr */
+		if (dup2(fd, STDERR_FILENO) < 0) /* stderr */
 		{
-			dolog(LOGOPTS, "dup: %m\n");
+			dolog(LOGOPTS, "dup2 stderr: %m\n");
 			exit(1);
 		}
 		(void)snprintf(pidfilename, sizeof(pidfilename), PIDFILE, lpnumber);
