@@ -189,13 +189,17 @@ static int log_to_stdout = 0;
 /* Helper function: convert a struct sockaddr address (IPv4 and IPv6) to a string */
 char *get_ip_str(const struct sockaddr *sa, char *s, size_t maxlen)
 {
+	if (maxlen > 0)
+		s[0] = '\0';
 	switch (sa->sa_family)
 	{
 	case AF_INET:
-		inet_ntop(AF_INET, &(((struct sockaddr_in *)sa)->sin_addr), s, maxlen);
+		if (!inet_ntop(AF_INET, &(((struct sockaddr_in *)sa)->sin_addr), s, maxlen))
+			snprintf(s, maxlen, "<inet_ntop error>");
 		break;
 	case AF_INET6:
-		inet_ntop(AF_INET6, &(((struct sockaddr_in6 *)sa)->sin6_addr), s, maxlen);
+		if (!inet_ntop(AF_INET6, &(((struct sockaddr_in6 *)sa)->sin6_addr), s, maxlen))
+			snprintf(s, maxlen, "<inet_ntop error>");
 		break;
 	default:
 		snprintf(s, maxlen, "Unknown AF");
@@ -357,17 +361,14 @@ ssize_t readBuffer(Buffer_t *b)
 {
 	int avail;
 	ssize_t result = 0;
-	/* If err, the data will not be written, so no need to store it. */
+	/* Do not read once any error flag is set. */
+	if (b->err & (READ_ERR | WRITE_ERR))
+		return -1;
 	if (b->bytes == 0)
 	{
 		/* The buffer is empty. */
 		b->startidx = b->endidx = 0;
 		avail = BUFFER_SIZE;
-	}
-	else if (b->err)
-	{
-		/* Do not overwrite buffered data after error */
-		return -1;
 	}
 	else if (b->bytes == BUFFER_SIZE)
 	{
@@ -799,16 +800,33 @@ void server(int lpnumber)
 			dolog(LOGOPTS, "/dev/null: %m\n");
 			exit(1);
 		}
-		(void)dup(fd);					/* stdout */
-		(void)dup(fd);					/* stderr */
+		if (dup2(fd, STDOUT_FILENO) < 0) /* stdout */
+		{
+			dolog(LOGOPTS, "dup2 stdout: %m\n");
+			exit(1);
+		}
+		if (dup2(fd, STDERR_FILENO) < 0) /* stderr */
+		{
+			dolog(LOGOPTS, "dup2 stderr: %m\n");
+			exit(1);
+		}
 		(void)snprintf(pidfilename, sizeof(pidfilename), PIDFILE, lpnumber);
 		if ((f = fopen(pidfilename, "w")) == NULL)
 		{
 			dolog(LOGOPTS, "%s: %m\n", pidfilename);
 			exit(1);
 		}
-		(void)fprintf(f, "%d\n", getpid());
-		(void)fclose(f);
+		if (fprintf(f, "%d\n", getpid()) < 0)
+		{
+			dolog(LOGOPTS, "%s: fprintf: %m\n", pidfilename);
+			(void)fclose(f);
+			exit(1);
+		}
+		if (fclose(f) != 0)
+		{
+			dolog(LOGOPTS, "%s: fclose: %m\n", pidfilename);
+			exit(1);
+		}
 	}
 	if (get_lock(lpnumber) == 0)
 		exit(1);
@@ -899,8 +917,15 @@ void server(int lpnumber)
 		fd = accept(netfd, (struct sockaddr *)&client, &clientlen);
 		if (fd < 0)
 		{
-			if (errno == EINTR)
+			if (errno == EINTR || errno == ECONNABORTED)
 				continue;
+			if (errno == EMFILE || errno == ENFILE ||
+			    errno == ENOBUFS || errno == ENOMEM)
+			{
+				dolog(LOGOPTS, "accept: %m, retrying\n");
+				sleep(1);
+				continue;
+			}
 			break;
 		}
 #ifdef USE_LIBWRAP
