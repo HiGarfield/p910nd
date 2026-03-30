@@ -187,18 +187,18 @@ static char *bindaddr = NULL;
 static int log_to_stdout = 0;
 
 /* Helper function: convert a struct sockaddr address (IPv4 and IPv6) to a string */
-static char *get_ip_str(const struct sockaddr *sa, char *s, size_t maxlen)
+static char *get_ip_str(const struct sockaddr *sa, char *s, socklen_t maxlen)
 {
 	if (maxlen > 0)
 		s[0] = '\0';
 	switch (sa->sa_family)
 	{
 	case AF_INET:
-		if (!inet_ntop(AF_INET, &(((struct sockaddr_in *)sa)->sin_addr), s, (socklen_t)maxlen))
+		if (!inet_ntop(AF_INET, &(((struct sockaddr_in *)sa)->sin_addr), s, maxlen))
 			snprintf(s, maxlen, "<inet_ntop error>");
 		break;
 	case AF_INET6:
-		if (!inet_ntop(AF_INET6, &(((struct sockaddr_in6 *)sa)->sin6_addr), s, (socklen_t)maxlen))
+		if (!inet_ntop(AF_INET6, &(((struct sockaddr_in6 *)sa)->sin6_addr), s, maxlen))
 			snprintf(s, maxlen, "<inet_ntop error>");
 		break;
 	default:
