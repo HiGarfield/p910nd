@@ -167,8 +167,8 @@ typedef struct
 	int startidx;  /* Index of the start of valid data. */
 	int endidx;	   /* Index of the end of valid data. */
 	int bytes;	   /* The number of bytes currently buffered. */
-	long totalin;   /* Total bytes that have been read. */
-	long totalout;  /* Total bytes that have been written. */
+	unsigned long totalin;   /* Total bytes that have been read. */
+	unsigned long totalout;  /* Total bytes that have been written. */
 	int eof_read;  /* Nonzero indicates the input file has reached EOF. */
 	int eof_sent;  /* Nonzero indicates the output file has fully received all data. */
 	int err;	   /* Nonzero indicates an error detected on the output file. */
@@ -194,11 +194,11 @@ static char *get_ip_str(const struct sockaddr *sa, char *s, size_t maxlen)
 	switch (sa->sa_family)
 	{
 	case AF_INET:
-		if (!inet_ntop(AF_INET, &(((struct sockaddr_in *)sa)->sin_addr), s, maxlen))
+		if (!inet_ntop(AF_INET, &(((struct sockaddr_in *)sa)->sin_addr), s, (socklen_t)maxlen))
 			snprintf(s, maxlen, "<inet_ntop error>");
 		break;
 	case AF_INET6:
-		if (!inet_ntop(AF_INET6, &(((struct sockaddr_in6 *)sa)->sin6_addr), s, maxlen))
+		if (!inet_ntop(AF_INET6, &(((struct sockaddr_in6 *)sa)->sin6_addr), s, (socklen_t)maxlen))
 			snprintf(s, maxlen, "<inet_ntop error>");
 		break;
 	default:
@@ -319,7 +319,7 @@ static int get_lock(int lpnumber)
 	if (fcntl(lockfd, F_SETLKW, &lplock) < 0)
 	{
 		dolog(LOGOPTS, "%s: %m\n", lockname);
-		close(lockfd);
+		(void)close(lockfd);
 		lockfd = -1;
 		return (0);
 	}
@@ -445,7 +445,7 @@ static ssize_t writeBuffer(Buffer_t *b)
 		 * The circular buffer may wrap, so only write a contiguous chunk.
 		 * The remaining bytes will be sent in a subsequent write.
 		 */
-		avail = (b->bytes > 0) ? (size_t)b->bytes : 0;
+		avail = (size_t)b->bytes;
 		if (b->startidx + avail > BUFFER_SIZE)
 		{
 			avail = BUFFER_SIZE - (size_t)b->startidx;
@@ -692,7 +692,7 @@ static int copy_stream(int fd, int lp)
 			}
 		}
 		dolog(LOG_NOTICE,
-			  "Finished job: %ld/%ld bytes sent to printer, %ld/%ld bytes sent to network\n",
+			  "Finished job: %lu/%lu bytes sent to printer, %lu/%lu bytes sent to network\n",
 			  networkToPrinterBuffer.totalout, networkToPrinterBuffer.totalin, printerToNetworkBuffer.totalout, printerToNetworkBuffer.totalin);
 	}
 	else
@@ -707,7 +707,7 @@ static int copy_stream(int fd, int lp)
 			if (result > 0)
 				dolog(LOG_DEBUG, "wrote %d bytes to printer\n", result);
 		}
-		dolog(LOG_NOTICE, "Finished job: %ld/%ld bytes sent to printer\n", networkToPrinterBuffer.totalout, networkToPrinterBuffer.totalin);
+		dolog(LOG_NOTICE, "Finished job: %lu/%lu bytes sent to printer\n", networkToPrinterBuffer.totalout, networkToPrinterBuffer.totalin);
 	}
 	/* Add a short delay to allow flushing */
 	if (networkToPrinterBuffer.eof_sent)
@@ -739,7 +739,7 @@ static void one_job(int lpnumber)
 		sleep(10);
 	if (copy_stream(0, lp) < 0)
 		dolog(LOGOPTS, "copy_stream: %m\n");
-	close(lp);
+	(void)close(lp);
 	free_lock();
 }
 
@@ -872,32 +872,32 @@ static void server(int lpnumber)
 		}
 		if (setsockopt(netfd, SOL_SOCKET, SO_RCVBUF, &bufsiz, sizeof(bufsiz)) < 0)
 		{
-			dolog(LOGOPTS, "setsocketopt: SO_RCVBUF: %m\n");
+			dolog(LOGOPTS, "setsockopt: SO_RCVBUF: %m\n");
 			/* not fatal if it fails */
 		}
 		if (setsockopt(netfd, SOL_SOCKET, SO_SNDBUF, &bufsiz, sizeof(bufsiz)) < 0)
 		{
-			dolog(LOGOPTS, "setsocketopt: SO_SNDBUF: %m\n");
+			dolog(LOGOPTS, "setsockopt: SO_SNDBUF: %m\n");
 			/* not fatal if it fails */
 		}
 		if (setsockopt(netfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) < 0)
 		{
-			dolog(LOGOPTS, "setsocketopt: SO_REUSEADDR: %m\n");
-			close(netfd);
+			dolog(LOGOPTS, "setsockopt: SO_REUSEADDR: %m\n");
+			(void)close(netfd);
 			res = res->ai_next;
 			continue;
 		}
 		if (bind(netfd, res->ai_addr, res->ai_addrlen) < 0)
 		{
 			dolog(LOGOPTS, "bind: %m\n");
-			close(netfd);
+			(void)close(netfd);
 			res = res->ai_next;
 			continue;
 		}
 		if (listen(netfd, 30) < 0)
 		{
 			dolog(LOGOPTS, "listen: %m\n");
-			close(netfd);
+			(void)close(netfd);
 			res = res->ai_next;
 			continue;
 		}
@@ -935,7 +935,7 @@ static void server(int lpnumber)
 		{
 			dolog(LOGOPTS,
 				  "Connection from %s port %hu rejected\n", get_ip_str((struct sockaddr *)&client, host, sizeof(host)), get_port((struct sockaddr *)&client));
-			close(fd);
+			(void)close(fd);
 			continue;
 		}
 #endif
@@ -1043,7 +1043,7 @@ int main(int argc, char *argv[])
 	}
 	/* change the n in argv[0] to match the port so ps will show that */
 	if ((p = strstr(progname, "p910n")) != NULL)
-		p[4] = lpnumber;
+		p[4] = (char)lpnumber;
 
 	log_ident = p ? p : progname;
 
