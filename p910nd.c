@@ -506,7 +506,7 @@ static int copy_stream(int fd, int lp)
 	int close_io_lp = 0;
 	int need_clear_lp = 0;
 	int rc = 0;
-	int result;
+	ssize_t result;
 	Buffer_t networkToPrinterBuffer;
 
 	/*
@@ -597,7 +597,7 @@ static int copy_stream(int fd, int lp)
 			{
 				if (errno == EINTR)
 					continue;
-				rc = result;
+				rc = (int)result;
 				goto out;
 			}
 			if (FD_VALID(io_fd) && FD_ISSET(io_fd, &readfds))
@@ -606,7 +606,7 @@ static int copy_stream(int fd, int lp)
 				result = readBuffer(&networkToPrinterBuffer);
 				if (result > 0)
 				{
-					dolog(LOG_DEBUG, "%.2f: read %d bytes from network\n",
+					dolog(LOG_DEBUG, "%.2f: read %zd bytes from network\n",
 						  now.tv_sec + now.tv_usec / 1e6, result);
 					gettimeofday(&last_read_time, NULL);
 				}
@@ -622,7 +622,7 @@ static int copy_stream(int fd, int lp)
 				result = readBuffer(&printerToNetworkBuffer);
 				if (result > 0)
 				{
-					dolog(LOG_DEBUG, "%.2f: read %d bytes from printer\n",
+					dolog(LOG_DEBUG, "%.2f: read %zd bytes from printer\n",
 						  now.tv_sec + now.tv_usec / 1e6, result);
 					gettimeofday(&then, NULL);
 					/* wait 100 msec before reading again. */
@@ -653,7 +653,7 @@ static int copy_stream(int fd, int lp)
 						printerToNetworkBuffer.totalin = 0;
 						printerToNetworkBuffer.totalout = 0;
 					}
-					dolog(LOG_DEBUG, "%.2f: wrote %d bytes to printer\n",
+					dolog(LOG_DEBUG, "%.2f: wrote %zd bytes to printer\n",
 						  now.tv_sec + now.tv_usec / 1e6, result);
 				}
 			}
@@ -682,9 +682,9 @@ static int copy_stream(int fd, int lp)
 				else if (result > 0)
 				{
 					if (printerToNetworkBuffer.outfd == -1)
-						dolog(LOG_DEBUG, "discarded %d bytes from printer\n", result);
+						dolog(LOG_DEBUG, "discarded %zd bytes from printer\n", result);
 					else
-						dolog(LOG_DEBUG, "%.2f: wrote %d bytes to network\n",
+						dolog(LOG_DEBUG, "%.2f: wrote %zd bytes to network\n",
 							  now.tv_sec + now.tv_usec / 1e6, result);
 				}
 			}
@@ -705,10 +705,10 @@ static int copy_stream(int fd, int lp)
 		{
 			result = readBuffer(&networkToPrinterBuffer);
 			if (result > 0)
-				dolog(LOG_DEBUG, "read %d bytes from network\n", result);
+				dolog(LOG_DEBUG, "read %zd bytes from network\n", result);
 			result = writeBuffer(&networkToPrinterBuffer);
 			if (result > 0)
-				dolog(LOG_DEBUG, "wrote %d bytes to printer\n", result);
+				dolog(LOG_DEBUG, "wrote %zd bytes to printer\n", result);
 		}
 		dolog(LOG_NOTICE, "Finished job: %lu/%lu bytes sent to printer\n", networkToPrinterBuffer.totalout, networkToPrinterBuffer.totalin);
 	}
