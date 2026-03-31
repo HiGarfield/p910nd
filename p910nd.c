@@ -367,6 +367,9 @@ static ssize_t readBuffer(Buffer_t *b)
 	/* Do not read once any error flag is set. */
 	if (b->err & (READ_ERR | WRITE_ERR))
 		return -1;
+	/* Nothing more to read after EOF has been seen. */
+	if (b->eof_read)
+		return 0;
 	if (b->bytes == 0)
 	{
 		/* The buffer is empty. */
@@ -812,26 +815,32 @@ static void server(int lpnumber)
 			dolog(LOGOPTS, "dup2 stderr: %m\n");
 			exit(1);
 		}
+	}
+	if (get_lock(lpnumber) == 0)
+		exit(1);
+	if (!log_to_stdout)
+	{
 		(void)snprintf(pidfilename, sizeof(pidfilename), PIDFILE, lpnumber);
 		if ((f = fopen(pidfilename, "w")) == NULL)
 		{
 			dolog(LOGOPTS, "%s: %m\n", pidfilename);
+			free_lock();
 			exit(1);
 		}
 		if (fprintf(f, "%d\n", getpid()) < 0)
 		{
 			dolog(LOGOPTS, "%s: fprintf: %m\n", pidfilename);
 			(void)fclose(f);
+			free_lock();
 			exit(1);
 		}
 		if (fclose(f) != 0)
 		{
 			dolog(LOGOPTS, "%s: fclose: %m\n", pidfilename);
+			free_lock();
 			exit(1);
 		}
 	}
-	if (get_lock(lpnumber) == 0)
-		exit(1);
 #endif
 	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = PF_UNSPEC;
@@ -842,7 +851,7 @@ static void server(int lpnumber)
 		dolog(LOGOPTS, "invalid lpnumber '%c' (must be 0-9)\n", lpnumber);
 		exit(1);
 	}
-	(void)snprintf(service, sizeof(service), "%hu", (BASEPORT + lpnumber - '0'));
+	(void)snprintf(service, sizeof(service), "%d", (BASEPORT + lpnumber - '0'));
 	gai_err = getaddrinfo(bindaddr, service, &hints, &res);
 	if (gai_err != 0)
 	{
