@@ -884,6 +884,7 @@ static void server(int lpnumber)
 		{
 			dolog(LOGOPTS, "setsockopt: SO_REUSEADDR: %m\n");
 			(void)close(netfd);
+			netfd = -1;
 			res = res->ai_next;
 			continue;
 		}
@@ -891,6 +892,7 @@ static void server(int lpnumber)
 		{
 			dolog(LOGOPTS, "bind: %m\n");
 			(void)close(netfd);
+			netfd = -1;
 			res = res->ai_next;
 			continue;
 		}
@@ -898,6 +900,7 @@ static void server(int lpnumber)
 		{
 			dolog(LOGOPTS, "listen: %m\n");
 			(void)close(netfd);
+			netfd = -1;
 			res = res->ai_next;
 			continue;
 		}
