@@ -469,9 +469,14 @@ static ssize_t writeBuffer(Buffer_t *b)
 			dolog(LOGOPTS, "write error: %m\n");
 			b->err |= WRITE_ERR;
 		}
+		else if (result == 0)
+		{
+			/* write() returned 0 with no error — treat as a transient condition. */
+			return 0;
+		}
 		else
 		{
-			/* Zero or more bytes were written. */
+			/* Some bytes were written. */
 			b->startidx += result;
 			if (b->outfd >= 0)
 				b->totalout += result;
@@ -504,7 +509,7 @@ static int copy_stream(int fd, int lp)
 	int io_lp = lp;
 	int close_io_fd = 0;
 	int close_io_lp = 0;
-	int need_clear_lp = 0;
+	int need_clear_lp = 1;
 	int rc = 0;
 	ssize_t result;
 	Buffer_t networkToPrinterBuffer;
@@ -548,7 +553,7 @@ static int copy_stream(int fd, int lp)
 		gettimeofday(&last_read_time, NULL);
 		/* Finish when network sent EOF. */
 		/* Although the printer to network stream may not be finished (does this matter?) */
-		while (!networkToPrinterBuffer.eof_sent && !(networkToPrinterBuffer.err & WRITE_ERR) && !(printerToNetworkBuffer.err & WRITE_ERR))
+		while (!networkToPrinterBuffer.eof_sent && !(networkToPrinterBuffer.err & WRITE_ERR))
 		{
 			FD_ZERO(&readfds);
 			FD_ZERO(&writefds);
