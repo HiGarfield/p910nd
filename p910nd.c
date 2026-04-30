@@ -471,8 +471,10 @@ static ssize_t writeBuffer(Buffer_t *b)
 		}
 		else if (result == 0)
 		{
-			/* write() returned 0 with no error — treat as a transient condition. */
-			return 0;
+			/* write() returning 0 with a non-zero count is undefined by POSIX
+			 * and cannot make forward progress; treat it as a hard write error. */
+			dolog(LOGOPTS, "write error: returned 0\n");
+			b->err |= WRITE_ERR;
 		}
 		else
 		{
