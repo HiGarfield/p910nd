@@ -158,6 +158,13 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
 
 #define BUFFER_SIZE 8192
 
+/* Idle timeout after which a bidirectional job with no pending data in
+ * either direction is considered finished.  Configurable so tests can
+ * exercise the drain logic quickly. */
+#ifndef IDLE_TIMEOUT_SEC
+#define IDLE_TIMEOUT_SEC 30
+#endif
+
 /* Circular buffer used for each direction. */
 typedef struct
 {
@@ -622,9 +629,20 @@ static int copy_stream(int fd, int lp)
 					gettimeofday(&last_read_time, NULL);
 				}
 			}
-			if (now.tv_sec - last_read_time.tv_sec >= 30)
+			/*
+			 * Do not time out while data is still pending: network bytes still
+			 * queued in the socket (select() reports io_fd readable), bytes
+			 * buffered but not yet written to the printer, or printer responses
+			 * not yet sent to the network would silently be dropped by an early
+			 * exit.  Only stop once both directions are fully drained.
+			 */
+			if (networkToPrinterBuffer.bytes == 0 &&
+				printerToNetworkBuffer.bytes == 0 &&
+				!(FD_VALID(io_fd) && FD_ISSET(io_fd, &readfds)) &&
+				now.tv_sec - last_read_time.tv_sec >= IDLE_TIMEOUT_SEC)
 			{
-				dolog(LOG_NOTICE, "read no data from network for 30s, stop copy stream\n");
+				dolog(LOG_NOTICE, "read no data from network for %ds, stop copy stream\n",
+				      IDLE_TIMEOUT_SEC);
 				break;
 			}
 			if (FD_VALID(io_lp) && FD_ISSET(io_lp, &readfds))
