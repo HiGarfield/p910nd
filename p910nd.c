@@ -644,6 +644,26 @@ static int copy_stream(int fd, int lp)
 						timer = 1;
 					}
 				}
+				else if (result == 0)
+				{
+					/*
+					 * Empty read: the printer side returned no data.
+					 * Because detectEof is off for this buffer, EOF (or a
+					 * zero-length read from a quiescent device) leaves
+					 * eof_read clear, so select() would report the fd
+					 * readable again immediately and the loop would spin
+					 * at 100% CPU.  Throttle the next read attempt so at
+					 * most one empty read happens every 100 ms.
+					 */
+					gettimeofday(&then, NULL);
+					then.tv_usec += 100000;
+					if (then.tv_usec >= 1000000)
+					{
+						then.tv_usec -= 1000000;
+						then.tv_sec++;
+					}
+					timer = 1;
+				}
 			}
 			if (FD_VALID(io_lp) && FD_ISSET(io_lp, &writefds))
 			{
