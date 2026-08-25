@@ -178,6 +178,9 @@ typedef struct
 } Buffer_t;
 
 static char *progname;
+/* Writable fallback name; a string literal must not be used because
+ * main() later overwrites the "p910n" prefix in place. */
+static char default_progname[] = "p910nd";
 static char version[] = "Version 0.97";
 static char copyright[] = "Copyright (c) 2008-2014 Ken Yap and others, GPLv2";
 static int lockfd = -1;
@@ -1040,7 +1043,7 @@ int main(int argc, char *argv[])
 	(void)signal(SIGPIPE, SIG_IGN);
 
 	if (argc <= 0) /* in case not provided in (x)inetd config */
-		progname = "p910nd";
+		progname = default_progname;
 	else
 	{
 		progname = argv[0];
