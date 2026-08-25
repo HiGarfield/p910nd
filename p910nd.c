@@ -832,7 +832,11 @@ static void server(int lpnumber)
 			dolog(LOGOPTS, "setsid: %m\n");
 			exit(1);
 		}
-		(void)chdir("/");
+		if (chdir("/") < 0)
+		{
+			dolog(LOGOPTS, "chdir: %m\n");
+			exit(1);
+		}
 		(void)umask(022);
 		fd = open("/dev/null", O_RDWR); /* stdin */
 		if (fd < 0)
