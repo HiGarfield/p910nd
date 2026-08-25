@@ -817,8 +817,16 @@ static void server(int lpnumber)
 				open_max = 1024;
 			max_close_fd = (rlim_t)open_max;
 		}
-		for (fd = 0; (rlim_t)fd < max_close_fd; ++fd)
-			(void)close(fd);
+		/*
+		 * Iterate with an rlim_t counter.  Closing through an int counter
+		 * would invoke signed overflow (undefined behaviour) once the
+		 * descriptor count exceeds INT_MAX, with an arbitrary outcome.
+		 */
+		{
+			rlim_t i;
+			for (i = 0; i < max_close_fd; ++i)
+				(void)close((int)i);
+		}
 		if (setsid() < 0)
 		{
 			dolog(LOGOPTS, "setsid: %m\n");
