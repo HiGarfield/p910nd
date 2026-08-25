@@ -349,6 +349,7 @@ static void prepBuffer(Buffer_t *b, fd_set *readfds, fd_set *writefds)
 {
 	if (b->outfd >= 0 && b->outfd < FD_SETSIZE &&
 		(!(b->err & WRITE_ERR)) &&
+		!b->eof_sent &&
 		(b->bytes != 0 || b->eof_read))
 	{
 		FD_SET(b->outfd, writefds);
