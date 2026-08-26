@@ -274,7 +274,17 @@ static int open_printer(int lpnumber)
 #endif
 	if (device == NULL)
 		device = lpname;
-	if ((lp = open(device, bidir ? (O_RDWR | O_NONBLOCK) : O_WRONLY)) == -1)
+	/*
+	 * Always open the printer with O_NONBLOCK.  For a unidirectional job the
+	 * previous code opened O_WRONLY (blocking); with some device drivers (and
+	 * notably with a FIFO used in place of a printer) open() blocks until a
+	 * reader appears, which would hang the whole daemon -- it could neither
+	 * accept new connections nor be shut down -- violating the requirement
+	 * that a missing/again-unavailable printer must not deadlock the process.
+	 * O_NONBLOCK makes open() return immediately (-1 with ENXIO/ENOENT) so the
+	 * caller's retry loop can simply sleep and try again.
+	 */
+	if ((lp = open(device, bidir ? (O_RDWR | O_NONBLOCK) : (O_WRONLY | O_NONBLOCK))) == -1)
 	{
 		if (errno == EBUSY)
 			dolog(LOGOPTS, "%s: %m, will try opening later\n", device);
