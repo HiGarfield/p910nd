@@ -680,7 +680,6 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 	int io_lp = lp;
 	int close_io_fd = 0;
 	int close_io_lp = 0;
-	int need_clear_lp = 1;
 	int rc = 0;
 	ssize_t result;
 	Buffer_t networkToPrinterBuffer;
@@ -856,10 +855,11 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 						then.tv_usec -= 1000000;
 						then.tv_sec++;
 					}
-					if (!need_clear_lp)
-					{
-						timer = 1;
-					}
+					/* Pace the return stream so the printer cannot dominate
+					 * the network direction.  Previously this was gated on a
+					 * now-removed "need_clear_lp" flag; the throttle must apply
+					 * unconditionally to every printer read. */
+					timer = 1;
 				}
 				else if (result == 0)
 				{
@@ -888,31 +888,18 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 				result = writeBuffer(&networkToPrinterBuffer);
 				if (result > 0)
 				{
-					if (need_clear_lp)
-					{
-						need_clear_lp = 0;
-						printerToNetworkBuffer.startidx = 0;
-						printerToNetworkBuffer.endidx = 0;
-						printerToNetworkBuffer.bytes = 0;
-						printerToNetworkBuffer.totalin = 0;
-						printerToNetworkBuffer.totalout = 0;
-					}
 					dolog(LOG_DEBUG, "%.2f: wrote %zd bytes to printer\n",
 						  now.tv_sec + now.tv_usec / 1e6, result);
 				}
 			}
 			if ((FD_VALID(io_fd) && FD_ISSET(io_fd, &writefds)) || printerToNetworkBuffer.outfd == -1)
 			{
-				if (need_clear_lp)
-				{
-					printerToNetworkBuffer.startidx = 0;
-					printerToNetworkBuffer.endidx = 0;
-					printerToNetworkBuffer.bytes = 0;
-					printerToNetworkBuffer.totalin = 0;
-					printerToNetworkBuffer.totalout = 0;
-					continue;
-				}
-				/* Write data to network. */
+				/* Write data to network.  Printer responses are always
+				 * forwarded (they are buffered in printerToNetworkBuffer and
+				 * drained here); we no longer discard responses that arrive
+				 * before the first byte has been written to the printer, so
+				 * devices that handshake/respond before receiving data keep
+				 * working. */
 				result = writeBuffer(&printerToNetworkBuffer);
 				/* If socket write error, discard further data from printer */
 				if (result < 0)
