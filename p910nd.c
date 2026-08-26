@@ -504,6 +504,25 @@ static ssize_t writeBuffer(Buffer_t *b)
 			{
 				return 0;
 			}
+			if (b->bytes == 0 &&
+				(errno == EPIPE || errno == ECONNRESET))
+			{
+				/*
+				 * The buffer is empty, so every byte that was ever read in
+				 * has already been written out.  A write error here means the
+				 * peer closed its receive side AFTER the whole job was
+				 * delivered (e.g. a printer that finishes and hangs up, or a
+				 * network peer that ACKed everything then closed).  That is
+				 * successful job completion, not data loss, so mark EOF sent
+				 * and return without raising WRITE_ERR.  (If bytes were still
+				 * pending the error is genuine data loss and falls through to
+				 * the WRITE_ERR branch below.)
+				 */
+				dolog(LOG_DEBUG, "write: peer closed after all data was sent\n");
+				if (b->eof_read)
+					b->eof_sent = 1;
+				return 0;
+			}
 			dolog(LOGOPTS, "write error: %m\n");
 			b->err |= WRITE_ERR;
 		}
@@ -526,9 +545,27 @@ static ssize_t writeBuffer(Buffer_t *b)
 				/* Unwrap the buffer. */
 				b->startidx = 0;
 			}
+			/*
+			 * This write drained the last pending bytes.  If EOF was already
+			 * seen on the input, the whole stream has now been delivered, so
+			 * mark it sent here -- in the SAME call that emptied the buffer.
+			 * The old code placed this test in an `else if (b->eof_read)`
+			 * branch that was skipped whenever `avail` was non-zero (i.e.
+			 * whenever a write actually happened), so eof_sent was only raised
+			 * on the *next* empty writeBuffer() call.  That postponed job
+			 * completion by an extra select()/loop iteration and, combined
+			 * with the now-present idle timeout, could needlessly stretch a
+			 * bidirectional job that finishes exactly as its last byte is
+			 * written.  Marking it here makes completion immediate.
+			 */
+			if (b->bytes == 0 && b->eof_read)
+			{
+				b->eof_sent = 1;
+				dolog(LOG_DEBUG, "write: eof\n");
+			}
 		}
 	}
-	else if (b->eof_read)
+	if (b->eof_read)
 	{
 		if (b->bytes == 0)
 		{
@@ -868,6 +905,32 @@ static int copy_stream(int fd, int lp)
 	/* Add a short delay to allow flushing */
 	if (networkToPrinterBuffer.eof_sent)
 		usleep(200000); /* 200ms */
+	/*
+	 * If every network byte already reached the printer (eof_sent set), any
+	 * lingering error flag is teardown after a successful job, not a failure:
+	 *  - WRITE_ERR: the printer peer closed its receive side once the whole
+	 *    job had been delivered (EPIPE after eof_sent).
+	 *  - READ_ERR: the network peer closed/reset its send side after the last
+	 *    byte was already read and forwarded; the data is intact.
+	 * A genuine failure always leaves bytes undelivered (eof_sent clear), so
+	 * it is still reported.  Reporting a completed job as failed would make
+	 * the caller log "copy_stream: <errno>" and treat a success as an error.
+	 */
+	if (networkToPrinterBuffer.eof_sent)
+		networkToPrinterBuffer.err = 0;
+	/*
+	 * Defensive: if eof_sent was not set (e.g. a hard read error broke the
+	 * loop before the EOF-sent marker could be raised) but every byte that
+	 * was read in has already been written out (totalin == totalout, no
+	 * bytes pending) and EOF was observed on the input, the job is complete.
+	 * A lingering READ_ERR/WRITE_ERR is then just the peer closing its side
+	 * after the last byte was delivered, not data loss, so do not report it.
+	 */
+	if (!networkToPrinterBuffer.eof_sent &&
+	    networkToPrinterBuffer.eof_read &&
+	    networkToPrinterBuffer.bytes == 0 &&
+	    networkToPrinterBuffer.totalin == networkToPrinterBuffer.totalout)
+		networkToPrinterBuffer.err = 0;
 	rc = networkToPrinterBuffer.err ? -1 : rc;
 out:
 	if (close_io_lp)
