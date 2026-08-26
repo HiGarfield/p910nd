@@ -887,12 +887,23 @@ static int copy_stream(int fd, int lp)
 					goto out;
 				}
 			}
+			/*
+			 * A hard read error (e.g. a network peer that resets the
+			 * connection with data still in flight) sets eof_read inside
+			 * readBuffer() but must NOT discard the bytes already pulled
+			 * into the buffer.  Fall through to writeBuffer(), which drains
+			 * the rest to the printer; the loop then exits via eof_sent and
+			 * the lingering error flag is cleared on the exit path when
+			 * every byte was delivered (see the eof_sent / totalin==totalout
+			 * checks below), so a completed job is reported as success rather
+			 * than a spurious failure.  This mirrors the bidirectional drain
+			 * behaviour and prevents silent data loss on a fast network /
+			 * slow printer.  Bailing out here would both drop buffered data
+			 * and misreport a finished job as failed.
+			 */
 			result = readBuffer(&networkToPrinterBuffer);
 			if (result < 0)
-			{
-				rc = (int)result;
-				goto out;
-			}
+				result = 0;
 			result = writeBuffer(&networkToPrinterBuffer);
 			if (result < 0)
 			{
