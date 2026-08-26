@@ -61,8 +61,12 @@ int main(void)
 	assert(!FD_ISSET(sv[1], &writefds));
 
 	/*
-	 * With buffered bytes the buffer must still be drainable even when
-	 * eof_read is set; eof_sent is only reached after those bytes go out.
+	 * With eof_read already set (the prior block left it at 1) and five
+	 * fresh bytes buffered, writeBuffer() must emit those bytes AND, because
+	 * the input has reached EOF (eof_read) and the buffer is now drained
+	 * (bytes == 0), propagate eof_sent in the same call.  This verifies the
+	 * "drain + EOF propagation" coupling: a partial write that empties the
+	 * buffer under eof_read marks the stream fully sent.
 	 */
 	b.eof_sent = 0;
 	b.bytes = 5;
@@ -81,8 +85,10 @@ int main(void)
 		assert(n == 5);
 		assert(memcmp(chunk, b.buffer, 5) == 0);
 	}
-	/* EOF is propagated on the next poll once the buffer is drained. */
-	assert(b.eof_sent == 0);
+	/* EOF is already propagated by the write that drained the buffer under
+	 * eof_read, so eof_sent is now set; a subsequent empty writeBuffer()
+	 * (simulating the next poll) leaves it set and returns 0. */
+	assert(b.eof_sent == 1);
 	assert(writeBuffer(&b) == 0);
 	assert(b.eof_sent == 1);
 	/* And after eof_sent the write side is no longer polled. */
