@@ -156,7 +156,9 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
 #endif
 #define LOGOPTS LOG_ERR
 
+#ifndef BUFFER_SIZE
 #define BUFFER_SIZE 8192
+#endif
 
 /* Idle timeout after which a bidirectional job with no pending data in
  * either direction is considered finished.  Configurable so tests can
@@ -514,6 +516,21 @@ static ssize_t writeBuffer(Buffer_t *b)
 	return result;
 }
 
+/* Returns 1 when at least timeout_sec seconds (microsecond-accurate) have
+ * elapsed since `last`, otherwise 0.  A tv_sec-only comparison can fire up
+ * to one second early whenever last.tv_usec exceeds now.tv_usec. */
+static int idle_timeout_elapsed(const struct timeval *now,
+                                const struct timeval *last,
+                                int timeout_sec)
+{
+	time_t diff = now->tv_sec - last->tv_sec;
+	if (diff > timeout_sec)
+		return 1;
+	if (diff == timeout_sec)
+		return now->tv_usec >= last->tv_usec;
+	return 0;
+}
+
 /* Copy network data from file descriptor fd (network) to lp (printer) until EOS */
 /* If bidir, also copy data from printer (lp) to network (fd). */
 static int copy_stream(int fd, int lp)
@@ -637,12 +654,20 @@ static int copy_stream(int fd, int lp)
 			 */
 			if (networkToPrinterBuffer.bytes == 0 &&
 				printerToNetworkBuffer.bytes == 0 &&
-				!(FD_VALID(io_fd) && FD_ISSET(io_fd, &readfds)) &&
-				now.tv_sec - last_read_time.tv_sec >= IDLE_TIMEOUT_SEC)
+				!(FD_VALID(io_fd) && FD_ISSET(io_fd, &readfds)))
 			{
-				dolog(LOG_NOTICE, "read no data from network for %ds, stop copy stream\n",
-				      IDLE_TIMEOUT_SEC);
-				break;
+				/*
+				 * Compare with microsecond precision: a naive tv_sec-only
+				 * comparison can fire up to one second early when
+				 * last_read_time.tv_usec exceeds now.tv_usec, prematurely
+				 * tearing down a job on a slow printer.
+				 */
+				if (idle_timeout_elapsed(&now, &last_read_time, IDLE_TIMEOUT_SEC))
+				{
+					dolog(LOG_NOTICE, "read no data from network for %ds, stop copy stream\n",
+						  IDLE_TIMEOUT_SEC);
+					break;
+				}
 			}
 			if (FD_VALID(io_lp) && FD_ISSET(io_lp, &readfds))
 			{
