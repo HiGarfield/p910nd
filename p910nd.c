@@ -962,6 +962,7 @@ static void server(int lpnumber)
 			if ((proto = getprotobyname("tcp")) == NULL)
 			{
 				dolog(LOGOPTS, "Cannot find protocol for TCP!\n");
+				free_lock();
 				exit(1);
 			}
 		}
