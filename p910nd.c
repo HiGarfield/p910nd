@@ -560,20 +560,19 @@ static int copy_stream(int fd, int lp)
 		struct timeval last_read_time;
 		int timer = 0;
 		Buffer_t printerToNetworkBuffer;
-		initBuffer(&printerToNetworkBuffer, io_lp, io_fd, 0);
 		fd_set readfds;
 		fd_set writefds;
+		initBuffer(&printerToNetworkBuffer, io_lp, io_fd, 0);
 		gettimeofday(&last_read_time, NULL);
 		/* Finish when network sent EOF. */
 		/* Although the printer to network stream may not be finished (does this matter?) */
 		while (!networkToPrinterBuffer.eof_sent && !(networkToPrinterBuffer.err & WRITE_ERR))
 		{
+			int maxfd = -1;
 			FD_ZERO(&readfds);
 			FD_ZERO(&writefds);
 			prepBuffer(&networkToPrinterBuffer, &readfds, &writefds);
 			prepBuffer(&printerToNetworkBuffer, &readfds, &writefds);
-
-			int maxfd = -1;
 #define MAYBE_MAX(x)                      \
 	do                                    \
 	{                                     \
