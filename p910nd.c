@@ -336,6 +336,34 @@ static int set_nonblocking(int fd, const char *name)
 	return 0;
 }
 
+/*
+ * Block while the listening socket has no descriptor available to accept a new
+ * connection on.  Called after accept() fails with a transient resource error
+ * (EMFILE/ENFILE/ENOBUFS/ENOMEM).  A bare sleep(1) busy-spins at 100% CPU for
+ * as long as the condition lasts, violating the requirement that the daemon
+ * must never deadlock or spin; instead we wait in select() on the listening
+ * socket with a bounded 1s timeout so the process consumes no CPU while a
+ * descriptor frees up and still re-checks promptly once one becomes available.
+ * Falls back to sleep(1) only when netfd is outside the select()-safe range.
+ */
+static void accept_backoff(int netfd)
+{
+	if (FD_VALID(netfd))
+	{
+		fd_set afds;
+		struct timeval atv;
+		FD_ZERO(&afds);
+		FD_SET(netfd, &afds);
+		atv.tv_sec = 1;
+		atv.tv_usec = 0;
+		(void)select(netfd + 1, &afds, NULL, NULL, &atv);
+	}
+	else
+	{
+		sleep(1);
+	}
+}
+
 /* Duplicate fd into the select()-safe range [0, FD_SETSIZE). */
 static int dup_fd_below_fdsetsize(int fd, const char *name)
 {
@@ -1111,7 +1139,17 @@ static void one_job(int lpnumber)
 		dolog(LOG_NOTICE, "Connection from %s port %hu\n", get_ip_str((struct sockaddr *)&client, host, sizeof(host)), get_port((struct sockaddr *)&client));
 	}
 	if (get_lock(lpnumber) == 0)
-		return;
+	{
+		/*
+		 * Under (x)inetd the network connection is descriptor 0.  A failed
+		 * lock means another instance already owns the printer.  Mirror the
+		 * server() failure path: terminate the process so inetd sees a
+		 * definite exit status and the connection (descriptor 0) is released
+		 * by the kernel on exit, instead of silently returning and leaving
+		 * an ambiguous, half-handled connection behind.
+		 */
+		exit(1);
+	}
 	/* Make sure lp device is open... */
 	while ((lp = open_printer(lpnumber)) == -1)
 		sleep(10);
@@ -1340,8 +1378,12 @@ static void server(int lpnumber)
 			if (errno == EMFILE || errno == ENFILE ||
 			    errno == ENOBUFS || errno == ENOMEM)
 			{
-				dolog(LOGOPTS, "accept: %m, retrying\n");
-				sleep(1);
+				/*
+				 * Transient resource exhaustion.  Wait without burning CPU
+				 * (see accept_backoff) instead of a busy-spin sleep(1).
+				 */
+				dolog(LOGOPTS, "accept: %m, waiting for a free descriptor\n");
+				accept_backoff(netfd);
 				continue;
 			}
 			break;
@@ -1442,6 +1484,18 @@ int main(int argc, char *argv[])
 			break;
 		case 'i':
 			bindaddr = optarg;
+			if (bindaddr != NULL && strlen(bindaddr) == 0)
+			{
+				/*
+				 * An empty -i would be passed straight to getaddrinfo(),
+				 * which treats "" as "any address" and silently overrides
+				 * the user's intent.  Reject it explicitly so a typo does
+				 * not quietly rebind to all interfaces.  The standard hints
+				 * still bound the length, but an explicit check is clearer.
+				 */
+				dolog(LOGOPTS, "invalid bind address (empty)\n");
+				usage();
+			}
 			break;
 		case 'v':
 			show_version();
