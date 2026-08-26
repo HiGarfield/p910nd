@@ -627,9 +627,20 @@ static int idle_timeout_elapsed(const struct timeval *now,
 	return 0;
 }
 
-/* Copy network data from file descriptor fd (network) to lp (printer) until EOS */
-/* If bidir, also copy data from printer (lp) to network (fd). */
-static int copy_stream(int fd, int lp)
+/*
+ * Copy network data from file descriptor fd (network) to lp (printer) until EOS.
+ * If bidir, also copy data from printer (lp) to network (fd).
+ *
+ * fd_closed/lp_closed (may be NULL) are set to 1 when the caller's descriptor
+ * number has already been closed here and must NOT be closed again by the
+ * caller.  This happens when a descriptor lies outside [0, FD_SETSIZE) and has
+ * to be replaced by an in-range duplicate: dup_fd_below_fdsetsize() closes the
+ * original as part of that substitution.  Without this contract the caller's
+ * close() would operate on an already-closed number, which in a long-running
+ * daemon can destroy an unrelated descriptor that meanwhile got the same number
+ * recycled.
+ */
+static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 {
 	/*
 	 * Initialised to the caller's descriptors so the `out:` cleanup path is
@@ -646,6 +657,11 @@ static int copy_stream(int fd, int lp)
 	ssize_t result;
 	Buffer_t networkToPrinterBuffer;
 
+	if (fd_closed != NULL)
+		*fd_closed = 0;
+	if (lp_closed != NULL)
+		*lp_closed = 0;
+
 	/*
 	 * Both modes drive the descriptors through select()/fd_set, so both need
 	 * descriptors inside [0, FD_SETSIZE).  Descriptors beyond FD_SETSIZE
@@ -655,10 +671,17 @@ static int copy_stream(int fd, int lp)
 	io_fd = dup_fd_below_fdsetsize(fd, "network");
 	if (io_fd < 0)
 	{
+		/*
+		 * dup_fd_below_fdsetsize() only fails after it has given up on `fd`
+		 * without closing it, so the caller still owns the original number.
+		 */
 		rc = -1;
 		goto out;
 	}
 	close_io_fd = (io_fd != fd);
+	/* The substitution closed the caller's original descriptor number. */
+	if (close_io_fd && fd_closed != NULL)
+		*fd_closed = 1;
 
 	io_lp = dup_fd_below_fdsetsize(lp, "printer");
 	if (io_lp < 0)
@@ -667,6 +690,8 @@ static int copy_stream(int fd, int lp)
 		goto out;
 	}
 	close_io_lp = (io_lp != lp);
+	if (close_io_lp && lp_closed != NULL)
+		*lp_closed = 1;
 
 	/*
 	 * select() only guarantees that at least one byte can be moved, never the
@@ -1051,9 +1076,32 @@ out:
 	return rc;
 }
 
+#ifdef TESTING
+/*
+ * Convenience wrapper used by the test suite, which passes descriptors that are
+ * always inside [0, FD_SETSIZE) and keeps ownership of them itself, so the
+ * "already closed" feedback cannot be triggered.  Production code must use
+ * copy_stream_ex() and honour the fd_closed/lp_closed flags instead.
+ *
+ * Compiled only for -DTESTING, and marked "possibly unused" because p910nd.c is
+ * also compiled standalone with -DTESTING -Werror (see
+ * tests/test_server_testing_warnings.c), where nothing references it.
+ */
+#if defined(__GNUC__)
+__attribute__((unused))
+#endif
+/* cppcheck-suppress unusedFunction */
+static int copy_stream(int fd, int lp)
+{
+	return copy_stream_ex(fd, lp, NULL, NULL);
+}
+#endif
+
 static void one_job(int lpnumber)
 {
 	int lp;
+	int net_closed = 0;
+	int lp_closed = 0;
 	struct sockaddr_storage client;
 	socklen_t clientlen = sizeof(client);
 
@@ -1067,9 +1115,15 @@ static void one_job(int lpnumber)
 	/* Make sure lp device is open... */
 	while ((lp = open_printer(lpnumber)) == -1)
 		sleep(10);
-	if (copy_stream(0, lp) < 0)
+	if (copy_stream_ex(0, lp, &net_closed, &lp_closed) < 0)
 		dolog(LOGOPTS, "copy_stream: %m\n");
-	(void)close(lp);
+	/*
+	 * Only close what copy_stream_ex() did not already release: closing an
+	 * already-closed number could hit an unrelated recycled descriptor.
+	 */
+	if (!lp_closed)
+		(void)close(lp);
+	(void)net_closed; /* stdin is released when the process exits */
 	free_lock();
 }
 
@@ -1308,10 +1362,24 @@ static void server(int lpnumber)
 		while ((lp = open_printer(lpnumber)) == -1)
 			sleep(10);
 
-		if (copy_stream(fd, lp) < 0)
-			dolog(LOGOPTS, "copy_stream: %m\n");
-		(void)close(fd);
-		(void)close(lp);
+		{
+			int net_closed = 0;
+			int lp_closed = 0;
+
+			if (copy_stream_ex(fd, lp, &net_closed, &lp_closed) < 0)
+				dolog(LOGOPTS, "copy_stream: %m\n");
+			/*
+			 * copy_stream_ex() may have replaced an out-of-range descriptor
+			 * with an in-range duplicate, closing the original in the
+			 * process.  Closing such a number again would, once it has been
+			 * recycled (e.g. by the next accept() or by the listening
+			 * socket), destroy an unrelated live descriptor.
+			 */
+			if (!net_closed)
+				(void)close(fd);
+			if (!lp_closed)
+				(void)close(lp);
+		}
 	}
 	dolog(LOGOPTS, "accept: %m\n");
 	free_lock();
