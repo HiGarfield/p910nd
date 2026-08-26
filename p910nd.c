@@ -302,6 +302,40 @@ static int open_printer(int lpnumber)
 	return (lp);
 }
 
+/*
+ * Put fd into non-blocking mode.
+ *
+ * The network descriptor arrives either from accept() or from (x)inetd on
+ * stdin, and in both cases it is in blocking mode.  copy_stream() drives it
+ * through select() and then calls read()/write() on it, but select() only
+ * promises that *at least one* byte can be moved -- never that the whole
+ * contiguous chunk computed from the circular buffer fits.  A blocking
+ * descriptor therefore lets read() park the daemon even though it still has
+ * buffered bytes to hand to a printer that is ready to accept them, which
+ * stalls delivery for as long as the peer stays quiet (unbounded).  Making the
+ * descriptor non-blocking turns those cases into EAGAIN, which readBuffer()
+ * and writeBuffer() already treat as "no progress this round", so the loop
+ * falls through to the other direction instead of blocking.
+ */
+static int set_nonblocking(int fd, const char *name)
+{
+	int flags = fcntl(fd, F_GETFL, 0);
+
+	if (flags == -1)
+	{
+		dolog(LOGOPTS, "fcntl(F_GETFL, %s fd=%d): %m\n", name, fd);
+		return -1;
+	}
+	if ((flags & O_NONBLOCK) == O_NONBLOCK)
+		return 0;
+	if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1)
+	{
+		dolog(LOGOPTS, "fcntl(F_SETFL O_NONBLOCK, %s fd=%d): %m\n", name, fd);
+		return -1;
+	}
+	return 0;
+}
+
 /* Duplicate fd into the select()-safe range [0, FD_SETSIZE). */
 static int dup_fd_below_fdsetsize(int fd, const char *name)
 {
@@ -597,6 +631,12 @@ static int idle_timeout_elapsed(const struct timeval *now,
 /* If bidir, also copy data from printer (lp) to network (fd). */
 static int copy_stream(int fd, int lp)
 {
+	/*
+	 * Initialised to the caller's descriptors so the `out:` cleanup path is
+	 * well-defined even when dup_fd_below_fdsetsize() fails before assigning
+	 * them (cppcheck reports the initialisation as redundant, but `goto out`
+	 * can be reached before the assignments below).
+	 */
 	int io_fd = fd;
 	int io_lp = lp;
 	int close_io_fd = 0;
@@ -607,27 +647,43 @@ static int copy_stream(int fd, int lp)
 	Buffer_t networkToPrinterBuffer;
 
 	/*
-	 * Bidirectional mode relies on select()/fd_set. Descriptors beyond
-	 * FD_SETSIZE cannot be monitored safely and would make the stream stall.
+	 * Both modes drive the descriptors through select()/fd_set, so both need
+	 * descriptors inside [0, FD_SETSIZE).  Descriptors beyond FD_SETSIZE
+	 * cannot be monitored safely and would make the stream stall.
 	 */
-	if (bidir)
+	/* cppcheck-suppress redundantInitialization */
+	io_fd = dup_fd_below_fdsetsize(fd, "network");
+	if (io_fd < 0)
 	{
-		io_fd = dup_fd_below_fdsetsize(fd, "network");
-		if (io_fd < 0)
-		{
-			rc = -1;
-			goto out;
-		}
-		close_io_fd = (io_fd != fd);
-
-		io_lp = dup_fd_below_fdsetsize(lp, "printer");
-		if (io_lp < 0)
-		{
-			rc = -1;
-			goto out;
-		}
-		close_io_lp = (io_lp != lp);
+		rc = -1;
+		goto out;
 	}
+	close_io_fd = (io_fd != fd);
+
+	io_lp = dup_fd_below_fdsetsize(lp, "printer");
+	if (io_lp < 0)
+	{
+		rc = -1;
+		goto out;
+	}
+	close_io_lp = (io_lp != lp);
+
+	/*
+	 * select() only guarantees that at least one byte can be moved, never the
+	 * whole contiguous chunk that readBuffer()/writeBuffer() compute from the
+	 * circular buffer.  With a blocking descriptor that difference lets read()
+	 * or write() park the daemon while the other direction still has work to
+	 * do (a slow printer waiting for buffered bytes while the peer is quiet).
+	 * Non-blocking descriptors turn those cases into EAGAIN, which both
+	 * helpers already handle as "no progress this round".
+	 *
+	 * The printer is already opened O_NONBLOCK by open_printer(); the network
+	 * descriptor comes from accept() or from (x)inetd and is blocking, so it
+	 * must be switched explicitly.  A failure here is not fatal: the loops
+	 * stay correct (just possibly blocking), so only log it.
+	 */
+	(void)set_nonblocking(io_fd, "network");
+	(void)set_nonblocking(io_lp, "printer");
 
 	initBuffer(&networkToPrinterBuffer, io_fd, io_lp, 1);
 
@@ -866,27 +922,66 @@ static int copy_stream(int fd, int lp)
 		 * original read-then-write structure, which is known to make forward
 		 * progress whenever the printer becomes writable again.
 		 */
+		fd_set readfds;
 		fd_set writefds;
 		while (!networkToPrinterBuffer.eof_sent &&
 			   !(networkToPrinterBuffer.err & WRITE_ERR))
 		{
-			/* Wait for the printer to become writable before we try to push
-			 * pending bytes; this is the back-pressure that avoids busy-looping
-			 * on a slow/temporarily-busy printer. */
-			if (networkToPrinterBuffer.bytes > 0 &&
-				!(networkToPrinterBuffer.err & WRITE_ERR) &&
-				FD_VALID(io_lp))
+			/*
+			 * Block until at least one direction can make progress.
+			 *
+			 * Both descriptors are non-blocking, so the loop must never call
+			 * read()/write() speculatively -- that would busy-spin.  Arm the
+			 * printer for writing whenever bytes are pending (back-pressure
+			 * for a slow printer) and the network for reading whenever there
+			 * is free buffer space.  Waiting on BOTH is what avoids a stall:
+			 * arming only the printer and then doing a blocking read on a
+			 * possibly-empty socket leaves pending bytes undelivered to a
+			 * printer that is ready for them, for as long as the peer stays
+			 * quiet.  select() blocks with no timeout, so an idle job
+			 * consumes no CPU while a missing/again-unavailable printer or a
+			 * quiet peer is waited on.
+			 */
+			int maxfd = -1;
+			int want_write = (networkToPrinterBuffer.bytes > 0 ||
+			                  networkToPrinterBuffer.eof_read) &&
+			                 !(networkToPrinterBuffer.err & WRITE_ERR) &&
+			                 !networkToPrinterBuffer.eof_sent &&
+			                 FD_VALID(io_lp);
+			int want_read = !networkToPrinterBuffer.eof_read &&
+			                networkToPrinterBuffer.bytes < BUFFER_SIZE &&
+			                !(networkToPrinterBuffer.err & READ_ERR) &&
+			                FD_VALID(io_fd);
+
+			FD_ZERO(&readfds);
+			FD_ZERO(&writefds);
+			if (want_write)
 			{
-				FD_ZERO(&writefds);
 				FD_SET(io_lp, &writefds);
-				if (select(io_lp + 1, NULL, &writefds, NULL, NULL) < 0)
-				{
-					if (errno == EINTR)
-						continue;
-					rc = -1;
-					goto out;
-				}
+				maxfd = MAX(maxfd, io_lp);
 			}
+			if (want_read)
+			{
+				FD_SET(io_fd, &readfds);
+				maxfd = MAX(maxfd, io_fd);
+			}
+			if (maxfd >= 0 &&
+				select(maxfd + 1, &readfds, &writefds, NULL, NULL) < 0)
+			{
+				if (errno == EINTR)
+					continue;
+				rc = -1;
+				goto out;
+			}
+			/*
+			 * Only touch a descriptor select() reported ready.  Reading when
+			 * the socket is not readable is exactly the stall described
+			 * above, and reading when the buffer is full is pointless work.
+			 */
+			if (want_read && FD_ISSET(io_fd, &readfds))
+				(void)readBuffer(&networkToPrinterBuffer);
+			if (!(want_write && FD_ISSET(io_lp, &writefds)))
+				continue;
 			/*
 			 * A hard read error (e.g. a network peer that resets the
 			 * connection with data still in flight) sets eof_read inside
@@ -903,16 +998,13 @@ static int copy_stream(int fd, int lp)
 			 * behaviour and prevents silent data loss on a fast network /
 			 * slow printer.  Bailing out here would both drop buffered data
 			 * and misreport a finished job as failed.  Note: readBuffer()'s
-			 * return value is intentionally not captured here -- its only
+			 * return value is intentionally not captured above -- its only
 			 * effect we rely on is the side effect (filling the buffer and
 			 * setting eof_read on EOF or READ_ERR on a hard error).
 			 * writeBuffer() below determines forward progress and owns the
-			 * `result` used for the error check, so capturing readBuffer()'s
-			 * value would be a dead store immediately overwritten by
-			 * writeBuffer().
+			 * `result` used for the error check.
 			 */
-			 (void)readBuffer(&networkToPrinterBuffer);
-			 result = writeBuffer(&networkToPrinterBuffer);
+			result = writeBuffer(&networkToPrinterBuffer);
 			if (result < 0)
 			{
 				rc = (int)result;
