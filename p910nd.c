@@ -761,9 +761,19 @@ static int copy_stream(int fd, int lp)
 							  now.tv_sec + now.tv_usec / 1e6, result);
 				}
 			}
-			if ((networkToPrinterBuffer.err & READ_ERR) && now.tv_sec - last_read_time.tv_sec >= 10)
+			if ((networkToPrinterBuffer.err & READ_ERR) && networkToPrinterBuffer.bytes == 0)
 			{
-				dolog(LOG_NOTICE, "read no data from network err, stop copy stream in 10s\n");
+				/*
+				 * A hard network read error stops further reads (eof_read is
+				 * set), but any bytes already buffered must still reach the
+				 * printer.  Leave only once the buffer is fully drained: a
+				 * fixed wall-clock deadline could truncate a job on a slow
+				 * printer (e.g. a 300 bps serial device draining 8 KiB takes
+				 * minutes).  select() keeps blocking meanwhile, so this never
+				 * spins the CPU; if the printer never becomes writable the
+				 * idle-timeout above still bounds the wait.
+				 */
+				dolog(LOG_NOTICE, "network read error, buffered data drained, stop copy stream\n");
 				break;
 			}
 		}
