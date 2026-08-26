@@ -747,7 +747,9 @@ static int copy_stream(int fd, int lp)
 				if (result < 0)
 				{
 					printerToNetworkBuffer.outfd = -1;
-					printerToNetworkBuffer.err = 0;
+					/* Only clear the write-error bit; preserve any
+					 * printer-side READ_ERR so its state is not lost. */
+					printerToNetworkBuffer.err &= ~WRITE_ERR;
 					dolog(LOG_DEBUG, "network write error, discarding further printer data\n");
 					continue;
 				}
