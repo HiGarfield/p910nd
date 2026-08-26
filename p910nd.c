@@ -801,15 +801,59 @@ static int copy_stream(int fd, int lp)
 	}
 	else
 	{
-		/* Unidirectional: simply read from network, and write to printer. */
-		while (!networkToPrinterBuffer.eof_sent && !(networkToPrinterBuffer.err & WRITE_ERR))
+		/*
+		 * Unidirectional: read from network, write to printer.
+		 *
+		 * The printer is opened O_NONBLOCK (see open_printer), so a write()
+		 * may return EAGAIN when the device is momentarily busy (e.g. a slow
+		 * parallel port or a printer that throttles).  The old code called
+		 * readBuffer()/writeBuffer() back to back; when the printer was not
+		 * writable writeBuffer() made no progress and the loop spun at 100%
+		 * CPU while the buffer was full, violating the requirement that
+		 * speed differences between the network and the printer must be
+		 * handled without busy-waiting.
+		 *
+		 * Fix: before draining the buffer to the printer, block in select()
+		 * until the printer is writable (when there is pending data).  This
+		 * replaces the old busy-spin with a kernel-level block, so the daemon
+		 * copes with any printer speed and with temporary device
+		 * unavailability without consuming CPU.  The loop otherwise keeps the
+		 * original read-then-write structure, which is known to make forward
+		 * progress whenever the printer becomes writable again.
+		 */
+		fd_set writefds;
+		while (!networkToPrinterBuffer.eof_sent &&
+			   !(networkToPrinterBuffer.err & WRITE_ERR))
 		{
+			/* Wait for the printer to become writable before we try to push
+			 * pending bytes; this is the back-pressure that avoids busy-looping
+			 * on a slow/temporarily-busy printer. */
+			if (networkToPrinterBuffer.bytes > 0 &&
+				!(networkToPrinterBuffer.err & WRITE_ERR) &&
+				FD_VALID(io_lp))
+			{
+				FD_ZERO(&writefds);
+				FD_SET(io_lp, &writefds);
+				if (select(io_lp + 1, NULL, &writefds, NULL, NULL) < 0)
+				{
+					if (errno == EINTR)
+						continue;
+					rc = -1;
+					goto out;
+				}
+			}
 			result = readBuffer(&networkToPrinterBuffer);
-			if (result > 0)
-				dolog(LOG_DEBUG, "read %zd bytes from network\n", result);
+			if (result < 0)
+			{
+				rc = (int)result;
+				goto out;
+			}
 			result = writeBuffer(&networkToPrinterBuffer);
-			if (result > 0)
-				dolog(LOG_DEBUG, "wrote %zd bytes to printer\n", result);
+			if (result < 0)
+			{
+				rc = (int)result;
+				goto out;
+			}
 		}
 		dolog(LOG_NOTICE, "Finished job: %lu/%lu bytes sent to printer\n", networkToPrinterBuffer.totalout, networkToPrinterBuffer.totalin);
 	}
