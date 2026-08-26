@@ -891,20 +891,28 @@ static int copy_stream(int fd, int lp)
 			 * A hard read error (e.g. a network peer that resets the
 			 * connection with data still in flight) sets eof_read inside
 			 * readBuffer() but must NOT discard the bytes already pulled
-			 * into the buffer.  Fall through to writeBuffer(), which drains
-			 * the rest to the printer; the loop then exits via eof_sent and
-			 * the lingering error flag is cleared on the exit path when
-			 * every byte was delivered (see the eof_sent / totalin==totalout
+			 * into the buffer.  readBuffer() returns -1 on that hard error,
+			 * but the loop condition only checks eof_sent and WRITE_ERR, so
+			 * a READ_ERR does not stop the loop; writeBuffer() below keeps
+			 * draining the already-buffered bytes to the printer until the
+			 * buffer empties, at which point eof_sent is raised and the
+			 * lingering error flag is cleared on the exit path when every
+			 * byte was delivered (see the eof_sent / totalin==totalout
 			 * checks below), so a completed job is reported as success rather
 			 * than a spurious failure.  This mirrors the bidirectional drain
 			 * behaviour and prevents silent data loss on a fast network /
 			 * slow printer.  Bailing out here would both drop buffered data
-			 * and misreport a finished job as failed.
+			 * and misreport a finished job as failed.  Note: readBuffer()'s
+			 * return value is intentionally not captured here -- its only
+			 * effect we rely on is the side effect (filling the buffer and
+			 * setting eof_read on EOF or READ_ERR on a hard error).
+			 * writeBuffer() below determines forward progress and owns the
+			 * `result` used for the error check, so capturing readBuffer()'s
+			 * value would be a dead store immediately overwritten by
+			 * writeBuffer().
 			 */
-			result = readBuffer(&networkToPrinterBuffer);
-			if (result < 0)
-				result = 0;
-			result = writeBuffer(&networkToPrinterBuffer);
+			 (void)readBuffer(&networkToPrinterBuffer);
+			 result = writeBuffer(&networkToPrinterBuffer);
 			if (result < 0)
 			{
 				rc = (int)result;
