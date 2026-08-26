@@ -748,7 +748,6 @@ static int copy_stream(int fd, int lp)
 				{
 					printerToNetworkBuffer.outfd = -1;
 					printerToNetworkBuffer.err = 0;
-					result = 0;
 					dolog(LOG_DEBUG, "network write error, discarding further printer data\n");
 					continue;
 				}
