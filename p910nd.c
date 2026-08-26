@@ -744,13 +744,13 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 		struct timeval now;
 		struct timeval then;
 		struct timeval timeout;
-		struct timeval last_read_time;
+		struct timeval last_activity;
 		int timer = 0;
 		Buffer_t printerToNetworkBuffer;
 		fd_set readfds;
 		fd_set writefds;
 		initBuffer(&printerToNetworkBuffer, io_lp, io_fd, 0);
-		gettimeofday(&last_read_time, NULL);
+		gettimeofday(&last_activity, NULL);
 		/* Finish when network sent EOF. */
 		/* Although the printer to network stream may not be finished (does this matter?) */
 		while (!networkToPrinterBuffer.eof_sent && !(networkToPrinterBuffer.err & WRITE_ERR))
@@ -812,7 +812,7 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 				{
 					dolog(LOG_DEBUG, "%.2f: read %zd bytes from network\n",
 						  now.tv_sec + now.tv_usec / 1e6, result);
-					gettimeofday(&last_read_time, NULL);
+					gettimeofday(&last_activity, NULL);
 				}
 			}
 			/*
@@ -827,14 +827,18 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 				!(FD_VALID(io_fd) && FD_ISSET(io_fd, &readfds)))
 			{
 				/*
-				 * Compare with microsecond precision: a naive tv_sec-only
-				 * comparison can fire up to one second early when
-				 * last_read_time.tv_usec exceeds now.tv_usec, prematurely
-				 * tearing down a job on a slow printer.
+				 * Both directions are idle (no buffered bytes, network not
+				 * readable).  Compare with microsecond precision: a naive
+				 * tv_sec-only comparison can fire up to one second early when
+				 * last_activity.tv_usec exceeds now.tv_usec, prematurely
+				 * tearing down a job on a slow printer.  last_activity is
+				 * bumped on either a network read OR a printer response read,
+				 * so a printer that keeps emitting (while the network peer is
+				 * quiet) will NOT be timed out mid-job.
 				 */
-				if (idle_timeout_elapsed(&now, &last_read_time, IDLE_TIMEOUT_SEC))
+				if (idle_timeout_elapsed(&now, &last_activity, IDLE_TIMEOUT_SEC))
 				{
-					dolog(LOG_NOTICE, "read no data from network for %ds, stop copy stream\n",
+					dolog(LOG_NOTICE, "no activity from network or printer for %ds, stop copy stream\n",
 						  IDLE_TIMEOUT_SEC);
 					break;
 				}
@@ -847,6 +851,14 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 				{
 					dolog(LOG_DEBUG, "%.2f: read %zd bytes from printer\n",
 						  now.tv_sec + now.tv_usec / 1e6, result);
+					/*
+					 * A printer response is activity too: the idle timeout
+					 * must not fire while the printer keeps sending (even if
+					 * the network peer is momentarily quiet).  Reset the
+					 * activity clock so a chatty-but-slow printer is not
+					 * torn down mid-job.  See idle_timeout_elapsed below.
+					 */
+					gettimeofday(&last_activity, NULL);
 					gettimeofday(&then, NULL);
 					/* wait 100 msec before reading again. */
 					then.tv_usec += 100000;
