@@ -601,33 +601,32 @@ static ssize_t writeBuffer(Buffer_t *b)
 				/* Unwrap the buffer. */
 				b->startidx = 0;
 			}
-			/*
-			 * This write drained the last pending bytes.  If EOF was already
-			 * seen on the input, the whole stream has now been delivered, so
-			 * mark it sent here -- in the SAME call that emptied the buffer.
-			 * The old code placed this test in an `else if (b->eof_read)`
-			 * branch that was skipped whenever `avail` was non-zero (i.e.
-			 * whenever a write actually happened), so eof_sent was only raised
-			 * on the *next* empty writeBuffer() call.  That postponed job
-			 * completion by an extra select()/loop iteration and, combined
-			 * with the now-present idle timeout, could needlessly stretch a
-			 * bidirectional job that finishes exactly as its last byte is
-			 * written.  Marking it here makes completion immediate.
-			 */
-			if (b->bytes == 0 && b->eof_read)
-			{
-				b->eof_sent = 1;
-				dolog(LOG_DEBUG, "write: eof\n");
-			}
 		}
 	}
-	if (b->eof_read)
+	/*
+	 * Single, authoritative completion point for marking the stream fully
+	 * sent: when EOF was observed on the input AND every buffered byte has
+	 * now been delivered (bytes == 0), raise eof_sent and log it exactly
+	 * once.
+	 *
+	 * This block runs after every writeBuffer() call, so it covers both
+	 * ways a stream is finished:
+	 *  - A write that *does* drain the last pending bytes in this very call
+	 *    (the "drained on write" case); and
+	 *  - A call made when the buffer is already empty (avail == 0, e.g. the
+	 *    next select()/loop iteration after EOF arrived and the printer just
+	 *    became writable), which still must raise eof_sent.
+	 *
+	 * Keeping this as the ONLY place that sets eof_sent (and logging it here
+	 * alone) avoids the previous bug where the "drained on write" case set
+	 * eof_sent -- and logged "write: eof" -- inside the write branch AND
+	 * again here, producing a duplicated debug log line on every normal job
+	 * completion.
+	 */
+	if (b->eof_read && b->bytes == 0)
 	{
-		if (b->bytes == 0)
-		{
-			b->eof_sent = 1;
-			dolog(LOG_DEBUG, "write: eof\n");
-		}
+		b->eof_sent = 1;
+		dolog(LOG_DEBUG, "write: eof\n");
 	}
 
 	/* Return the write() result, -1 (error) or #bytes written. */
