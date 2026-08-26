@@ -758,17 +758,12 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 		 * was silently dropped. */
 		int printer_stream_done = 0;
 		/* Becomes nonzero once network EOF (job data fully received) has been
-		 * observed; at that moment we begin watching for a printer response.
-		 * printer_spoke records whether the printer has emitted any response
-		 * since network EOF.  The grace period (IDLE_TIMEOUT_SEC) is only
-		 * applied when the printer actually speaks, so a printer that never
-		 * responds adds ZERO extra latency to job completion (the daemon
-		 * returns as soon as the last job byte is delivered).  A printer that
-		 * does respond gets a bounded grace window to finish its reply, after
-		 * which the job completes.  An absolute deadline (not a sliding timer)
-		 * guarantees termination even for a chatty printer. */
+		 * observed; at that moment a grace deadline is anchored and the daemon
+		 * keeps the stream open until it elapses so any printer response that
+		 * arrives (including one emitted only after network EOF) is forwarded.
+		 * An absolute deadline (not a sliding timer) guarantees termination even
+		 * for a chatty or non-responsive printer. */
 		int eof_reached = 0;
-		int printer_spoke = 0;
 		Buffer_t printerToNetworkBuffer;
 		fd_set readfds;
 		fd_set writefds;
@@ -914,22 +909,6 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 					 * torn down mid-job.  See idle_timeout_elapsed below.
 					 */
 					gettimeofday(&last_activity, NULL);
-					/*
-					 * The printer has emitted a response.  Record that it speaks
-					 * (so a non-responsive print-only device is not penalised
-					 * with a grace wait) and anchor the grace deadline from this
-					 * first reply.  Once network EOF is later observed, the
-					 * daemon will keep the stream open for the grace window so
-					 * any subsequent response (e.g. one arriving only AFTER the
-					 * host closed its send side) is still forwarded.  An absolute
-					 * deadline (not a sliding timer) bounds the wait.
-					 */
-					if (!printer_spoke)
-					{
-						printer_spoke = 1;
-						gettimeofday(&grace_deadline, NULL);
-						grace_deadline.tv_sec += IDLE_TIMEOUT_SEC;
-					}
 					gettimeofday(&then, NULL);
 					/* wait 100 msec before reading again. */
 					then.tv_usec += 100000;
