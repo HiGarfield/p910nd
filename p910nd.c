@@ -301,7 +301,14 @@ static int dup_fd_below_fdsetsize(int fd, const char *name)
 				dolog(LOGOPTS, "dup2(%s fd=%d -> fd=%d): %m\n", name, fd, target);
 				return -1;
 			}
-			dolog(LOG_DEBUG, "using duplicate %s fd=%d for select() (original=%d)\n",
+			/*
+			 * Ownership of the descriptor transfers to the duplicate: the
+			 * original fd is no longer watched by select() (it lies beyond
+			 * FD_SETSIZE) and would otherwise leak.  Close it here so the
+			 * caller only has to manage the returned (in-range) descriptor.
+			 */
+			(void)close(fd);
+			dolog(LOG_DEBUG, "using duplicate %s fd=%d for select() (original=%d closed)\n",
 			      name, target, fd);
 			return target;
 		}
