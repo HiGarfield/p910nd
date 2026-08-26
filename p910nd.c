@@ -566,25 +566,19 @@ static ssize_t writeBuffer(Buffer_t *b)
 			{
 				return 0;
 			}
-			if (b->bytes == 0 &&
-				(errno == EPIPE || errno == ECONNRESET))
-			{
-				/*
-				 * The buffer is empty, so every byte that was ever read in
-				 * has already been written out.  A write error here means the
-				 * peer closed its receive side AFTER the whole job was
-				 * delivered (e.g. a printer that finishes and hangs up, or a
-				 * network peer that ACKed everything then closed).  That is
-				 * successful job completion, not data loss, so mark EOF sent
-				 * and return without raising WRITE_ERR.  (If bytes were still
-				 * pending the error is genuine data loss and falls through to
-				 * the WRITE_ERR branch below.)
-				 */
-				dolog(LOG_DEBUG, "write: peer closed after all data was sent\n");
-				if (b->eof_read)
-					b->eof_sent = 1;
-				return 0;
-			}
+			/*
+			 * Hard write failure.  Note: an "EPIPE/ECONNRESET after all data
+			 * was delivered" situation is NOT handled here on purpose.  By the
+			 * time write() is even called, avail > 0 holds (see the avails
+			 * computation above), which in turn requires b->bytes > 0, so a
+			 * genuine "buffer already empty" (b->bytes == 0) case can never
+			 * reach this branch.  That completion case is instead detected
+			 * correctly at the end of writeBuffer(): when eof_read is set and
+			 * the last pending bytes have been drained (b->bytes == 0),
+			 * eof_sent is raised there.  Keeping a dead `if (b->bytes == 0 &&
+			 * EPIPE) ...' branch here would be unreachable code that only
+			 * misleads future readers, so it has been removed.
+			 */
 			dolog(LOGOPTS, "write error: %m\n");
 			b->err |= WRITE_ERR;
 		}
