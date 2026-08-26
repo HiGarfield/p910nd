@@ -267,6 +267,14 @@ static int open_printer(int lpnumber)
 	int lp;
 	static char lpname[sizeof(PRINTERFILE)];
 
+	/*
+	 * Under the TESTING build the device name is hard-coded to /dev/tty and
+	 * lpnumber is not consumed by snprintf(), so mark it explicitly used to
+	 * keep every build configuration (including -DTESTING) warning-free under
+	 * -Wall -Wextra.  In the production build lpnumber is the %c argument.
+	 */
+	(void)lpnumber;
+
 #ifdef TESTING
 	(void)snprintf(lpname, sizeof(lpname), "/dev/tty");
 #else
@@ -893,8 +901,6 @@ static void one_job(int lpnumber)
 
 static void server(int lpnumber)
 {
-	struct rlimit resourcelimit;
-	rlim_t max_close_fd;
 #ifdef USE_GETPROTOBYNAME
 	struct protoent *proto;
 #endif
@@ -902,13 +908,24 @@ static void server(int lpnumber)
 	socklen_t clientlen;
 	struct sockaddr_storage client;
 	struct addrinfo hints, *res, *ressave;
-	char pidfilename[sizeof(PIDFILE)];
 	char service[8];
-	FILE *f;
 	const int bufsiz = 65536;
 	int gai_err;
 
 #ifndef TESTING
+	/*
+	 * These four locals are only referenced inside the daemonization block
+	 * below, which is compiled out under -DTESTING.  Declaring them here (as
+	 * the original code did) makes every -DTESTING build emit
+	 * -Wunused-variable warnings under the project's mandatory -Wall -Wextra,
+	 * and would break a -Werror build of the test suite.  Move them into the
+	 * block so all build configurations stay warning-free.
+	 */
+	struct rlimit resourcelimit;
+	rlim_t max_close_fd;
+	char pidfilename[sizeof(PIDFILE)];
+	FILE *f;
+
 	if (!log_to_stdout)
 	{
 		switch (fork())
