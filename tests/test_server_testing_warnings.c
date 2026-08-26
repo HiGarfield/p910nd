@@ -14,21 +14,21 @@
  * then compile cleanly under -Wall -Wextra, and a -Werror build succeeds.
  *
  * This test is a *build-time* proof rather than a runtime one: it invokes the
- * compiler on p910nd.c (the same translation unit the daemon and every test
- * include) with -DTESTING -Wall -Wextra -Werror and asserts the command
- * succeeds and produces no diagnostics.  That provably exercises the exact
- * code path that used to warn, on every platform the compiler targets, with
- * no special runtime harness needed.
+ * compiler on p910nd.c (the same translation unit the daemon and every
+ * other test includes) with -DTESTING -Wall -Wextra -Werror and asserts the
+ * command succeeds and produces no diagnostics.  That provably exercises the
+ * exact code path that used to warn, on every platform the compiler targets,
+ * with no special runtime harness needed.  It is run from the repository root
+ * so the spawned compiler resolves the (relative) p910nd.c in the cwd.
  */
 #define _GNU_SOURCE
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 
 int main(void)
 {
-	char cmd[1024];
+	char cmd[2048];
 	int rc;
 	FILE *fp;
 	char buf[4096];
@@ -41,8 +41,7 @@ int main(void)
 	 */
 	(void)snprintf(cmd, sizeof(cmd),
 	               "gcc -Wall -Wextra -Werror -DTESTING -c -o /tmp/p910nd_server_test.o "
-	               "%s/p910nd.c 2>/tmp/p910nd_server_test.err",
-	               getenv("P910ND_SRC_DIR") ? getenv("P910ND_SRC_DIR") : "..");
+	               "p910nd.c 2>/tmp/p910nd_server_test.err");
 
 	fp = popen(cmd, "r");
 	if (fp == NULL)
