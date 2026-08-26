@@ -950,6 +950,7 @@ static void server(int lpnumber)
 	if (gai_err != 0)
 	{
 		dolog(LOGOPTS, "getaddrinfo: %s\n", gai_strerror(gai_err));
+		free_lock();
 		exit(1);
 	}
 	ressave = res;
