@@ -467,8 +467,20 @@ static void prepBuffer(Buffer_t *b, fd_set *readfds, fd_set *writefds)
 	}
 }
 
-/* Reads data into a buffer from its input file. */
-static ssize_t readBuffer(Buffer_t *b)
+/*
+ * Reads data into a buffer from its input file.
+ *
+ * saw_zero_read (may be NULL) is set to 1 when read() actually returned 0,
+ * i.e. a genuine end-of-stream on the input descriptor, and is left untouched
+ * otherwise.  A plain return value of 0 cannot express this: it is also used
+ * for "buffer full" and for the transient EAGAIN/EWOULDBLOCK/EINTR conditions.
+ * Callers that must distinguish a PERMANENT end-of-stream (select() will keep
+ * reporting the descriptor readable forever) from a device that is merely
+ * quiescent right now need this extra signal -- notably the bidirectional
+ * printer->network buffer, which runs with detectEof == 0 and therefore never
+ * records EOF in eof_read by itself.
+ */
+static ssize_t readBufferEx(Buffer_t *b, int *saw_zero_read)
 {
 	size_t avail;
 	ssize_t result = 0;
@@ -528,16 +540,29 @@ static ssize_t readBuffer(Buffer_t *b)
 			 */
 			b->eof_read = 1;
 		}
-		else if (b->detectEof)
+		else
 		{
-			dolog(LOG_DEBUG, "read: eof\n");
-			b->eof_read = 1;
+			/* read() returned 0: a genuine end-of-stream on the input. */
+			if (saw_zero_read != NULL)
+				*saw_zero_read = 1;
+			if (b->detectEof)
+			{
+				dolog(LOG_DEBUG, "read: eof\n");
+				b->eof_read = 1;
+			}
 		}
 	}
 	/* Returns 0 when no data could be read (buffer full, temporary I/O condition
 	 * EAGAIN/EWOULDBLOCK/EINTR, or non-EOF zero-length read), -1 for hard errors,
 	 * or the number of bytes read (>0). */
 	return result;
+}
+
+/* Backwards-compatible wrapper for callers that do not need to distinguish a
+ * genuine zero-length read from the other "no progress" outcomes. */
+static ssize_t readBuffer(Buffer_t *b)
+{
+	return readBufferEx(b, NULL);
 }
 
 /* Writes data from a buffer to the output file or discard if no output file is set. */
@@ -764,6 +789,18 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 		 * An absolute deadline (not a sliding timer) guarantees termination even
 		 * for a chatty or non-responsive printer. */
 		int eof_reached = 0;
+		/* Set once the printer side has been observed at a genuine
+		 * end-of-stream, i.e. read() returned 0 (not EAGAIN/EINTR) on a
+		 * descriptor select() had just reported readable.  Because
+		 * printerToNetworkBuffer is created with detectEof == 0, readBuffer()
+		 * never records that condition itself, so it is tracked here.
+		 *
+		 * This matters for termination latency: a real EOF is a PERMANENT
+		 * state (select() keeps reporting the descriptor readable forever),
+		 * unlike a momentarily quiescent device.  Without distinguishing the
+		 * two, the loop had no way to know the printer will never speak again
+		 * and had to burn the whole grace window on every job. */
+		int printer_eof = 0;
 		Buffer_t printerToNetworkBuffer;
 		fd_set readfds;
 		fd_set writefds;
@@ -895,8 +932,14 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 			}
 			if (FD_VALID(io_lp) && FD_ISSET(io_lp, &readfds))
 			{
-				/* Read printer data, but pace it more slowly. */
-				result = readBuffer(&printerToNetworkBuffer);
+				/* Read printer data, but pace it more slowly.  Capture a
+				 * genuine zero-length read separately: it means the printer
+				 * will never speak again, which lets the job finish as soon
+				 * as the already-received response has been forwarded. */
+				int zero_read = 0;
+				result = readBufferEx(&printerToNetworkBuffer, &zero_read);
+				if (zero_read)
+					printer_eof = 1;
 				if (result > 0)
 				{
 					dolog(LOG_DEBUG, "%.2f: read %zd bytes from printer\n",
@@ -1026,18 +1069,36 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 			 * (bounded) grace-period latency to job completion; this is the
 			 * deliberate cost of guaranteeing a late response is not dropped.
 			 *
-			 * There is deliberately no "finish early once the buffer has drained"
-			 * shortcut: a printer that answers only AFTER network EOF has its
-			 * response still in flight when the last job byte is delivered, and
-			 * declaring done the moment the buffer empties would drop that late
-			 * response -- the very bug this change fixes.  The grace window is
-			 * what lets the response through.
+			 * There is deliberately no *unconditional* "finish early once the
+			 * buffer has drained" shortcut: a printer that answers only AFTER
+			 * network EOF has its response still in flight when the last job
+			 * byte is delivered, and declaring done the moment the buffer
+			 * empties would drop that late response.  The grace window is what
+			 * lets such a response through.
+			 *
+			 * However, waiting for the deadline is only necessary while the
+			 * printer *could still* say something.  Once read() has returned 0
+			 * on the printer descriptor (printer_eof), the device has closed
+			 * its send side: no further response can ever arrive, so there is
+			 * nothing left for the grace window to protect.  Finishing as soon
+			 * as the already-received response has been forwarded is then both
+			 * safe and necessary -- otherwise every job with a printer that
+			 * closes (or any device that reports EOF, which is the common case
+			 * for a finished job) paid the full IDLE_TIMEOUT_SEC before
+			 * completing.  That fixed per-job penalty throttles throughput
+			 * badly under (x)inetd, where a process handles exactly one job.
 			 *
 			 * The network write-error case is handled separately above
 			 * (printer_stream_done = 1) because no response can ever be
 			 * delivered once the peer is gone.
 			 */
 			if (eof_reached && printerToNetworkBuffer.outfd != -1 &&
+				printer_eof && printerToNetworkBuffer.bytes == 0)
+			{
+				dolog(LOG_NOTICE, "printer closed its response stream, stop copy stream\n");
+				printer_stream_done = 1;
+			}
+			else if (eof_reached && printerToNetworkBuffer.outfd != -1 &&
 				(now.tv_sec > grace_deadline.tv_sec ||
 				 (now.tv_sec == grace_deadline.tv_sec &&
 				  now.tv_usec >= grace_deadline.tv_usec)))
