@@ -131,6 +131,18 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+/*
+ * get_port() uses uint16_t, and POSIX declares the exact-width integer types in
+ * <stdint.h>.  Relying on <netinet/in.h> to expose them is not portable: that
+ * header is only required to define in_port_t/in_addr_t plus the types it needs
+ * for its own structures, and it may satisfy that through private
+ * implementation headers rather than by making <stdint.h>'s namespace visible.
+ * glibc, for instance, pulls in <bits/stdint-uintn.h>, so the name happens to
+ * be available here but is not guaranteed to be on another C library.  Include
+ * the standard header that actually owns the type so the translation unit does
+ * not depend on another header's internals.
+ */
+#include <stdint.h>
 
 #ifndef MAX
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
