@@ -66,7 +66,29 @@ int main(void)
 	double cpu_total = 0.0, wall_total = 0.0;
 
 	(void)signal(SIGPIPE, SIG_IGN);
-	(void)alarm(120); /* global backstop against any hang */
+	/*
+	 * Global backstop against a genuine hang.  It must be derived from the
+	 * work the test actually performs, not a hard-coded constant: the printer
+	 * peer below deliberately never closes its send side (it stays blocked in
+	 * read() and only exits after its loop breaks), so the daemon cannot know
+	 * the device will stay silent and correctly keeps the connection open for
+	 * the full IDLE_TIMEOUT_SEC grace window that protects a response arriving
+	 * after network EOF.  Each iteration therefore legitimately costs up to
+	 * IDLE_TIMEOUT_SEC.
+	 *
+	 * The previous fixed alarm(120) ignored that: with ITERS == 40 and
+	 * IDLE_TIMEOUT_SEC == 5 the correct lower bound is already about 200 s, so
+	 * the alarm fired mid-run and the test failed by SIGALRM on a perfectly
+	 * healthy daemon -- reporting a hang where there was none, and masking the
+	 * real regressions it is meant to detect.
+	 *
+	 * Budget = ITERS * (IDLE_TIMEOUT_SEC + 5) plus a 30 s fixed margin.  The
+	 * +5 per iteration covers the jittered peer sleeps and the 200 ms flush
+	 * delay; the fixed margin covers process startup on a loaded host.  A real
+	 * hang still trips the alarm because it never terminates at all, while the
+	 * legitimate worst case stays comfortably inside the budget.
+	 */
+	(void)alarm((unsigned)(ITERS * (IDLE_TIMEOUT_SEC + 5) + 30));
 
 	for (iter = 0; iter < ITERS; iter++)
 	{
