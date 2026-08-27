@@ -49,10 +49,21 @@ static double cpu_now(void)
 	       (double)ru.ru_stime.tv_sec + (double)ru.ru_stime.tv_usec / 1e6;
 }
 
+static double wall_now(void)
+{
+	struct timeval t;
+	if (gettimeofday(&t, NULL) < 0)
+	{
+		perror("gettimeofday");
+		exit(1);
+	}
+	return (double)t.tv_sec + (double)t.tv_usec / 1e6;
+}
+
 int main(void)
 {
 	int iter;
-	double cpu_total = 0.0;
+	double cpu_total = 0.0, wall_total = 0.0;
 
 	(void)signal(SIGPIPE, SIG_IGN);
 	(void)alarm(120); /* global backstop against any hang */
@@ -148,10 +159,14 @@ int main(void)
 		(void)close(prn_sv[1]);
 		(void)close(rep[1]);
 
-		cpu = cpu_now();
-		assert(copy_stream(net_sv[0], prn_sv[0]) == 0);
-		cpu = cpu_now() - cpu;
-		cpu_total += cpu;
+		{
+			double w0 = wall_now();
+			cpu = cpu_now();
+			assert(copy_stream(net_sv[0], prn_sv[0]) == 0);
+			cpu = cpu_now() - cpu;
+			cpu_total += cpu;
+			wall_total += wall_now() - w0;
+		}
 
 		(void)close(net_sv[0]);
 		(void)close(prn_sv[0]);
@@ -172,11 +187,23 @@ int main(void)
 	}
 
 	fprintf(stderr,
-	        "PASS: %d fuzzed bi-directional jobs, all %d bytes delivered each, total copier CPU=%.3fs\n",
-	        ITERS, JOB_BYTES, cpu_total);
-	if (cpu_total > 2.0)
+	        "PASS: %d fuzzed bi-directional jobs, all %d bytes delivered each, total copier CPU=%.3fs wall=%.3fs\n",
+	        ITERS, JOB_BYTES, cpu_total, wall_total);
+	/*
+	 * A genuine busy loop spends CPU comparable to wall-clock time.  We assert
+	 * the *ratio* cpu < wall * BUSY_FACTOR (with a generous absolute floor so a
+	 * fast local run is not judged on a near-zero denominator) rather than an
+	 * absolute budget, so the proof is robust to environments where every
+	 * instruction is expensive (valgrind binary translation, sanitizers, loaded
+	 * hosts): there the legitimate, non-spinning select-driven CPU is amplified
+	 * but the bytes are still delivered intact, so an absolute threshold would
+	 * false-positive.  A real spin fails this with an enormous margin
+	 * (cpu ~= wall).
+	 */
+	if (cpu_total > 2.0 && cpu_total > wall_total * 0.25)
 	{
-		fprintf(stderr, "FAIL: copier burned %.3fs CPU (busy-loop suspected)\n", cpu_total);
+		fprintf(stderr, "FAIL: copier burned %.3fs CPU vs %.3fs wall (busy-loop suspected)\n",
+		        cpu_total, wall_total);
 		return 1;
 	}
 	return 0;

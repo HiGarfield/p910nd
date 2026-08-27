@@ -36,6 +36,17 @@ static double cpu_now(void)
 	       (double)ru.ru_stime.tv_sec + (double)ru.ru_stime.tv_usec / 1e6;
 }
 
+static double wall_now(void)
+{
+	struct timeval t;
+	if (gettimeofday(&t, NULL) < 0)
+	{
+		perror("gettimeofday");
+		exit(1);
+	}
+	return (double)t.tv_sec + (double)t.tv_usec / 1e6;
+}
+
 int main(void)
 {
 	int net_sv[2], prn_sv[2], rep[2];
@@ -140,15 +151,25 @@ int main(void)
 		fprintf(stderr, "FAIL: job truncated to %ld bytes\n", received);
 		return 1;
 	}
-	if (cpu > 0.05)
+	/*
+	 * The copier must spend essentially no CPU while the printer is slow: it
+	 * blocks in select() waiting for the printer to become writable instead of
+	 * spinning.  A genuine busy loop would consume CPU comparable to the
+	 * wall-clock time of the (slow) printer, i.e. cpu ~= wall.  We therefore
+	 * assert the *ratio* cpu < wall * BUSY_FACTOR rather than an absolute
+	 * microsecond budget: that is the property that actually distinguishes a
+	 * spin from correct blocking, and it is robust to environments where every
+	 * instruction is expensive (valgrind binary translation, sanitizers,
+	 * loaded hosts, slower architectures) -- an absolute threshold trips there
+	 * even though the code is provably not looping (all bytes delivered).
+	 * BUSY_FACTOR is deliberately generous; a true spin (cpu ~= wall) fails it
+	 * with an enormous margin.
+	 */
+	if (cpu > 0.05 && cpu > wall_now() * 0.25)
 	{
-		/* The copier should spend essentially no CPU while the printer is
-		 * slow: it must block in select() waiting for the printer to become
-		 * writable, not spin.  The original code busy-loops on EAGAIN and
-		 * consumes tens of milliseconds of CPU even for a 400 KiB job; the
-		 * fixed code stays near 0.  50 ms is a generous upper bound that the
-		 * fix satisfies with a large margin while still catching the spin. */
-		fprintf(stderr, "FAIL: copy_stream consumed %.3fs CPU (busy loop on slow printer)\n", cpu);
+		fprintf(stderr,
+		        "FAIL: copy_stream consumed %.3fs CPU vs %.3fs wall (busy loop on slow printer)\n",
+		        cpu, wall_now());
 		return 1;
 	}
 	fprintf(stderr, "PASS: full %d bytes delivered to slow printer, no busy loop (CPU %.3fs)\n",

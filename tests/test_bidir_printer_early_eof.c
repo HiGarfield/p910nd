@@ -49,6 +49,17 @@ static double cpu_now(void)
 	       (double)ru.ru_stime.tv_sec + (double)ru.ru_stime.tv_usec / 1e6;
 }
 
+static double wall_now(void)
+{
+	struct timeval t;
+	if (gettimeofday(&t, NULL) < 0)
+	{
+		perror("gettimeofday");
+		exit(1);
+	}
+	return (double)t.tv_sec + (double)t.tv_usec / 1e6;
+}
+
 /* Run one job with the printer closing its send side mid-job.  Returns the
  * copy_stream() result and reports the printer byte count via *printer_got. */
 static int run_once(long *printer_got)
@@ -152,22 +163,23 @@ static int run_once(long *printer_got)
 int main(void)
 {
 	int i, bad_rc = 0, trunc = 0;
-	double cpu = 0.0;
+	double cpu = 0.0, wall = 0.0;
 
 	for (i = 0; i < ITERS; i++)
 	{
 		long pg = -1;
-		double c0 = cpu_now();
+		double c0 = cpu_now(), w0 = wall_now();
 		int rc = run_once(&pg);
 		cpu += cpu_now() - c0;
+		wall += wall_now() - w0;
 		if (rc != 0)
 			bad_rc++;
 		if (pg != (long)JOB_BYTES)
 			trunc++;
 	}
 	fprintf(stderr,
-	        "printer-early-EOF race: %d iters, copy_stream!=0: %d, truncated: %d, cpu=%.3fs\n",
-	        ITERS, bad_rc, trunc, cpu);
+	        "printer-early-EOF race: %d iters, copy_stream!=0: %d, truncated: %d, cpu=%.3fs wall=%.3fs\n",
+	        ITERS, bad_rc, trunc, cpu, wall);
 	if (trunc != 0)
 	{
 		fprintf(stderr, "FAIL: job truncated in %d/%d iterations (data lost)\n", trunc, ITERS);
@@ -179,9 +191,20 @@ int main(void)
 		        bad_rc, ITERS);
 		return 1;
 	}
-	if (cpu > 1.0)
+	/*
+	 * A genuine busy loop spends CPU comparable to the wall-clock time of the
+	 * (slow) printer, i.e. cpu ~= wall.  We assert the *ratio* cpu < wall *
+	 * BUSY_FACTOR rather than an absolute budget so the proof is robust to
+	 * environments where every instruction is expensive (valgrind binary
+	 * translation, sanitizers, loaded hosts, slower architectures) -- there the
+	 * legitimate, non-spinning select-driven CPU is amplified but the bytes
+	 * are still delivered intact, so an absolute threshold would false-positive.
+	 * A real spin fails this with an enormous margin (cpu ~= wall).
+	 */
+	if (cpu > 1.0 && cpu > wall * 0.25)
 	{
-		fprintf(stderr, "FAIL: copier burned %.3fs CPU (busy-loop suspected)\n", cpu);
+		fprintf(stderr, "FAIL: copier burned %.3fs CPU vs %.3fs wall (busy-loop suspected)\n",
+		        cpu, wall);
 		return 1;
 	}
 	fprintf(stderr, "PASS: %d/%d jobs delivered intact with copy_stream()==0, no busy loop\n",
