@@ -448,7 +448,18 @@ static int get_lock(int lpnumber)
 static void free_lock(void)
 {
 	if (lockfd >= 0)
+	{
 		(void)close(lockfd);
+		/*
+		 * Reset to -1 so free_lock() is idempotent and the descriptor number
+		 * cannot be mistakenly closed again.  lockfd is a global; leaving a
+		 * stale (already-closed) value would let a later free_lock() -- or any
+		 * logic that reuses the variable -- close a recycled, unrelated
+		 * descriptor.  This mirrors the failure branch of get_lock(), which
+		 * already sets lockfd = -1 after closing.
+		 */
+		lockfd = -1;
+	}
 }
 
 /* Initializes the buffer, at the start. */
