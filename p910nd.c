@@ -436,6 +436,36 @@ static int gai_error_is_permanent(int err)
 	}
 }
 
+/*
+ * Errors from accept() that mean the listening socket itself can never accept
+ * again, so retrying would spin forever without making progress.
+ *
+ * Everything else is retried.  That matters for the network-oriented errors a
+ * listening socket reports while the network is flapping -- ENETDOWN,
+ * ENETUNREACH, EHOSTUNREACH, EHOSTDOWN, ENONET -- and for protocol-level
+ * hiccups such as ECONNRESET and EPROTO on a connection that died before
+ * accept() could hand it over, as well as for any errno this list does not
+ * know about yet.  Exiting on one of those kills a healthy daemon on a
+ * transient fault: the listening socket stays bound and the network comes
+ * back, but nothing is served any more because the process is gone.
+ * Retrying costs one accept_backoff() wait per event, and accept_backoff()
+ * blocks in select(), so it burns no CPU.
+ */
+static int accept_error_is_fatal(int err)
+{
+	switch (err)
+	{
+	case EBADF:       /* the listening descriptor is not open */
+	case ENOTSOCK:    /* it is not a socket at all */
+	case EINVAL:      /* not listening, or a bad argument */
+	case EOPNOTSUPP:  /* not a connection-oriented socket */
+	case ENOPROTOOPT: /* the protocol does not support accept() */
+		return 1;
+	default:
+		return 0;
+	}
+}
+
 /* Sleep for a whole number of seconds.  select() with no descriptors is used
  * rather than sleep(3) so the wait behaves the same on every platform and
  * cannot be cut arbitrarily short by an unrelated signal. */
@@ -1481,9 +1511,11 @@ static void server(int lpnumber)
 	char service[8];
 	const int bufsiz = 65536;
 	int gai_err;
-	/* Timestamp of the last "listening socket is not up" log line; 0 means
-	 * "nothing logged yet", so the first failure is always reported. */
+	/* Timestamps of the last "listening socket is not up" and last "accept
+	 * failed" log lines; 0 means "nothing logged yet", so the first failure
+	 * is always reported. */
 	time_t last_listen_log = 0;
+	time_t last_accept_log = 0;
 
 #ifndef TESTING
 	/*
@@ -1726,20 +1758,41 @@ static void server(int lpnumber)
 		fd = accept(netfd, (struct sockaddr *)&client, &clientlen);
 		if (fd < 0)
 		{
-			if (errno == EINTR || errno == ECONNABORTED)
+			struct timeval accept_now;
+			int aerr = errno;
+
+			if (aerr == EINTR || aerr == ECONNABORTED)
 				continue;
-			if (errno == EMFILE || errno == ENFILE ||
-			    errno == ENOBUFS || errno == ENOMEM)
+			if (aerr == EMFILE || aerr == ENFILE ||
+			    aerr == ENOBUFS || aerr == ENOMEM)
 			{
 				/*
 				 * Transient resource exhaustion.  Wait without burning CPU
 				 * (see accept_backoff) instead of a busy-spin sleep(1).
 				 */
-				dolog(LOGOPTS, "accept: %m, waiting for a free descriptor\n");
+				(void)gettimeofday(&accept_now, NULL);
+				if (retry_log_due(accept_now.tv_sec, &last_accept_log))
+					dolog(LOGOPTS, "accept: %m, waiting for a free descriptor\n");
 				accept_backoff(netfd);
 				continue;
 			}
-			break;
+			if (accept_error_is_fatal(aerr))
+				break;
+			/*
+			 * A transient network error on the listening socket
+			 * (ENETDOWN, ENETUNREACH, ECONNRESET, EPROTO, ...).  The
+			 * socket stays bound and usable, so the daemon must keep
+			 * serving: exiting here would leave a started daemon that
+			 * never accepts another job even after the network
+			 * recovers.  Wait in select() (no CPU) and try again; a
+			 * broken configuration is still caught by
+			 * accept_error_is_fatal() above.
+			 */
+			(void)gettimeofday(&accept_now, NULL);
+			if (retry_log_due(accept_now.tv_sec, &last_accept_log))
+				dolog(LOGOPTS, "accept: %m, retrying\n");
+			accept_backoff(netfd);
+			continue;
 		}
 #ifdef USE_LIBWRAP
 		if (hosts_ctl("p910nd", STRING_UNKNOWN, get_ip_str((struct sockaddr *)&client, host, sizeof(host)), STRING_UNKNOWN) == 0)
