@@ -268,17 +268,111 @@ static void show_version(void)
 	fprintf(stdout, "%s %s\n", progname, version);
 }
 
+/*
+ * Size of the scratch buffer dolog() uses to expand %m.  The longest format
+ * string in this file is well under 100 bytes and strerror() text is well
+ * under 256, so expansion can never come close to this; the bound only exists
+ * to make the truncation path well defined.
+ */
+#define DOLOG_FMT_SIZE 1024
+
+/*
+ * Append `s` to out[*pos] as literal text, doubling any '%' it contains so the
+ * result is not mistaken for a conversion specifier.  Never writes outside
+ * [0, outsz); the caller terminates the string.
+ */
+static void append_literal(char *out, size_t outsz, size_t *pos, const char *s)
+{
+	const char *p;
+
+	for (p = s; *p != '\0'; ++p)
+	{
+		if (*p == '%')
+		{
+			if (*pos + 2 >= outsz)
+				break;
+			out[(*pos)++] = '%';
+			out[(*pos)++] = '%';
+			continue;
+		}
+		if (*pos + 1 >= outsz)
+			break;
+		out[(*pos)++] = *p;
+	}
+}
+
+/*
+ * Copy `fmt` into `out`, replacing every "%m" with strerror(err).
+ *
+ * %m is a GNU extension of the printf() family: ISO C has no such conversion
+ * and POSIX defines it only for syslog(), not for printf().  dolog() writes
+ * error messages to stdout with vfprintf() when -d is given, so on any C
+ * library that is not glibc -- BSD libc, macOS, musl -- every "%s: %m" message
+ * printed by a foreground daemon expanded to garbage.
+ *
+ * Expanding it here removes the dependency for both output paths: what reaches
+ * vfprintf()/vsyslog() afterwards is a format string built from plain text,
+ * so the diagnostic is identical everywhere.  The rest of `fmt` -- including
+ * any "%s"/"%d"/"%lu" conversion and a literal "%%m" -- is copied verbatim.
+ */
+static void expand_format_m(char *out, size_t outsz, const char *fmt, int err)
+{
+	size_t pos = 0;
+	const char *p;
+
+	for (p = fmt; *p != '\0'; ++p)
+	{
+		if (p[0] == '%' && p[1] == '%')
+		{
+			/*
+			 * A literal '%'.  Copy both characters and skip past them so a
+			 * following 'm' is not mistaken for the %m conversion: "%%m"
+			 * must keep printing as "%m".
+			 */
+			if (pos + 2 >= outsz)
+				break;
+			out[pos++] = *p;
+			++p;
+			out[pos++] = *p;
+			continue;
+		}
+		if (p[0] == '%' && p[1] == 'm')
+		{
+			++p; /* consume the 'm' as well */
+			append_literal(out, outsz, &pos, strerror(err));
+			continue;
+		}
+		if (pos + 1 >= outsz)
+			break;
+		out[pos++] = *p;
+	}
+	if (pos < outsz)
+		out[pos] = '\0';
+	else
+		out[outsz - 1] = '\0';
+}
+
 static void dolog(int level, const char *msg, ...)
 {
 	va_list argp;
+	/*
+	 * Sampled before anything else: strerror() below, like any library
+	 * call, is allowed to clobber errno, and the whole point of %m is to
+	 * report the errno the caller had.
+	 */
+	int saved_errno = errno;
+	char fmt[DOLOG_FMT_SIZE];
+
+	expand_format_m(fmt, sizeof(fmt), msg, saved_errno);
+
 	va_start(argp, msg);
 	if (log_to_stdout)
 	{
-		vfprintf(stdout, msg, argp);
+		vfprintf(stdout, fmt, argp);
 		fflush(stdout);
 	}
 	else if (level != LOG_DEBUG)
-		vsyslog(level, msg, argp);
+		vsyslog(level, fmt, argp);
 	va_end(argp);
 }
 
