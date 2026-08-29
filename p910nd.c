@@ -384,6 +384,88 @@ static void accept_backoff(int netfd)
 	}
 }
 
+/* Interval between two attempts at bringing up the listening socket, and the
+ * minimum interval between two log lines reporting that it is not up yet. */
+#define LISTEN_RETRY_SEC 1
+#define LISTEN_LOG_THROTTLE_SEC 60
+
+/*
+ * Errors from socket()/bind()/listen() that waiting can never fix.
+ *
+ * The daemon must come up no matter in which order the printer, the network
+ * and the daemon itself become ready, with unbounded gaps in between, so
+ * every failure that waiting can plausibly cure is retried -- notably
+ * EADDRNOTAVAIL (the address given with -i is not assigned to any interface
+ * yet, the classic boot race), EADDRINUSE (a peer instance has not released
+ * the port yet) and ENETDOWN.  Only mistakes that no amount of waiting can
+ * repair are fatal: a bad argument, an address family or protocol the kernel
+ * does not support, or a privileged port the process is not allowed to bind.
+ */
+static int listen_error_is_permanent(int err)
+{
+	switch (err)
+	{
+	case EINVAL:          /* socket already bound, or a bad argument */
+	case EAFNOSUPPORT:    /* address family not supported by the kernel */
+	case EPROTONOSUPPORT: /* protocol not supported by the kernel */
+	case EOPNOTSUPP:      /* socket type not supported */
+	case EACCES:          /* privileged port without permission */
+	case EPERM:
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+/* The same classification for getaddrinfo() failures.  Our hints are built
+ * here and the service string is always a plain port number, so anything
+ * complaining about them is our own bug; a name that merely does not resolve
+ * yet (EAI_AGAIN/EAI_NONAME) or a temporary resolver/system failure
+ * (EAI_SYSTEM/EAI_MEMORY) is retried. */
+static int gai_error_is_permanent(int err)
+{
+	switch (err)
+	{
+	case EAI_BADFLAGS: /* our own hints are malformed */
+	case EAI_SOCKTYPE: /* ditto */
+	case EAI_FAMILY:   /* ditto */
+	case EAI_SERVICE:  /* we format the service string ourselves */
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+/* Sleep for a whole number of seconds.  select() with no descriptors is used
+ * rather than sleep(3) so the wait behaves the same on every platform and
+ * cannot be cut arbitrarily short by an unrelated signal. */
+static void retry_sleep(int sec)
+{
+	struct timeval tv;
+	tv.tv_sec = (time_t)sec;
+	tv.tv_usec = 0;
+	(void)select(0, NULL, NULL, NULL, &tv);
+}
+
+/*
+ * Rate-limit a retry diagnostic message.
+ *
+ * The failure is retried forever, so an unthrottled message would emit one
+ * LOG_ERR per second for as long as the daemon runs and flood syslog (a
+ * permanently unreachable network would then fill the log volume).  `last`
+ * must be initialised to 0 by the caller.
+ */
+static int retry_log_due(time_t now, time_t *last)
+{
+	if (*last == 0 || now < *last ||
+	    now - *last >= (time_t)LISTEN_LOG_THROTTLE_SEC)
+	{
+		*last = now;
+		return 1;
+	}
+	return 0;
+}
+
 /* Duplicate fd into the select()-safe range [0, FD_SETSIZE). */
 static int dup_fd_below_fdsetsize(int fd, const char *name)
 {
@@ -1399,6 +1481,9 @@ static void server(int lpnumber)
 	char service[8];
 	const int bufsiz = 65536;
 	int gai_err;
+	/* Timestamp of the last "listening socket is not up" log line; 0 means
+	 * "nothing logged yet", so the first failure is always reported. */
+	time_t last_listen_log = 0;
 
 #ifndef TESTING
 	/*
@@ -1514,78 +1599,124 @@ static void server(int lpnumber)
 		exit(1);
 	}
 	(void)snprintf(service, sizeof(service), "%d", (BASEPORT + lpnumber - '0'));
-	gai_err = getaddrinfo(bindaddr, service, &hints, &res);
-	if (gai_err != 0)
+	/*
+	 * Bring up the listening socket.
+	 *
+	 * The network does not have to be ready when the daemon starts: with -i
+	 * the configured address may not be assigned to any interface yet
+	 * (bind() then fails with EADDRNOTAVAIL) and a name may not resolve
+	 * until the resolver is up (getaddrinfo() then fails with EAI_AGAIN or
+	 * EAI_NONAME).  The requirement is that the printer, the network and
+	 * this daemon may become ready in any order, with unbounded gaps, so --
+	 * exactly like the open_printer() retry loop further down -- every
+	 * failure that waiting can plausibly cure is retried instead of killing
+	 * the daemon.  Only errors that waiting can never repair stay fatal.
+	 * The wait is a blocking select(), so a network that is a long time
+	 * coming costs no CPU.
+	 */
+	for (;;)
 	{
-		dolog(LOGOPTS, "getaddrinfo: %s\n", gai_strerror(gai_err));
-		free_lock();
-		exit(1);
-	}
-	ressave = res;
-	while (res)
-	{
-#ifdef USE_GETPROTOBYNAME
-		if ((proto = getprotobyname("tcp6")) == NULL)
+		struct timeval attempt_now;
+		int last_err = 0;
+
+		(void)gettimeofday(&attempt_now, NULL);
+		gai_err = getaddrinfo(bindaddr, service, &hints, &res);
+		if (gai_err != 0)
 		{
-			if ((proto = getprotobyname("tcp")) == NULL)
+			if (retry_log_due(attempt_now.tv_sec, &last_listen_log))
+				dolog(LOGOPTS, "getaddrinfo: %s, retrying every %ds\n",
+				      gai_strerror(gai_err), LISTEN_RETRY_SEC);
+			if (gai_error_is_permanent(gai_err))
 			{
-				dolog(LOGOPTS, "Cannot find protocol for TCP!\n");
 				free_lock();
 				exit(1);
 			}
+			retry_sleep(LISTEN_RETRY_SEC);
+			continue;
 		}
-		if ((netfd = socket(res->ai_family, res->ai_socktype, proto->p_proto)) < 0)
+		ressave = res;
+		while (res)
+		{
+#ifdef USE_GETPROTOBYNAME
+			if ((proto = getprotobyname("tcp6")) == NULL)
+			{
+				if ((proto = getprotobyname("tcp")) == NULL)
+				{
+					dolog(LOGOPTS, "Cannot find protocol for TCP!\n");
+					free_lock();
+					exit(1);
+				}
+			}
+			if ((netfd = socket(res->ai_family, res->ai_socktype, proto->p_proto)) < 0)
 #else
-		if ((netfd = socket(res->ai_family, res->ai_socktype, 0)) < 0)
+			if ((netfd = socket(res->ai_family, res->ai_socktype, 0)) < 0)
 #endif
-		{
-			dolog(LOGOPTS, "socket: %m\n");
-			res = res->ai_next;
-			continue;
+			{
+				last_err = errno;
+				if (retry_log_due(attempt_now.tv_sec, &last_listen_log))
+					dolog(LOGOPTS, "socket: %m, retrying every %ds\n",
+					      LISTEN_RETRY_SEC);
+				res = res->ai_next;
+				continue;
+			}
+			if (setsockopt(netfd, SOL_SOCKET, SO_RCVBUF, &bufsiz, sizeof(bufsiz)) < 0)
+			{
+				dolog(LOGOPTS, "setsockopt: SO_RCVBUF: %m\n");
+				/* not fatal if it fails */
+			}
+			if (setsockopt(netfd, SOL_SOCKET, SO_SNDBUF, &bufsiz, sizeof(bufsiz)) < 0)
+			{
+				dolog(LOGOPTS, "setsockopt: SO_SNDBUF: %m\n");
+				/* not fatal if it fails */
+			}
+			if (setsockopt(netfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) < 0)
+			{
+				last_err = errno;
+				if (retry_log_due(attempt_now.tv_sec, &last_listen_log))
+					dolog(LOGOPTS, "setsockopt: SO_REUSEADDR: %m, retrying every %ds\n",
+					      LISTEN_RETRY_SEC);
+				(void)close(netfd);
+				netfd = -1;
+				res = res->ai_next;
+				continue;
+			}
+			if (bind(netfd, res->ai_addr, res->ai_addrlen) < 0)
+			{
+				last_err = errno;
+				if (retry_log_due(attempt_now.tv_sec, &last_listen_log))
+					dolog(LOGOPTS, "bind: %m, retrying every %ds\n",
+					      LISTEN_RETRY_SEC);
+				(void)close(netfd);
+				netfd = -1;
+				res = res->ai_next;
+				continue;
+			}
+			if (listen(netfd, 30) < 0)
+			{
+				last_err = errno;
+				if (retry_log_due(attempt_now.tv_sec, &last_listen_log))
+					dolog(LOGOPTS, "listen: %m, retrying every %ds\n",
+					      LISTEN_RETRY_SEC);
+				(void)close(netfd);
+				netfd = -1;
+				res = res->ai_next;
+				continue;
+			}
+			break;
 		}
-		if (setsockopt(netfd, SOL_SOCKET, SO_RCVBUF, &bufsiz, sizeof(bufsiz)) < 0)
+		freeaddrinfo(ressave);
+		if (netfd >= 0)
+			break;
+		if (retry_log_due(attempt_now.tv_sec, &last_listen_log))
+			dolog(LOGOPTS,
+			      "failed to create and bind a listening socket on %s:%s, retrying every %ds\n",
+			      bindaddr ? bindaddr : "*", service, LISTEN_RETRY_SEC);
+		if (listen_error_is_permanent(last_err))
 		{
-			dolog(LOGOPTS, "setsockopt: SO_RCVBUF: %m\n");
-			/* not fatal if it fails */
+			free_lock();
+			exit(1);
 		}
-		if (setsockopt(netfd, SOL_SOCKET, SO_SNDBUF, &bufsiz, sizeof(bufsiz)) < 0)
-		{
-			dolog(LOGOPTS, "setsockopt: SO_SNDBUF: %m\n");
-			/* not fatal if it fails */
-		}
-		if (setsockopt(netfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) < 0)
-		{
-			dolog(LOGOPTS, "setsockopt: SO_REUSEADDR: %m\n");
-			(void)close(netfd);
-			netfd = -1;
-			res = res->ai_next;
-			continue;
-		}
-		if (bind(netfd, res->ai_addr, res->ai_addrlen) < 0)
-		{
-			dolog(LOGOPTS, "bind: %m\n");
-			(void)close(netfd);
-			netfd = -1;
-			res = res->ai_next;
-			continue;
-		}
-		if (listen(netfd, 30) < 0)
-		{
-			dolog(LOGOPTS, "listen: %m\n");
-			(void)close(netfd);
-			netfd = -1;
-			res = res->ai_next;
-			continue;
-		}
-		break;
-	}
-	freeaddrinfo(ressave);
-	if (netfd < 0)
-	{
-		dolog(LOGOPTS, "failed to create and bind a listening socket on %s:%s\n",
-		      bindaddr ? bindaddr : "*", service);
-		free_lock();
-		exit(1);
+		retry_sleep(LISTEN_RETRY_SEC);
 	}
 	memset(&client, 0, sizeof(client));
 	while (1)
