@@ -589,6 +589,32 @@ static ssize_t readBuffer(Buffer_t *b)
 }
 
 /* Writes data from a buffer to the output file or discard if no output file is set. */
+/*
+ * Raise eof_sent as soon as every byte that was read from the input has been
+ * handed to the output, i.e. EOF was seen on the input and no byte is
+ * buffered any more, and log that transition exactly once.
+ *
+ * This is deliberately NOT conditional on the output being writable.  Tying
+ * completion to a write opportunity would mean that a printer which stops
+ * accepting data right after the last byte was delivered -- switched off, a
+ * USB device that went away, a driver that never reports POLLOUT again --
+ * keeps the loop waiting in select() for a writability that is no longer
+ * needed.  The job would then never be reported finished: the client
+ * connection stays open forever and, because server() serves one job at a
+ * time, no other client could ever be accepted afterwards.
+ *
+ * bytes == 0 implies totalin == totalout, so raising eof_sent here can never
+ * declare a job complete while data is still undelivered.
+ */
+static void mark_eof_if_drained(Buffer_t *b)
+{
+	if (b->eof_read && b->bytes == 0 && !b->eof_sent)
+	{
+		b->eof_sent = 1;
+		dolog(LOG_DEBUG, "write: eof\n");
+	}
+}
+
 static ssize_t writeBuffer(Buffer_t *b)
 {
 	size_t avail;
@@ -660,30 +686,29 @@ static ssize_t writeBuffer(Buffer_t *b)
 		}
 	}
 	/*
-	 * Single, authoritative completion point for marking the stream fully
-	 * sent: when EOF was observed on the input AND every buffered byte has
-	 * now been delivered (bytes == 0), raise eof_sent and log it exactly
-	 * once.
+	 * Authoritative completion point for marking the stream fully sent:
+	 * when EOF was observed on the input AND every buffered byte has now
+	 * been delivered (bytes == 0), raise eof_sent and log it exactly once.
 	 *
-	 * This block runs after every writeBuffer() call, so it covers both
-	 * ways a stream is finished:
+	 * This runs after every writeBuffer() call, so it covers both ways a
+	 * stream is finished:
 	 *  - A write that *does* drain the last pending bytes in this very call
 	 *    (the "drained on write" case); and
 	 *  - A call made when the buffer is already empty (avail == 0, e.g. the
 	 *    next select()/loop iteration after EOF arrived and the printer just
 	 *    became writable), which still must raise eof_sent.
 	 *
-	 * Keeping this as the ONLY place that sets eof_sent (and logging it here
-	 * alone) avoids the previous bug where the "drained on write" case set
-	 * eof_sent -- and logged "write: eof" -- inside the write branch AND
-	 * again here, producing a duplicated debug log line on every normal job
-	 * completion.
+	 * Keeping this as the place that sets eof_sent from within writeBuffer()
+	 * (and logging it here alone) avoids the previous bug where the "drained
+	 * on write" case set eof_sent -- and logged "write: eof" -- inside the
+	 * write branch AND again here, producing a duplicated debug log line on
+	 * every normal job completion.
+	 *
+	 * It is NOT the only place: mark_eof_if_drained() is also called
+	 * directly by both copy loops, because a stream whose buffer is already
+	 * empty must complete without waiting for the output to become writable.
 	 */
-	if (b->eof_read && b->bytes == 0)
-	{
-		b->eof_sent = 1;
-		dolog(LOG_DEBUG, "write: eof\n");
-	}
+	mark_eof_if_drained(b);
 
 	/* Return the write() result, -1 (error) or #bytes written. */
 	return result;
@@ -1020,6 +1045,14 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 						  now.tv_sec + now.tv_usec / 1e6, result);
 				}
 			}
+			/*
+			 * A job whose last byte already reached the printer is complete
+			 * even if the printer never becomes writable again; see
+			 * mark_eof_if_drained().  Without this the loop would keep
+			 * waiting for a write opportunity that is no longer needed and
+			 * the job would never finish.
+			 */
+			mark_eof_if_drained(&networkToPrinterBuffer);
 			if ((FD_VALID(io_fd) && FD_ISSET(io_fd, &writefds)) || printerToNetworkBuffer.outfd == -1)
 			{
 				/* Write data to network.  Printer responses are always
@@ -1214,6 +1247,14 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 			 */
 			if (want_read && FD_ISSET(io_fd, &readfds))
 				(void)readBuffer(&networkToPrinterBuffer);
+			/*
+			 * If EOF arrived on a buffer that was already empty there is
+			 * nothing left to hand to the printer, so the job is complete
+			 * now.  Waiting for the printer to become writable instead would
+			 * hang forever on a device that stopped accepting data after the
+			 * last byte was delivered.
+			 */
+			mark_eof_if_drained(&networkToPrinterBuffer);
 			if (!(want_write && FD_ISSET(io_lp, &writefds)))
 				continue;
 			/*
