@@ -1744,6 +1744,9 @@ static void server(int lpnumber)
 	{
 		struct timeval attempt_now;
 		int last_err = 0;
+		/* Set while every address entry so far failed with an error that
+		 * waiting can never fix. */
+		int all_permanent = 1;
 
 		(void)gettimeofday(&attempt_now, NULL);
 		gai_err = getaddrinfo(bindaddr, service, &hints, &res);
@@ -1779,6 +1782,8 @@ static void server(int lpnumber)
 #endif
 			{
 				last_err = errno;
+				if (!listen_error_is_permanent(last_err))
+					all_permanent = 0;
 				if (retry_log_due(attempt_now.tv_sec, &last_listen_log))
 					dolog(LOGOPTS, "socket: %m, retrying every %ds\n",
 					      LISTEN_RETRY_SEC);
@@ -1798,6 +1803,8 @@ static void server(int lpnumber)
 			if (setsockopt(netfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) < 0)
 			{
 				last_err = errno;
+				if (!listen_error_is_permanent(last_err))
+					all_permanent = 0;
 				if (retry_log_due(attempt_now.tv_sec, &last_listen_log))
 					dolog(LOGOPTS, "setsockopt: SO_REUSEADDR: %m, retrying every %ds\n",
 					      LISTEN_RETRY_SEC);
@@ -1809,6 +1816,8 @@ static void server(int lpnumber)
 			if (bind(netfd, res->ai_addr, res->ai_addrlen) < 0)
 			{
 				last_err = errno;
+				if (!listen_error_is_permanent(last_err))
+					all_permanent = 0;
 				if (retry_log_due(attempt_now.tv_sec, &last_listen_log))
 					dolog(LOGOPTS, "bind: %m, retrying every %ds\n",
 					      LISTEN_RETRY_SEC);
@@ -1820,6 +1829,8 @@ static void server(int lpnumber)
 			if (listen(netfd, 30) < 0)
 			{
 				last_err = errno;
+				if (!listen_error_is_permanent(last_err))
+					all_permanent = 0;
 				if (retry_log_due(attempt_now.tv_sec, &last_listen_log))
 					dolog(LOGOPTS, "listen: %m, retrying every %ds\n",
 					      LISTEN_RETRY_SEC);
@@ -1837,7 +1848,17 @@ static void server(int lpnumber)
 			dolog(LOGOPTS,
 			      "failed to create and bind a listening socket on %s:%s, retrying every %ds\n",
 			      bindaddr ? bindaddr : "*", service, LISTEN_RETRY_SEC);
-		if (listen_error_is_permanent(last_err))
+		/*
+		 * Only give up when every address entry failed with an error waiting
+		 * can never fix.  Judging the attempt by the LAST error alone would
+		 * be wrong: getaddrinfo() is free to return the IPv4 entry before
+		 * the IPv6 one, and socket(AF_INET6) fails permanently with
+		 * EAFNOSUPPORT on a kernel built without IPv6 -- which says nothing
+		 * about whether the bind that actually matters, the IPv4 one, will
+		 * succeed once the network is up.  That combination is common on the
+		 * diskless hosts this daemon targets.
+		 */
+		if (last_err != 0 && all_permanent)
 		{
 			free_lock();
 			exit(1);
