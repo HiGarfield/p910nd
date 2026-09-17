@@ -13,15 +13,22 @@
  * Fix: one_job() now calls exit(1) when get_lock() fails, so inetd sees a
  * definite exit status and the kernel releases descriptor 0 on exit.
  *
- * This test points LOCKFILE_DIR at a non-existent directory so get_lock()'s
- * open() fails and get_lock() returns 0.  It then runs one_job() and asserts
- * the process exits with status 1 (terminate) rather than returning and letting
- * main() return 0 (the old silent-return bug).
+ * This test makes the lock file impossible to open so get_lock() returns 0.
+ * It then runs one_job() and asserts the process exits with status 1
+ * (terminate) rather than returning and letting main() return 0 (the old
+ * silent-return bug).
+ *
+ * The lock is made unobtainable by putting an ordinary FILE in the middle of
+ * the path, so no directory can ever be created there.  A merely MISSING
+ * directory used to be enough, but that stopped being true once get_lock()
+ * began creating its directory (BUG-001): the missing directory then became
+ * creatable, the lock succeeded, and one_job() went on to block forever in
+ * its open_printer() retry loop.  A blocker file keeps this test aimed at the
+ * lock-failure branch instead of depending on that behaviour change.
  */
 #define _GNU_SOURCE
-/* A directory that does not exist, so opening the lock file fails and
- * get_lock() returns 0, deterministically exercising the failure branch. */
-#define LOCKFILE_DIR "/tmp/p910nd_onejob_lock_nonexistent_xyz"
+#define LOCKFILE_BLOCKER "/tmp/p910nd_onejob_lock_blocker_xyz"
+#define LOCKFILE_DIR LOCKFILE_BLOCKER "/sub"
 #define main p910nd_original_main
 #include "../p910nd.c"
 #undef main
@@ -39,9 +46,15 @@ int main(void)
 	 * getpeername(0,...) does not blow up; we only care about the lock path. */
 	{
 		int dn = open("/dev/null", O_RDWR);
+		int blocker;
 		assert(dn >= 0);
 		assert(dup2(dn, 0) == 0);
 		(void)close(dn);
+		/* A plain file where the lock directory has to go: creating it is
+		 * impossible, so open() of the lock file can never succeed. */
+		blocker = open(LOCKFILE_BLOCKER, O_CREAT | O_WRONLY, 0644);
+		assert(blocker >= 0);
+		(void)close(blocker);
 	}
 
 	log_to_stdout = 0;
