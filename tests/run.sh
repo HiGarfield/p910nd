@@ -87,7 +87,19 @@ compile_ok gate-gcc-default-make "$BUILD/p910nd-make" \
 if [ -f /usr/include/tcpd.h ]; then
 	compile_ok gate-libwrap "$BUILD/p910nd-libwrap" \
 		"$CC_GCC" $STD $WARN -DUSE_LIBWRAP -DUSE_GETPROTOBYNAME $SRC -lwrap
+	# A libwrap build usable by the functional phase, plus the preloadable
+	# stub that forces hosts_ctl() to deny.
+	"$CC_GCC" $STD $WARN -O1 -g -DUSE_LIBWRAP \
+		-DLOCKFILE_DIR="\"$LOCKDIR\"" -o "$BUILD/p910nd-libwrap-func" \
+		$SRC -lwrap 2>>"$BUILD/libwrap.build.log"
+	cc -shared -fPIC -o "$BUILD/hosts_ctl_stub.so" tests/hosts_ctl_stub.c \
+		2>>"$BUILD/libwrap.build.log"
+	LIBWRAP_ARGS="--bin-libwrap $BUILD/p910nd-libwrap-func"
+	if [ -f "$BUILD/hosts_ctl_stub.so" ]; then
+		LIBWRAP_ARGS="$LIBWRAP_ARGS --libwrap-stub $BUILD/hosts_ctl_stub.so"
+	fi
 else
+	LIBWRAP_ARGS=""
 	skip "gate-libwrap (tcpd.h not installed)"
 fi
 
@@ -119,11 +131,19 @@ for t in tests/*.c; do
 		case "$name" in *"$FILTER"*) ;; *) continue ;; esac
 	fi
 	bin="$BUILD/$name"
+	# Helpers such as tests/hosts_ctl_stub.c are shared objects, not
+	# programs: skip anything without a main().
+	if ! grep -q 'int main' "$t"; then
+		continue
+	fi
 	# Keep lock-touching tests inside the scratch directory instead of the
 	# host's /var/lock, unless the test already pins LOCKFILE_DIR itself.
 	if grep -q 'define LOCKFILE_DIR' "$t"; then
 		lockdef=""
 	else
+		# The embedded quotes are meant to reach the compiler, so the macro
+		# expands to a C string literal; shellcheck cannot see that.
+		# shellcheck disable=SC2089,SC2090
 		lockdef="-DLOCKFILE_DIR=\"$LOCKDIR\""
 	fi
 	# shellcheck disable=SC2086
@@ -164,8 +184,8 @@ if "$CC_GCC" $STD $WARN -O1 -g -DLOCKFILE_DIR="\"$LOCKDIR\"" \
 "$CC_GCC" $STD $WARN -O1 -g -DLOCKFILE_DIR="\"$LOCKDIR\"" \
 	-DDEVICE_ALLOWLIST="\"/dev/lp%c\"" \
 	-o "$ALLOWBIN" $SRC 2>>"$BUILD/func.build.log"; then
-func_args="--bin $FUNCBIN --bin-deeplock $DEEPBIN --pidfile-dir $PIDDIR"
-func_args="$func_args --bin-allowlist $ALLOWBIN"
+	func_args="--bin $FUNCBIN --bin-deeplock $DEEPBIN --pidfile-dir $PIDDIR"
+	func_args="$func_args --bin-allowlist $ALLOWBIN $LIBWRAP_ARGS"
 	[ -n "$FILTER" ] && func_args="$func_args --filter $FILTER"
 	# shellcheck disable=SC2086
 	out=$(python3 tests/functional.py $func_args 2>&1)

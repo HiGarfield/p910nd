@@ -35,6 +35,9 @@ DEEP_LOCK_BIN = None
 PIDFILE_DIR = None
 # Build compiled with DEVICE_ALLOWLIST.
 ALLOW_BIN = None
+# Build compiled with -DUSE_LIBWRAP, and the preloadable deny stub.
+LIBWRAP_BIN = None
+LIBWRAP_STUB = None
 _failures = []
 _passes = []
 _skips = []
@@ -70,7 +73,7 @@ class Daemon:
     """Runs p910nd in the foreground (-d) so we control its lifetime."""
 
     def __init__(self, binpath, dev, n=0, bidir=False, ipv6=False, extra=None,
-                 foreground=True):
+                 foreground=True, preload=None):
         self.proc = None
         # The daemon calls setsid() itself, so it leaves our process group;
         # without tracking its real pid, teardown would leave it running and
@@ -99,10 +102,14 @@ class Daemon:
         # the inetd path (one_job, no pid file) however it was started.
         # /dev/null is not a socket, so standalone is chosen deterministically.
         self.devnull = open(os.devnull, "r+b")
+        env = None
+        if preload:
+            env = dict(os.environ)
+            env["LD_PRELOAD"] = preload
         self.proc = subprocess.Popen(args, stdin=self.devnull,
                                      stdout=self.logfile,
                                      stderr=subprocess.STDOUT,
-                                     preexec_fn=os.setsid)
+                                     env=env, preexec_fn=os.setsid)
         self.path = binpath
 
     def wait_ready(self, timeout=10.0):
@@ -1111,6 +1118,99 @@ def t_default_build_still_accepts_any_device(binpath, tmpdir):
         d.kill()
 
 
+def t_libwrap_denies(binpath, tmpdir):
+    """A libwrap build must reject, close and keep serving (U5/U8)."""
+    name = "libwrap_rejection_closes_connection"
+    if not LIBWRAP_BIN or not LIBWRAP_STUB:
+        skip(name, "no libwrap build or stub supplied")
+        return
+    dev = os.path.join(tmpdir, "printer-libwrap")
+    open(dev, "wb").close()
+    # Preloaded stub denies everything, so the daemon's rejection branch runs
+    # without needing root access to /etc/hosts.deny.
+    d = Daemon(LIBWRAP_BIN, dev, 0, preload=LIBWRAP_STUB)
+    try:
+        if not d.wait_ready():
+            record(name, False, "libwrap build did not start; log=%r"
+                   % d.log()[:300])
+            return
+        size = 4096
+        data = payload(size)
+        # Rejected: closed with nothing delivered.  Closing with unread data
+        # pending makes the kernel send RST, so both a clean EOF and
+        # ECONNRESET count as "closed without an answer".
+        got = b""
+        s = None
+        try:
+            s = socket.create_connection((IPV4_HOST, d.port), timeout=10)
+            s.sendall(data)
+            s.shutdown(socket.SHUT_WR)
+            while True:
+                piece = s.recv(4096)
+                if not piece:
+                    break
+                got += piece
+        except socket.error:
+            got = b""
+        finally:
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+        if got:
+            record(name, False, "denied client received %d bytes" % len(got))
+            return
+        time.sleep(0.5)
+        with open(dev, "rb") as f:
+            delivered = f.read()
+        if delivered:
+            record(name, False,
+                   "denied client's %d bytes reached the printer"
+                   % len(delivered))
+            return
+        if "rejected" not in d.log():
+            record(name, False, "rejection not logged; log=%r" % d.log()[:300])
+            return
+        # Still alive and still listening after the rejection.
+        try:
+            s = socket.create_connection((IPV4_HOST, d.port), timeout=5)
+            s.close()
+        except socket.error as e:
+            record(name, False, "daemon stopped serving after a rejection: %s" % e)
+            return
+        record(name, True)
+    finally:
+        d.kill()
+
+
+def t_libwrap_allows(binpath, tmpdir):
+    """With no rule denying it, a libwrap build must serve normally."""
+    name = "libwrap_build_serves_normally"
+    if not LIBWRAP_BIN:
+        skip(name, "no libwrap build supplied")
+        return
+    dev = os.path.join(tmpdir, "printer-libwrap-ok")
+    open(dev, "wb").close()
+    d = Daemon(LIBWRAP_BIN, dev, 0)
+    try:
+        if not d.wait_ready():
+            record(name, False, "libwrap build did not start; log=%r"
+                   % d.log()[:300])
+            return
+        size = 20000
+        data = payload(size)
+        client_send(data, d.port)
+        got = read_file_bytes(dev, size)
+        if got != data:
+            record(name, False, "job corrupted (%d/%d bytes)"
+                   % (len(got), size))
+            return
+        record(name, True)
+    finally:
+        d.kill()
+
+
 CASES = [
     t_transfer_1byte,
     t_boundaries,
@@ -1137,6 +1237,8 @@ CASES = [
     t_missing_printer_not_accepted_first,
     t_device_allowlist,
     t_default_build_still_accepts_any_device,
+    t_libwrap_allows,
+    t_libwrap_denies,
 ]
 
 
@@ -1146,13 +1248,17 @@ def main():
     ap.add_argument("--bin-deeplock", default="")
     ap.add_argument("--pidfile-dir", default="")
     ap.add_argument("--bin-allowlist", default="")
+    ap.add_argument("--bin-libwrap", default="")
+    ap.add_argument("--libwrap-stub", default="")
     ap.add_argument("--filter", default="")
     args = ap.parse_args()
 
-    global DEEP_LOCK_BIN, PIDFILE_DIR, ALLOW_BIN
+    global DEEP_LOCK_BIN, PIDFILE_DIR, ALLOW_BIN, LIBWRAP_BIN, LIBWRAP_STUB
     DEEP_LOCK_BIN = args.bin_deeplock
     PIDFILE_DIR = args.pidfile_dir
     ALLOW_BIN = args.bin_allowlist
+    LIBWRAP_BIN = args.bin_libwrap
+    LIBWRAP_STUB = args.libwrap_stub
     binpath = os.path.abspath(args.bin)
     if not os.path.exists(binpath):
         print("FATAL: daemon binary %s not found" % binpath)
