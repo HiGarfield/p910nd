@@ -126,6 +126,16 @@ and
 .B \-f
 on a file that must stay private, and note that the daemon traditionally runs
 as root without dropping privileges.
+.LP
+A binary may be built so that the device is restricted to an explicit list:
+compile with
+.B \-DDEVICE_ALLOWLIST='"/dev/lp%c:/dev/usblp%c"'
+(a colon separated set of path patterns in which
+.B %c
+stands for the printer number).  Any other device -- including one passed with
+.B \-f
+-- is then refused at startup.  The check is compiled out by default, so the
+default build behaves exactly as it always has.
 .SH DIAGNOSTICS
 .I p910nd
 logs error messages to syslog.

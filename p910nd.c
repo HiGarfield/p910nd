@@ -661,6 +661,67 @@ static int dup_fd_below_fdsetsize(int fd, const char *name)
 	return -1;
 }
 
+#ifdef DEVICE_ALLOWLIST
+/*
+ * Check the printer device against the allowlist this binary was built with.
+ *
+ * -f names an arbitrary path and -b opens it read-write, so the two together
+ * let any client that can reach the port read and append to whatever file is
+ * named (CVE-2018-10123 is in this class).  That combination is also a
+ * legitimate use -- a real bidirectional printer that is not /dev/lpN -- so
+ * the behaviour is left alone by default and can be constrained at build
+ * time instead: define DEVICE_ALLOWLIST to a colon separated list of device
+ * path patterns, each printf-style with %c standing for the printer number,
+ * e.g. -DDEVICE_ALLOWLIST='"/dev/lp%c:/dev/usblp%c"'.  Anything else is
+ * refused at startup.  Undefined (the default) disables the check entirely.
+ */
+static int device_allowed(const char *dev, int lpnumber)
+{
+	const char *entry = DEVICE_ALLOWLIST;
+	char pattern[256];
+	char expanded[256];
+
+	while (*entry != '\0')
+	{
+		const char *sep;
+		size_t len;
+		const char *p;
+
+		sep = strchr(entry, ':');
+		len = (sep != NULL) ? (size_t)(sep - entry) : strlen(entry);
+		if (len >= sizeof(pattern))
+			len = sizeof(pattern) - 1;
+		memcpy(pattern, entry, len);
+		pattern[len] = '\0';
+
+		/*
+		 * Only %c is meaningful here; a pattern carrying any other
+		 * conversion would make snprintf() read arguments that were never
+		 * passed.  Treat such a pattern as a configuration mistake and
+		 * simply never match it.
+		 */
+		for (p = pattern; *p != '\0'; ++p)
+		{
+			if (*p != '%')
+				continue;
+			if (p[1] != 'c')
+				break;
+			++p;
+		}
+		if (*p == '\0')
+		{
+			(void)snprintf(expanded, sizeof(expanded), pattern, lpnumber);
+			if (strcmp(dev, expanded) == 0)
+				return 1;
+		}
+		if (sep == NULL)
+			break;
+		entry = sep + 1;
+	}
+	return 0;
+}
+#endif
+
 /*
  * Resolve a user name (or a numeric uid) to its uid and primary gid.
  * Returns 0 on success.
@@ -2286,6 +2347,10 @@ int main(int argc, char *argv[])
 	char *endptr;
 	long timeout_sec;
 	struct sigaction sa;
+#ifdef DEVICE_ALLOWLIST
+	char devname_buf[256];
+	const char *devname;
+#endif
 
 	/*
 	 * Broken peer connections can happen while writing in bidirectional mode.
@@ -2399,6 +2464,25 @@ int main(int argc, char *argv[])
 		dolog(LOGOPTS, "invalid printer number '%c' (must be 0-9)\n", lpnumber);
 		usage();
 	}
+#ifdef DEVICE_ALLOWLIST
+	/*
+	 * Check before any printer is opened: with -f the device is whatever
+	 * the caller named, without it the default PRINTERFILE path, and both
+	 * must be permitted by the allowlist this binary was built with.
+	 */
+	if (device == NULL)
+	{
+		(void)snprintf(devname_buf, sizeof(devname_buf), PRINTERFILE, lpnumber);
+		devname = devname_buf;
+	}
+	else
+		devname = device;
+	if (!device_allowed(devname, lpnumber))
+	{
+		dolog(LOGOPTS, "device '%s' is not permitted by this build\n", devname);
+		usage();
+	}
+#endif
 	/* change the n in argv[0] to match the port so ps will show that */
 	if ((p = strstr(progname, "p910n")) != NULL)
 		p[4] = (char)lpnumber;

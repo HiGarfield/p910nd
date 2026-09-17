@@ -152,6 +152,7 @@ echo
 echo "--- phase C: functional end-to-end tests ---"
 FUNCBIN="$BUILD/p910nd-func"
 DEEPBIN="$BUILD/p910nd-deeplock"
+ALLOWBIN="$BUILD/p910nd-allowlist"
 
 # -DPIDFILE keeps the pid file inside the scratch tree too, so the
 # pid-file cases can run without touching the real /var/run.
@@ -159,8 +160,12 @@ if "$CC_GCC" $STD $WARN -O1 -g -DLOCKFILE_DIR="\"$LOCKDIR\"" \
 	-DPIDFILE="\"$PIDDIR/p910%cd.pid\"" \
 	-o "$FUNCBIN" $SRC 2>"$BUILD/func.build.log" &&
 "$CC_GCC" $STD $WARN -O1 -g -DLOCKFILE_DIR="\"$DEEPLOCK\"" \
-	-o "$DEEPBIN" $SRC 2>>"$BUILD/func.build.log"; then
+	-o "$DEEPBIN" $SRC 2>>"$BUILD/func.build.log" &&
+"$CC_GCC" $STD $WARN -O1 -g -DLOCKFILE_DIR="\"$LOCKDIR\"" \
+	-DDEVICE_ALLOWLIST="\"/dev/lp%c\"" \
+	-o "$ALLOWBIN" $SRC 2>>"$BUILD/func.build.log"; then
 func_args="--bin $FUNCBIN --bin-deeplock $DEEPBIN --pidfile-dir $PIDDIR"
+func_args="$func_args --bin-allowlist $ALLOWBIN"
 	[ -n "$FILTER" ] && func_args="$func_args --filter $FILTER"
 	# shellcheck disable=SC2086
 	out=$(python3 tests/functional.py $func_args 2>&1)

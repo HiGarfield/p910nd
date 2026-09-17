@@ -33,6 +33,8 @@ IPV6_HOST = "::1"
 DEEP_LOCK_BIN = None
 # Directory the purpose-built binary writes its pid file into.
 PIDFILE_DIR = None
+# Build compiled with DEVICE_ALLOWLIST.
+ALLOW_BIN = None
 _failures = []
 _passes = []
 _skips = []
@@ -1056,6 +1058,59 @@ def t_missing_printer_not_accepted_first(binpath, tmpdir):
         d.kill()
 
 
+def t_device_allowlist(binpath, tmpdir):
+    """A build with DEVICE_ALLOWLIST must refuse devices outside the list."""
+    name = "device_allowlist_enforced"
+    if not ALLOW_BIN:
+        skip(name, "no allowlist build supplied (--bin-allowlist)")
+        return
+    sink = os.path.join(tmpdir, "sink")
+    open(sink, "wb").close()
+    rc, out = _run_raw(ALLOW_BIN, ["-d", "-f", sink, "0"], timeout=5.0)
+    if rc is None:
+        record(name, False, "did not terminate (%s)" % out[:120])
+        return
+    if rc == 0:
+        record(name, False, "-f outside the allowlist was accepted")
+        return
+    if "not permitted by this build" not in out:
+        record(name, False, "unexpected message: %r" % out[:160])
+        return
+    # A listed device must still be accepted; /dev/lp0 need not exist for the
+    # daemon to start listening (it retries the open).
+    d = Daemon(ALLOW_BIN, "/dev/lp0", 0)
+    try:
+        if not d.wait_ready(timeout=5.0):
+            record(name, False, "a listed device was refused; log=%r"
+                   % d.log()[:200])
+            return
+    finally:
+        d.kill()
+    record(name, True)
+
+
+def t_default_build_still_accepts_any_device(binpath, tmpdir):
+    """The default build is unchanged: -f keeps pointing anywhere."""
+    name = "default_build_accepts_any_device"
+    sink = os.path.join(tmpdir, "sink")
+    open(sink, "wb").close()
+    d = Daemon(binpath, sink, 0)
+    try:
+        if not d.wait_ready():
+            record(name, False, "default build refused an arbitrary -f device")
+            return
+        size = 1024
+        data = payload(size)
+        client_send(data, d.port)
+        got = read_file_bytes(sink, size)
+        if got != data:
+            record(name, False, "job corrupted (%d/%d bytes)" % (len(got), size))
+            return
+        record(name, True)
+    finally:
+        d.kill()
+
+
 CASES = [
     t_transfer_1byte,
     t_boundaries,
@@ -1080,6 +1135,8 @@ CASES = [
     t_privilege_drop,
     t_unknown_privilege_targets_rejected,
     t_missing_printer_not_accepted_first,
+    t_device_allowlist,
+    t_default_build_still_accepts_any_device,
 ]
 
 
@@ -1088,12 +1145,14 @@ def main():
     ap.add_argument("--bin", default="./p910nd")
     ap.add_argument("--bin-deeplock", default="")
     ap.add_argument("--pidfile-dir", default="")
+    ap.add_argument("--bin-allowlist", default="")
     ap.add_argument("--filter", default="")
     args = ap.parse_args()
 
-    global DEEP_LOCK_BIN, PIDFILE_DIR
+    global DEEP_LOCK_BIN, PIDFILE_DIR, ALLOW_BIN
     DEEP_LOCK_BIN = args.bin_deeplock
     PIDFILE_DIR = args.pidfile_dir
+    ALLOW_BIN = args.bin_allowlist
     binpath = os.path.abspath(args.bin)
     if not os.path.exists(binpath):
         print("FATAL: daemon binary %s not found" % binpath)
