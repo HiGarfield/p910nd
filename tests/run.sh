@@ -84,6 +84,25 @@ compile_ok gate-gcc-asan "$BUILD/p910nd-asan" \
 compile_ok gate-gcc-default-make "$BUILD/p910nd-make" \
 	"$CC_GCC" $WARN $SRC
 
+# Portability: a second C library and a second word size catch assumptions
+# about sizeof(long), pid_t and friends that only one target would hide.
+# Probed rather than assumed, so a host without them SKIPs instead of failing.
+if command -v musl-gcc >/dev/null 2>&1; then
+	compile_ok gate-musl-c89 "$BUILD/p910nd-musl" \
+		musl-gcc $STD $WARN -O2 $SRC
+else
+	skip "gate-musl-c89 (musl-gcc not installed)"
+fi
+
+printf 'int main(void){return 0;}\n' >"$BUILD/m32probe.c"
+if "$CC_GCC" -m32 "$BUILD/m32probe.c" -o "$BUILD/m32probe" \
+	2>/dev/null; then
+	compile_ok gate-gcc-32bit "$BUILD/p910nd-32" \
+		"$CC_GCC" -m32 $STD $WARN -O2 $SRC
+else
+	skip "gate-gcc-32bit (no 32-bit multilib)"
+fi
+
 if [ -f /usr/include/tcpd.h ]; then
 	compile_ok gate-libwrap "$BUILD/p910nd-libwrap" \
 		"$CC_GCC" $STD $WARN -DUSE_LIBWRAP -DUSE_GETPROTOBYNAME $SRC -lwrap
