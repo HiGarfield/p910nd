@@ -1605,6 +1605,8 @@ static void server(int lpnumber)
 	char service[8];
 	const int bufsiz = 65536;
 	int gai_err;
+	int net_closed = 0;
+	int lp_closed = 0;
 	/* Timestamps of the last "listening socket is not up" and last "accept
 	 * failed" log lines; 0 means "nothing logged yet", so the first failure
 	 * is always reported. */
@@ -1622,6 +1624,7 @@ static void server(int lpnumber)
 	 */
 	struct rlimit resourcelimit;
 	rlim_t max_close_fd;
+	rlim_t i;
 	char pidfilename[sizeof(PIDFILE)];
 	FILE *f;
 
@@ -1656,11 +1659,8 @@ static void server(int lpnumber)
 		 * would invoke signed overflow (undefined behaviour) once the
 		 * descriptor count exceeds INT_MAX, with an arbitrary outcome.
 		 */
-		{
-			rlim_t i;
-			for (i = 0; i < max_close_fd; ++i)
-				(void)close((int)i);
-		}
+		for (i = 0; i < max_close_fd; ++i)
+			(void)close((int)i);
 		if (setsid() < 0)
 		{
 			dolog(LOGOPTS, "setsid: %m\n");
@@ -1925,24 +1925,19 @@ static void server(int lpnumber)
 		while ((lp = open_printer(lpnumber)) == -1)
 			sleep(10);
 
-		{
-			int net_closed = 0;
-			int lp_closed = 0;
-
-			if (copy_stream_ex(fd, lp, &net_closed, &lp_closed) < 0)
-				dolog(LOGOPTS, "copy_stream: %m\n");
-			/*
-			 * copy_stream_ex() may have replaced an out-of-range descriptor
-			 * with an in-range duplicate, closing the original in the
-			 * process.  Closing such a number again would, once it has been
-			 * recycled (e.g. by the next accept() or by the listening
-			 * socket), destroy an unrelated live descriptor.
-			 */
-			if (!net_closed)
-				(void)close(fd);
-			if (!lp_closed)
-				(void)close(lp);
-		}
+		if (copy_stream_ex(fd, lp, &net_closed, &lp_closed) < 0)
+			dolog(LOGOPTS, "copy_stream: %m\n");
+		/*
+		 * copy_stream_ex() may have replaced an out-of-range descriptor
+		 * with an in-range duplicate, closing the original in the
+		 * process.  Closing such a number again would, once it has been
+		 * recycled (e.g. by the next accept() or by the listening
+		 * socket), destroy an unrelated live descriptor.
+		 */
+		if (!net_closed)
+			(void)close(fd);
+		if (!lp_closed)
+			(void)close(lp);
 	}
 	dolog(LOGOPTS, "accept: %m\n");
 	free_lock();
