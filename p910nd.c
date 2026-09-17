@@ -159,7 +159,14 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
 #endif
 
 #define BASEPORT 9100
+/*
+ * Overridable like LOCKFILE/PRINTERFILE: several distributions keep pid files
+ * outside /var/run, and being able to relocate it also makes the startup path
+ * testable without touching the real /var/run.
+ */
+#ifndef PIDFILE
 #define PIDFILE "/var/run/p910%cd.pid"
+#endif
 #ifdef LOCKFILE_DIR
 #define LOCKFILE LOCKFILE_DIR "/p910%cd"
 #else
@@ -215,6 +222,10 @@ static char default_progname[] = "p910nd";
 static char version[] = "Version 0.97";
 static char copyright[] = "Copyright (c) 2008-2014 Ken Yap and others, GPLv2";
 static int lockfd = -1;
+/* Path of the pid file this process created, empty when none exists. */
+static char pidfile_path[sizeof(PIDFILE)];
+/* Set by the SIGTERM/SIGINT handler; acted on in the daemon's main loop. */
+static volatile sig_atomic_t terminating = 0;
 static char *device = NULL;
 static int bidir = 0;
 static char *bindaddr = NULL;
@@ -738,6 +749,34 @@ static void free_lock(void)
 		 */
 		lockfd = -1;
 	}
+}
+
+/*
+ * Remove the pid file this daemon created, if any.
+ *
+ * A pid file naming a PID that no longer exists makes any script acting on it
+ * signal -- or worse, act upon -- whatever process later recycled that number,
+ * so it is removed whenever this process stops in an orderly way.  The path is
+ * cleared afterwards so the call is idempotent, mirroring free_lock().
+ */
+static void remove_pidfile(void)
+{
+	if (pidfile_path[0] != '\0')
+	{
+		(void)unlink(pidfile_path);
+		pidfile_path[0] = '\0';
+	}
+}
+
+/*
+ * Record that a stop was requested.  A signal handler may only set a flag;
+ * the actual cleanup happens in the daemon's main loop, where it is safe to
+ * run functions that are not async-signal-safe.
+ */
+static void request_termination(int sig)
+{
+	(void)sig;
+	terminating = 1;
 }
 
 /* Initializes the buffer, at the start. */
@@ -1699,7 +1738,6 @@ static void server(int lpnumber)
 	rlim_t max_close_fd;
 	rlim_t i;
 	char pidfilename[sizeof(PIDFILE)];
-	FILE *f;
 
 	if (!log_to_stdout)
 	{
@@ -1766,26 +1804,50 @@ static void server(int lpnumber)
 		exit(1);
 	if (!log_to_stdout)
 	{
+		char pidtext[32];
+		int pidfd;
+		size_t pidlen;
+		ssize_t wrote;
+
 		(void)snprintf(pidfilename, sizeof(pidfilename), PIDFILE, lpnumber);
 		/* Same reasoning as the lock directory above: /var/run need not
 		 * exist on a freshly booted read-only/diskless image. */
 		(void)ensure_parent_dir(pidfilename);
-		if ((f = fopen(pidfilename, "w")) == NULL)
+		/*
+		 * O_NOFOLLOW rather than fopen("w"): this daemon normally runs as
+		 * root, and opening through a symlink planted by an unprivileged
+		 * user would truncate whatever that link points at.
+		 *
+		 * O_EXCL is deliberately absent: a pid file left behind by a crash
+		 * must simply be overwritten, otherwise every start after one would
+		 * fail forever.
+		 */
+		pidfd = open(pidfilename, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0644);
+		if (pidfd < 0)
 		{
 			dolog(LOGOPTS, "%s: %m\n", pidfilename);
 			free_lock();
 			exit(1);
 		}
-		if (fprintf(f, "%d\n", getpid()) < 0)
+		/* Remembered so it can be removed again when we stop. */
+		(void)snprintf(pidfile_path, sizeof(pidfile_path), "%s", pidfilename);
+		/*
+		 * pid_t need not be int, so it is formatted as long: "%d" would be
+		 * undefined behaviour wherever pid_t is wider.
+		 */
+		(void)snprintf(pidtext, sizeof(pidtext), "%ld\n", (long)getpid());
+		pidlen = strlen(pidtext);
+		wrote = write(pidfd, pidtext, pidlen);
+		if (wrote < 0 || (size_t)wrote != pidlen)
 		{
-			dolog(LOGOPTS, "%s: fprintf: %m\n", pidfilename);
-			(void)fclose(f);
+			dolog(LOGOPTS, "%s: write: %m\n", pidfilename);
+			(void)close(pidfd);
 			free_lock();
 			exit(1);
 		}
-		if (fclose(f) != 0)
+		if (close(pidfd) != 0)
 		{
-			dolog(LOGOPTS, "%s: fclose: %m\n", pidfilename);
+			dolog(LOGOPTS, "%s: close: %m\n", pidfilename);
 			free_lock();
 			exit(1);
 		}
@@ -1946,6 +2008,20 @@ static void server(int lpnumber)
 	{
 		char host[INET6_ADDRSTRLEN];
 		clientlen = sizeof(client);
+		/*
+		 * SIGTERM/SIGINT set this flag; acting here rather than inside the
+		 * handler keeps the cleanup to functions that are safe to call
+		 * outside a signal context, and stops the pid file from outliving
+		 * the process it describes.
+		 */
+		if (terminating)
+		{
+			dolog(LOG_NOTICE, "terminating on signal\n");
+			(void)close(netfd);
+			remove_pidfile();
+			free_lock();
+			exit(0);
+		}
 		fd = accept(netfd, (struct sockaddr *)&client, &clientlen);
 		if (fd < 0)
 		{
@@ -2047,12 +2123,30 @@ int main(int argc, char *argv[])
 	char *log_ident;
 	char *endptr;
 	long timeout_sec;
+	struct sigaction sa;
 
 	/*
 	 * Broken peer connections can happen while writing in bidirectional mode.
 	 * Ignore SIGPIPE so write() reports EPIPE and the daemon can continue.
 	 */
 	(void)signal(SIGPIPE, SIG_IGN);
+	/*
+	 * SIGTERM/SIGINT must be able to interrupt a blocking accept(), so these
+	 * are installed without SA_RESTART; the accept() path already treats
+	 * EINTR as "check the loop again", which is where the request is acted
+	 * on.  Handlers themselves only raise a flag.
+	 */
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = request_termination;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = 0;
+	(void)sigaction(SIGTERM, &sa, NULL);
+	(void)sigaction(SIGINT, &sa, NULL);
+	/*
+	 * Covers the orderly exits that never reach the loop check below, so a
+	 * stale pid file is not left behind either way.
+	 */
+	atexit(remove_pidfile);
 
 	if (argc <= 0) /* in case not provided in (x)inetd config */
 		progname = default_progname;

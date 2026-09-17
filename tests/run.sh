@@ -34,6 +34,7 @@ STD="-std=c89"
 BUILD=$(mktemp -d "${TMPDIR:-/tmp}/p910nd-audit-XXXXXX")
 LOCKDIR="$BUILD/lock"
 DEEPLOCK="$BUILD/deep/missing/lockdir"
+PIDDIR="$BUILD/pidtest"
 mkdir -p "$LOCKDIR" || exit 2
 
 PASSES=0
@@ -152,11 +153,14 @@ echo "--- phase C: functional end-to-end tests ---"
 FUNCBIN="$BUILD/p910nd-func"
 DEEPBIN="$BUILD/p910nd-deeplock"
 
+# -DPIDFILE keeps the pid file inside the scratch tree too, so the
+# pid-file cases can run without touching the real /var/run.
 if "$CC_GCC" $STD $WARN -O1 -g -DLOCKFILE_DIR="\"$LOCKDIR\"" \
+	-DPIDFILE="\"$PIDDIR/p910%cd.pid\"" \
 	-o "$FUNCBIN" $SRC 2>"$BUILD/func.build.log" &&
-	"$CC_GCC" $STD $WARN -O1 -g -DLOCKFILE_DIR="\"$DEEPLOCK\"" \
-		-o "$DEEPBIN" $SRC 2>>"$BUILD/func.build.log"; then
-	func_args="--bin $FUNCBIN --bin-deeplock $DEEPBIN"
+"$CC_GCC" $STD $WARN -O1 -g -DLOCKFILE_DIR="\"$DEEPLOCK\"" \
+	-o "$DEEPBIN" $SRC 2>>"$BUILD/func.build.log"; then
+func_args="--bin $FUNCBIN --bin-deeplock $DEEPBIN --pidfile-dir $PIDDIR"
 	[ -n "$FILTER" ] && func_args="$func_args --filter $FILTER"
 	# shellcheck disable=SC2086
 	out=$(python3 tests/functional.py $func_args 2>&1)

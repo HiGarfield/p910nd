@@ -31,6 +31,8 @@ IPV6_HOST = "::1"
 # Set from --bin-deeplock: a build whose compiled-in lock directory does not
 # exist, used to prove the daemon can create it.
 DEEP_LOCK_BIN = None
+# Directory the purpose-built binary writes its pid file into.
+PIDFILE_DIR = None
 _failures = []
 _passes = []
 _skips = []
@@ -65,13 +67,20 @@ def skip(name, why):
 class Daemon:
     """Runs p910nd in the foreground (-d) so we control its lifetime."""
 
-    def __init__(self, binpath, dev, n=0, bidir=False, ipv6=False, extra=None):
+    def __init__(self, binpath, dev, n=0, bidir=False, ipv6=False, extra=None,
+                 foreground=True):
         self.proc = None
+        # The daemon calls setsid() itself, so it leaves our process group;
+        # without tracking its real pid, teardown would leave it running and
+        # holding the port for the next case.
+        self.daemon_pid = 0
         self.n = n
         self.ipv6 = ipv6
         self.port = PORT_BASE + n
         self.logpath = tempfile.mktemp(prefix="p910nd-log-")
-        args = [binpath, "-d"]
+        args = [binpath]
+        if foreground:
+            args.append("-d")
         if bidir:
             args.append("-b")
         args += ["-f", dev]
@@ -81,7 +90,15 @@ class Daemon:
             args += list(extra)
         args.append(str(n))
         self.logfile = open(self.logpath, "w+b")
-        self.proc = subprocess.Popen(args, stdout=self.logfile,
+        # stdin is pinned to /dev/null on purpose.  is_standalone() decides
+        # between the inetd and standalone code paths by calling
+        # getsockname(0): when the test runner itself hands the process a
+        # socket as descriptor 0, that succeeds and the daemon silently takes
+        # the inetd path (one_job, no pid file) however it was started.
+        # /dev/null is not a socket, so standalone is chosen deterministically.
+        self.devnull = open(os.devnull, "r+b")
+        self.proc = subprocess.Popen(args, stdin=self.devnull,
+                                     stdout=self.logfile,
                                      stderr=subprocess.STDOUT,
                                      preexec_fn=os.setsid)
         self.path = binpath
@@ -102,6 +119,28 @@ class Daemon:
 
     def alive(self):
         return self.proc is not None and self.proc.poll() is None
+
+    def wait_pidfile(self, path, timeout=10.0):
+        """Return the pid recorded in `path`, or -1 if it never appears."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                with open(path, "r") as f:
+                    pid = int(f.read().strip())
+                self.daemon_pid = pid
+                return pid
+            except (IOError, OSError, ValueError):
+                time.sleep(0.05)
+        return -1
+
+    @staticmethod
+    def wait_pid_gone(pid, timeout=10.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not os.path.exists("/proc/%d" % pid):
+                return True
+            time.sleep(0.05)
+        return False
 
     def cpu_seconds(self):
         """Total CPU time consumed so far, from /proc/<pid>/stat."""
@@ -124,6 +163,13 @@ class Daemon:
     def kill(self):
         if self.proc is None:
             return
+        if getattr(self, "daemon_pid", 0):
+            try:
+                os.kill(self.daemon_pid, signal.SIGKILL)
+            except OSError:
+                pass
+            self.wait_pid_gone(self.daemon_pid, 5.0)
+            self.daemon_pid = 0
         if self.proc.poll() is None:
             try:
                 os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
@@ -138,6 +184,10 @@ class Daemon:
             pass
         try:
             self.logfile.close()
+        except Exception:
+            pass
+        try:
+            self.devnull.close()
         except Exception:
             pass
         try:
@@ -789,6 +839,106 @@ def t_invalid_idle_timeout_rejected(binpath, tmpdir):
     record(name, True)
 
 
+def _pid_path():
+    return os.path.join(PIDFILE_DIR, "p9100d.pid") if PIDFILE_DIR else ""
+
+
+def t_pidfile_removed_on_termination(binpath, tmpdir):
+    """A pid file must be written while running and removed when we stop."""
+    name = "pidfile_removed_on_termination"
+    if not PIDFILE_DIR:
+        skip(name, "no --pidfile-dir supplied")
+        return
+    dev = os.path.join(tmpdir, "printer-pidterm")
+    open(dev, "wb").close()
+    pidpath = _pid_path()
+    if os.path.lexists(pidpath):
+        os.unlink(pidpath)
+    # No -d: run backgrounded, which is the only mode that uses a pid file.
+    d = Daemon(binpath, dev, 0, foreground=False)
+    try:
+        try:
+            d.proc.wait(timeout=10)  # starter forks and exits
+        except Exception:
+            pass
+        pid = d.wait_pidfile(pidpath)
+        if pid < 0:
+            record(name, False, "pid file %s was not created" % pidpath)
+            return
+        if not os.path.exists("/proc/%d" % pid):
+            record(name, False, "pid file names a non-existent process %d" % pid)
+            return
+        os.kill(pid, signal.SIGTERM)
+        if not Daemon.wait_pid_gone(pid, timeout=10.0):
+            record(name, False, "daemon ignored SIGTERM")
+            return
+        if os.path.exists(pidpath):
+            record(name, False,
+                   "pid file survived termination (stale pid, later reused)")
+            return
+        record(name, True)
+    finally:
+        d.kill()
+
+
+def t_pidfile_symlink_refused(binpath, tmpdir):
+    """A symlinked pid file must not be followed, so its target is safe."""
+    name = "pidfile_symlink_refused"
+    if not PIDFILE_DIR:
+        skip(name, "no --pidfile-dir supplied")
+        return
+    dev = os.path.join(tmpdir, "printer-pidsym")
+    open(dev, "wb").close()
+    victim = os.path.join(tmpdir, "victim")
+    precious = "precious\n"
+    with open(victim, "w") as f:
+        f.write(precious)
+    pidpath = _pid_path()
+    if os.path.lexists(pidpath):
+        os.unlink(pidpath)
+    os.symlink(victim, pidpath)
+    d = Daemon(binpath, dev, 0, foreground=False)
+    try:
+        # The starter always forks and exits 0, so its status says nothing;
+        # what matters is whether the daemon came up and what happened to the
+        # file the symlink points at.
+        try:
+            d.proc.wait(timeout=10)
+        except Exception:
+            pass
+        time.sleep(1.5)
+        with open(victim, "r") as f:
+            content = f.read()
+        if content != precious:
+            record(name, False,
+                   "followed the symlink and clobbered its target (%r)"
+                   % content[:40])
+            return
+        try:
+            s = socket.create_connection((IPV4_HOST, 9100), timeout=1.0)
+            s.close()
+            record(name, False,
+                   "daemon started anyway with a symlinked pid file")
+            return
+        except socket.error:
+            pass  # refused, as required
+        record(name, True)
+    finally:
+        # If the daemon did start (which is the failure we are looking for) it
+        # left no pid file to track, so reap it by its unique device path.
+        try:
+            subprocess.run(["pkill", "-9", "-f", dev], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=10)
+        except Exception:
+            pass
+        d.kill()
+        if os.path.lexists(pidpath):
+            try:
+                os.unlink(pidpath)
+            except OSError:
+                pass
+
+
 CASES = [
     t_transfer_1byte,
     t_boundaries,
@@ -808,6 +958,8 @@ CASES = [
     t_idle_timeout_disconnects,
     t_idle_timeout_zero_keeps_open,
     t_invalid_idle_timeout_rejected,
+    t_pidfile_removed_on_termination,
+    t_pidfile_symlink_refused,
 ]
 
 
@@ -815,11 +967,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bin", default="./p910nd")
     ap.add_argument("--bin-deeplock", default="")
+    ap.add_argument("--pidfile-dir", default="")
     ap.add_argument("--filter", default="")
     args = ap.parse_args()
 
-    global DEEP_LOCK_BIN
+    global DEEP_LOCK_BIN, PIDFILE_DIR
     DEEP_LOCK_BIN = args.bin_deeplock
+    PIDFILE_DIR = args.pidfile_dir
     binpath = os.path.abspath(args.bin)
     if not os.path.exists(binpath):
         print("FATAL: daemon binary %s not found" % binpath)
