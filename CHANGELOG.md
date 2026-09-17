@@ -55,6 +55,49 @@ language level and add no third-party dependency.
 printer is missing, pid-file lifetime/`O_NOFOLLOW`, libwrap verification, cross
 compilation. All written up in `UNRESOLVED.md`.
 
+---
+
+## Second pass — everything in UNRESOLVED.md is now resolved
+
+Each item has its own commit; `UNRESOLVED.md` carries the per-item write-up and
+the residual caveats that this machine cannot prove.
+
+### More defects fixed
+
+* **BUG-005 · Medium · robustness** — `server()` accepted a connection and only
+  then retried `open_printer()` forever, so a single client (or one mistyped `-f`)
+  held the daemon: connected but unserved, with no other client able to take its
+  place. The device is now opened **before** `accept()`; the descriptor is
+  released on every path that does not reach a job. Retrying forever is
+  unchanged.
+* **BUG-006 · Low · security/hygiene** — the pid file was written with
+  `fopen("w")`, which follows symlinks (as root that truncates whatever the link
+  points at), and was never unlinked, so it kept naming a PID another process may
+  later recycle. Now `open(..., O_NOFOLLOW)` plus removal on SIGTERM/SIGINT and at
+  orderly exit.
+* **BUG-007 · Low · portability** — the pid was printed with `%d`, undefined for a
+  `pid_t` that is not `int`. Now formatted as `long`.
+
+### New capabilities, all opt-in (default behaviour untouched)
+
+* `-t <seconds>` — idle timeout; `0` disables. The post-EOF grace window that
+  catches a late printer reply is deliberately **not** configurable, since it is
+  what guarantees a job terminates. (U7)
+* `-u <user>` / `-g <group>` — drop privileges once the lock file, pid file and
+  listening socket exist. Names or numeric ids; unknown targets are a hard error.
+  (U2)
+* `-DDEVICE_ALLOWLIST` — refuse any printer device outside a build-time list,
+  closing the `-b` + `-f` arbitrary read/append hole (CVE-2018-10123 class) for
+  builds that opt in. (U1, design A)
+
+### Verification that was previously only claimed
+
+* **libwrap** is now compiled, linked and run rather than skipped: allow path
+  serves byte-exactly, deny path closes the connection with nothing delivered and
+  keeps serving, and no descriptor leaks. (U5/U8)
+* **Portability** gained `-m32` and musl-gcc build gates. arm/mips cross
+  compilation still needs a CI runner — recorded, not claimed. (U6)
+
 ## Compatibility
 
 No breaking change. Command line (`-f -i -b -d -v`, `[0-9]`), inetd/standalone

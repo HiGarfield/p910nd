@@ -31,6 +31,8 @@ clang -std=c89 -Wall -Wextra -Wpedantic -O2
 gcc   -std=c89 -Wall -Wextra -Wpedantic -DTESTING
 gcc   -std=c89 ... -fsanitize=address,undefined -fno-omit-frame-pointer
 gcc   -DUSE_LIBWRAP -DUSE_GETPROTOBYNAME ... -lwrap    (needs tcpd.h)
+musl-gcc -std=c89 ...                                  (second C library)
+gcc   -m32 -std=c89 ...                                (second word size)
 ```
 
 **A2 — cppcheck** with `warning,performance,portability`. Findings are reported;
@@ -92,6 +94,31 @@ socket and the lock file. The remaining `still reachable: 4096 bytes` is glibc's
 `stdout` buffer from `-d` logging, not daemon state.
 
 ## Environment notes
+
+### Two environment traps that produced false results
+
+Both are now handled by the harness, and are recorded because they cost real
+diagnosis time and would mislead anyone running a case by hand.
+
+* **Descriptor 0 may be a socket.** `is_standalone()` decides between the inetd
+  and standalone paths by calling `getsockname(0)`. When the runner hands the
+  process a socket as stdin, that succeeds and the daemon silently takes the
+  inetd path — no pid file, no listening socket — however it was started. The
+  harness pins stdin to `/dev/null`. Runs with `-d` never showed this because
+  `log_to_stdout` forces the same branch.
+* **The daemon escapes the process group.** It calls `setsid()` itself, so killing
+  its process group does not stop it; a leftover daemon then holds port 9100 and
+  makes later cases fail for unrelated reasons. Teardown tracks the real pid (from
+  the pid file, or by `pkill` on the case's unique device path).
+
+### libwrap testing without root
+
+`hosts_access()` consults `/etc/hosts.allow` and `/etc/hosts.deny`, which the
+suite must not write to (and cannot, unprivileged). The deny branch is exercised
+instead by preloading `tests/hosts_ctl_stub.so`, which replaces `hosts_ctl()` with
+one that always denies; the daemon's own rejection code therefore runs for real.
+That stub is a shared object rather than a program, so the unit phase skips any
+`tests/*.c` without a `main()`.
 
 Run as a non-root user is fine: port 9100 is unprivileged, and the harness
 compiles the daemon with `-DLOCKFILE_DIR` aimed at a scratch directory so it

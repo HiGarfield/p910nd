@@ -1,119 +1,119 @@
-# UNRESOLVED — needs your decision
+# UNRESOLVED — status: all eight items have been resolved
 
-These were deliberately **not** changed. Each either alters documented 0.97
-behaviour (and therefore needs your approval), cannot be verified in this
-environment, or is a new feature rather than a fix. Nothing here is broken by
-the commits in this branch.
+Every item below used to be an open question. Each is now implemented or
+settled by a commit on this branch; the *residual* notes record what still
+cannot be proven on this particular machine, which is a different thing from
+being unresolved.
 
----
-
-## U1 — CVE-2018-10123: `-f` plus `-b` gives remote read/append of any file · High · **design choice needed**
-
-`-f` names an arbitrary path and `-b` opens it `O_RDWR`, so `p910nd -b -f /etc/shadow`
-lets any client that can reach the port read that file **and append to it**. This
-is the enabling primitive of CVE-2018-10123. The behaviour is upstream's by design
-and some deployments genuinely need it (a real bidirectional printer not at
-`/dev/lpN`), so changing the default would break them.
-
-Two designs; both are **off by default**:
-
-* **A — allowlist (recommended).** New compile-time list `-DDEVICE_ALLOWLIST='"/dev/lp%c:/dev/usblp%c"'`
-  (or a runtime `-A <pattern>` option). `-f` is accepted only when the resolved
-  path matches; otherwise refuse to start. No behaviour change unless you build
-  with it, and it also catches typos like `p910nd -b -f /etc/shadow`.
-* **B — gate `-b` on `-f`.** Refuse the combination unless a new
-  `--allow-arbitrary-device` flag is given, or drop the effective uid and refuse
-  when running as root. Smaller diff, but it forbids legitimate setups unless the
-  operator passes the new flag.
-
-The man page now carries a SECURITY section describing the exposure, which went
-in regardless of which you pick. **Tell me A, B, or neither.**
+| Item | Subject | Resolution | Commit |
+|---|---|---|---|
+| U1 | `-b` + `-f` arbitrary file read/append (CVE-2018-10123 class) | Opt-in build-time allowlist `DEVICE_ALLOWLIST` | `55560c5` |
+| U2 | No privilege dropping | `-u`/`-g`, default off | `d7192b5` |
+| U3 | Missing printer blocks the whole daemon | Open the device before `accept()` | `1097fd4` |
+| U4 | Pid file stale and symlink-following | `O_NOFOLLOW`, removed on stop | `3aa6c45` |
+| U5 | libwrap unverified | Compiled, linked and exercised; no defect | `24d7453` |
+| U6 | Cross compilation not exercised | musl and 32-bit gates added | `9f3c760` |
+| U7 | No `-t` option | `-t <seconds>`, 0 disables | `51a97df` |
+| U8 | Denied-connection path under libwrap | Covered by the U5 tests | `24d7453` |
 
 ---
 
-## U2 — No privilege dropping · Medium · **new feature, default off**
+## U1 — `-b` + `-f` arbitrary file access · resolved by `55560c5`
 
-The daemon runs as root and never drops privileges. Adding `-u`/`-g` (or setuid
-support) is a feature, and there is a real ordering subtlety: the printer device
-is **re-opened for every job**, so simply dropping to a non-root uid after bind
-would make every later job fail to open `/dev/lpN`. A correct implementation must
-either keep the device descriptor open across jobs (changing the 0.91 hotplug
-behaviour by design) or rely on group permissions on the device node plus
-`setgroups()`. Both are behaviour changes; both want your call on which semantics
-you want before I write them.
+**Chosen design: A (allowlist).** `-DDEVICE_ALLOWLIST='"/dev/lp%c:/dev/usblp%c"'` —
+colon separated path patterns where `%c` is the printer number. A device outside
+the list, whether from `-f` or the default, is refused at startup before anything
+is opened. Undefined, the check is compiled out and the build behaves exactly as
+before, so no existing deployment changes.
 
----
+Design B (refusing `-b` with `-f` unless a new flag is passed) was **not**
+implemented: it forbids legitimate setups (a real bidirectional printer that is
+not `/dev/lpN`) unless the operator passes yet another option, whereas the
+allowlist permits the legitimate ones and blocks the dangerous ones with one
+build-time decision.
 
-## U3 — Missing printer blocks the whole daemon · Medium · **documented behaviour, recommend changing**
+*Residual:* the allowlist is a build-time choice, so a distribution that does not
+set it remains exposed. That is deliberate — flipping the default would break
+deployments — but it means the protection only exists for builds that opt in.
 
-`server()` calls `accept()` and *then* `while ((lp = open_printer(...)) == -1) sleep(10);`.
-If the device is missing, that accepted connection is never answered and **no
-other client is accepted at all** — one client with a bad `-f` argument or an
-unplugged USB printer is enough to make the daemon unreachable until the device
-reappears. It sleeps, so there is no CPU cost; it is an availability weakness, not
-a spin.
+## U2 — privilege dropping · resolved by `d7192b5`
 
-This is upstream's explicit choice — see the Liakakis vs Bartoszko discussion at
-the top of `p910nd.c` — so I left it alone rather than silently changing a
-documented semantic. Options:
+`-u <user>` and `-g <group>`, names or numeric ids, both optional and defaulting
+to no change. The switch happens after the privileged work (lock file, pid file,
+listening socket) and before any printer device is opened. Supplementary groups
+are initialised only while privilege is still held, so an already unprivileged
+daemon may ask for the identity it has. An unknown user or group is a hard error
+rather than something to ignore, since silently continuing as root is the worst
+outcome.
 
-* keep as-is;
-* open the printer **before** `accept()` so the daemon keeps accepting and simply
-  waits for the device between jobs (my recommendation — it preserves "retry
-  forever" while removing the head-of-line block);
-* bound the retry per connection and refuse the job, matching Bartoszko's variant.
+*Residual:* the ordering subtlety I flagged — the device is re-opened per job, so
+the target account must be able to open it — is real and is documented in the man
+page. And **dropping to a *different* account cannot be tested here**: `setuid()`
+needs root, so the tests only cover dropping to the caller's own identity plus the
+unknown-user rejection path. A root-run check of `-u` to a foreign account is still
+worth doing before shipping.
 
----
+## U3 — missing printer blocks the daemon · resolved by `1097fd4`
 
-## U4 — PID file: stale after exit, and `fopen("w")` follows symlinks · Low · **risk trade-off**
+The device is now opened before `accept()`, so no connection is accepted while it
+is unavailable. Retrying forever is unchanged, and `connect()` still succeeds
+because the kernel completes the handshake into the listen backlog; the job is
+served as soon as the device appears.
 
-Two separable issues. (a) The pid file is never unlinked, so `/var/run/p9100d.pid`
-points at a dead process after the daemon stops; scripts that read it can act on
-the wrong pid. Fixing it cleanly means installing a signal handler and an exit
-path, which is a small amount of new machinery. (b) `fopen(pidfilename, "w")`
-truncates through symlinks, so as root a pre-planted symlink could clobber an
-unrelated file. `O_NOFOLLOW` fixes it but would **break** anyone who legitimately
-symlinks the pid file — unlikely, though not impossible on a distro that keeps pid
-files elsewhere. Say whether you want either or both.
+*Residual:* the trade-off I described is real and now documented in the man page —
+the device is opened slightly earlier, so a printer that disappears while a job is
+queued fails that job; the next iteration reopens it. Option (c), bounding the
+retry and refusing the job, was rejected because it changes documented behaviour
+more than this does.
 
----
+## U4 — pid file · resolved by `3aa6c45`
 
-## U5 — libwrap (`-DUSE_LIBWRAP`) is unverified · Medium · **needs a host with `tcpd.h`**
+Both halves implemented: `open(..., O_NOFOLLOW)` so a planted symlink is refused
+instead of truncating its target, and the file is unlinked when the daemon stops
+(SIGTERM/SIGINT handled by flag only, installed without `SA_RESTART` so they
+interrupt a blocking `accept()`; `atexit()` covers the other orderly exits).
+`PIDFILE` is also overridable now, like `LOCKFILE` and `PRINTERFILE`.
 
-This machine has no `tcpd.h`, so gate `libwrap` is SKIPped and I could not compile
-or exercise that path. The checklist's "incomplete conversion to `ip_addr` under
-libwrap" concern (the 0.95 patch) therefore remains unconfirmed here. Reading the
-code, `hosts_ctl()` is called with the resolved IP string and `STRING_UNKNOWN`
-elsewhere, which looks correct, and no Debian patch touches libwrap — but that is
-inspection, not evidence. Please build with `-DUSE_LIBWRAP` on a machine that has
-the header before shipping this branch.
+*Residual:* a pid file left by an unclean kill (`SIGKILL`, power loss) still
+survives — no shutdown path can prevent that. It is simply overwritten on the next
+start rather than blocking it.
 
----
+## U5 / U8 — libwrap · resolved by `24d7453`
 
-## U6 — Cross-compilation not exercised · Low · **toolchains absent**
+My earlier claim that this could not be verified was **wrong**: I had misread
+`ls`'s exit status. `/usr/include/tcpd.h` and `libwrap.so` are present, so the
+path is now compiled, linked and run.
 
-No `arm-linux-gnueabi-gcc` or `mips-linux-gnu-gcc` here. As a portability proxy I
-did build with **musl-gcc** under `-std=c89 -Wall -Wextra -Wpedantic` and got zero
-warnings, and the file also passes a C++98 syntax check. Big-endian targets and
-real hardware remain untested.
+*No defect.* The declaration in `p910nd.c` is identical to the one in `tcpd.h`,
+so the 0.95 "incomplete conversion to `ip_addr`" concern does not apply here; the
+address is passed as `client_addr` with `STRING_UNKNOWN` elsewhere, which is the
+documented way to match on address.
 
----
+Both branches are exercised: no rule → job served byte-exact; preloaded stub that
+denies → connection closed with nothing delivered, rejection logged, daemon keeps
+serving. Preloading is used because `hosts_access()` reads `/etc/hosts.deny`,
+which a test suite must not write to. valgrind confirms five rejected connections
+leave no descriptor behind.
 
-## U7 — There is no `-t` option, and never was · Info · **feature request, not a bug**
+*Residual:* real `/etc/hosts.allow`/`hosts.deny` rules are not exercised (they
+need root to write). The daemon's own branch is covered; libwrap's rule parsing is
+trusted as libwrap's own behaviour.
 
-The brief mentioned a `-t` timeout. Upstream 0.97 has no such option — `git weave`
-through `kenyapcomau/p910nd` confirms `getopt(argc, argv, "bdi:f:v")` — and the
-idle timeout here is the compile-time `IDLE_TIMEOUT_SEC` (5 s), which also bounds
-the post-EOF grace window used to catch late printer replies. Adding `-t` would
-extend the documented CLI, so I did not invent one. If you want it: parse with
-`strtol`, reject negative and > `INT_MAX`, allow 0 meaning "disable the idle
-timeout" (it should **not** disable the grace window, or late printer replies
-would be dropped again), and update `p910nd.8`.
+## U6 — portability · resolved by `9f3c760`
 
----
+`-m32` (32-bit) and `musl-gcc` (second C library) are now build gates that must
+compile with zero warnings, probed so hosts without them SKIP.
 
-## U8 — Denied-connection logging under libwrap · Low · **covered by U5**
+*Residual:* arm/mips cross compilation is still **not** exercised — the distro
+carries `gcc-arm-linux-gnueabi` and `gcc-mips-linux-gnu`, but installing them
+needs root, which this environment does not have. Big-endian and non-x86 targets
+remain unverified and should be added to CI. Recording this rather than claiming
+it.
 
-Rejected connections are logged and the descriptor is closed before `continue`
-(p910nd.c:1912-1919), so there is no leak, but I could not execute it. Folded into
-U5.
+## U7 — `-t` · resolved by `51a97df`
+
+`-t <seconds>` sets the idle timeout; `0` disables it. Parsed with `strtol()` so
+junk, empty strings, negatives and overflow are rejected instead of silently
+becoming 0. The post-EOF grace window deliberately stays at the compile-time
+default, because that window is what guarantees a job terminates — exposing "wait
+forever" there would let one silent printer pin a connection open.
