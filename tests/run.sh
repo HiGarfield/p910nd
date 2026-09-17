@@ -115,8 +115,10 @@ for t in tests/*.c; do
 		case "$name" in *"$FILTER"*) ;; *) continue ;; esac
 	fi
 	bin="$BUILD/$name"
-	if ! "$CC_GCC" $STD $WARN -O1 -DTESTING -o "$bin" "$t" \
-		2>"$BUILD/$name.build.log"; then
+	# -DLOCKFILE_DIR keeps every lock-touching test inside the scratch
+	# directory instead of writing to the host's /var/lock.
+	if ! "$CC_GCC" $STD $WARN -O1 -DTESTING -DLOCKFILE_DIR="\"$LOCKDIR\"" \
+		-o "$bin" "$t" 2>"$BUILD/$name.build.log"; then
 		fail "$name (compile)"
 		sed -n '1,15p' "$BUILD/$name.build.log"
 		continue

@@ -683,12 +683,29 @@ static int get_lock(int lpnumber)
 	memset(&lplock, 0, sizeof(lplock));
 	lplock.l_type = F_WRLCK;
 	lplock.l_pid = getpid();
-	if (fcntl(lockfd, F_SETLKW, &lplock) < 0)
+	/*
+	 * F_SETLKW blocks until the lock can be granted, and it returns -1
+	 * with EINTR if a signal is delivered while it waits.  Treating EINTR
+	 * as a failure made the daemon abandon a lock it could simply have
+	 * taken on the next attempt: with several instances started by inetd
+	 * this either killed a daemon that was about to get its turn or,
+	 * worse, let one proceed believing it held the printer exclusively.
+	 * The wait is retried; only a genuine error fails.
+	 *
+	 * Nothing in the current build installs a handler that interrupts this
+	 * wait (SIGPIPE is ignored), so this is a guard rather than a bug that
+	 * can be triggered today: it matters for any future signal handler and
+	 * for C libraries whose signal() does not set SA_RESTART.
+	 */
+	while (fcntl(lockfd, F_SETLKW, &lplock) < 0)
 	{
-		dolog(LOGOPTS, "%s: %m\n", lockname);
-		(void)close(lockfd);
-		lockfd = -1;
-		return (0);
+		if (errno != EINTR)
+		{
+			dolog(LOGOPTS, "%s: %m\n", lockname);
+			(void)close(lockfd);
+			lockfd = -1;
+			return (0);
+		}
 	}
 	return (1);
 }
