@@ -6,6 +6,8 @@ p910nd \- port 9100+n printer daemon
 [\fB-f device\fR]
 [\fB-i bindaddr\fR]
 [\fB-t timeout\fR]
+[\fB-u user\fR]
+[\fB-g group\fR]
 [\fB-bvd\fR]
 [\fB0|...|9\fR]
 .SH DESCRIPTION
@@ -29,6 +31,15 @@ treated as finished and the connection is closed.  A value of 0 disables the idl
 timer altogether.  The default is 5 seconds.  It does not affect the short grace
 period that is kept after the host has finished sending, which is what allows a
 printer reply arriving just after that point to still be forwarded.
+.LP
+The \fB-u\fR and \fB-g\fR options make the daemon give up privileges and continue
+as the named user and group, which may also be given numerically.  Both are
+optional and default to no change, so existing setups are unaffected.  The switch
+happens after the privileged work is finished (lock file, pid file and the
+listening socket), but before any printer device is opened; since the device is
+re-opened for every job, the target account must be able to open it, or jobs will
+not start.  Running unprivileged is the safer configuration wherever the device
+permissions allow it.
 .LP
 The \fB-b\fR option turns on bidirectional copying.
 .LP

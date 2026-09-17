@@ -939,6 +939,71 @@ def t_pidfile_symlink_refused(binpath, tmpdir):
                 pass
 
 
+def t_privilege_drop(binpath, tmpdir):
+    """-u/-g must be accepted and the daemon must still serve a job."""
+    name = "privilege_drop_to_current_identity"
+    try:
+        import pwd
+        import grp
+        uname = pwd.getpwuid(os.getuid()).pw_name
+        gname = grp.getgrgid(os.getgid()).gr_name
+    except Exception as e:  # noqa: BLE001
+        skip(name, "cannot resolve current identity (%r)" % (e,))
+        return
+    dev = os.path.join(tmpdir, "printer-privdrop")
+    open(dev, "wb").close()
+    d = Daemon(binpath, dev, 0, extra=["-u", uname, "-g", gname])
+    try:
+        if not d.wait_ready():
+            record(name, False, "daemon did not start with -u/-g; log=%r"
+                   % d.log()[:300])
+            return
+        size = 20000
+        data = payload(size)
+        client_send(data, d.port)
+        got = read_file_bytes(dev, size)
+        if got != data:
+            record(name, False,
+                   "job corrupted after dropping privileges (%d/%d bytes)"
+                   % (len(got), size))
+            return
+        if "running as uid=" not in d.log():
+            record(name, False,
+                   "no evidence privileges were actually dropped; log=%r"
+                   % d.log()[:300])
+            return
+        record(name, True)
+    finally:
+        d.kill()
+
+
+def t_unknown_privilege_targets_rejected(binpath, tmpdir):
+    """-u/-g naming a non-existent account must be refused, not ignored."""
+    name = "unknown_user_or_group_rejected"
+    dev = os.path.join(tmpdir, "printer-baduser")
+    open(dev, "wb").close()
+    rc, out = _run_raw(binpath,
+                       ["-d", "-f", dev, "-u", "nosuchuser_zzz", "0"],
+                       timeout=5.0)
+    if rc is None:
+        record(name, False, "did not terminate (%s)" % out[:120])
+        return
+    if rc == 0:
+        record(name, False, "bogus -u was accepted")
+        return
+    if "unknown user" not in out:
+        record(name, False, "unexpected message for bogus -u: %r" % out[:160])
+        return
+    rc, out = _run_raw(binpath,
+                       ["-d", "-f", dev, "-g", "nosuchgroup_zzz", "0"],
+                       timeout=5.0)
+    if rc == 0 or "unknown group" not in out:
+        record(name, False, "bogus -g not handled (rc=%r, out=%r)"
+               % (rc, out[:160]))
+        return
+    record(name, True)
+
+
 CASES = [
     t_transfer_1byte,
     t_boundaries,
@@ -960,6 +1025,8 @@ CASES = [
     t_invalid_idle_timeout_rejected,
     t_pidfile_removed_on_termination,
     t_pidfile_symlink_refused,
+    t_privilege_drop,
+    t_unknown_privilege_targets_rejected,
 ]
 
 

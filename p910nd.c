@@ -131,6 +131,9 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+/* getpwnam()/getgrnam()/initgroups() resolve the -u and -g arguments. */
+#include <pwd.h>
+#include <grp.h>
 /*
  * get_port() uses uint16_t, and POSIX declares the exact-width integer types in
  * <stdint.h>.  Relying on <netinet/in.h> to expose them is not portable: that
@@ -241,6 +244,13 @@ static int log_to_stdout = 0;
  * connection open indefinitely.
  */
 static int idle_timeout = IDLE_TIMEOUT_SEC;
+/*
+ * Identity to drop to, when -u/-g are given.  NULL means "no change", which
+ * is the default: dropping privileges is opt-in so that every existing
+ * deployment keeps running exactly as before.
+ */
+static const char *target_user = NULL;
+static const char *target_group = NULL;
 
 /* Helper function: convert a struct sockaddr address (IPv4 and IPv6) to a string */
 static char *get_ip_str(const struct sockaddr *sa, char *s, socklen_t maxlen)
@@ -283,7 +293,7 @@ static uint16_t get_port(const struct sockaddr *sa)
 static void usage(void)
 {
 	fprintf(stderr, "%s %s %s\n", progname, version, copyright);
-	fprintf(stderr, "Usage: %s [-f device] [-i bindaddr] [-t timeout] [-bvd] [0|...|9]\n", progname);
+	fprintf(stderr, "Usage: %s [-f device] [-i bindaddr] [-t timeout] [-u user] [-g group] [-bvd] [0|...|9]\n", progname);
 	exit(1);
 }
 
@@ -649,6 +659,119 @@ static int dup_fd_below_fdsetsize(int fd, const char *name)
 	      "%s fd=%d is not selectable and no free descriptor exists below %d\n",
 	      name, fd, FD_SETSIZE);
 	return -1;
+}
+
+/*
+ * Resolve a user name (or a numeric uid) to its uid and primary gid.
+ * Returns 0 on success.
+ */
+static int resolve_user(const char *name, uid_t *uid, gid_t *gid)
+{
+	struct passwd *pw;
+	char *endptr;
+	long value;
+
+	pw = getpwnam(name);
+	if (pw != NULL)
+	{
+		*uid = pw->pw_uid;
+		*gid = pw->pw_gid;
+		return 0;
+	}
+	errno = 0;
+	value = strtol(name, &endptr, 10);
+	if (errno == 0 && endptr != name && *endptr == '\0' && value >= 0)
+	{
+		pw = getpwuid((uid_t)value);
+		if (pw != NULL)
+		{
+			*uid = pw->pw_uid;
+			*gid = pw->pw_gid;
+		}
+		else
+			*uid = (uid_t)value;
+		return 0;
+	}
+	return -1;
+}
+
+/*
+ * Resolve a group name (or a numeric gid) to a gid.  Returns 0 on success.
+ */
+static int resolve_group(const char *name, gid_t *gid)
+{
+	struct group *gr;
+	char *endptr;
+	long value;
+
+	gr = getgrnam(name);
+	if (gr != NULL)
+	{
+		*gid = gr->gr_gid;
+		return 0;
+	}
+	errno = 0;
+	value = strtol(name, &endptr, 10);
+	if (errno == 0 && endptr != name && *endptr == '\0' && value >= 0)
+	{
+		*gid = (gid_t)value;
+		return 0;
+	}
+	return -1;
+}
+
+/*
+ * Give up privileges, when -u/-g asked for it.
+ *
+ * The daemon traditionally runs as root and hands whatever it receives to a
+ * device it opens read-write, so an operator who can arrange for the printer
+ * node to be accessible to an unprivileged account should be able to run the
+ * whole daemon that way.  This is opt-in: with no -u/-g nothing changes.
+ *
+ * Called once the privileged setup is finished (lock file, pid file and the
+ * listening socket are already in place) so that everything needing root has
+ * already happened.  Note the printer device is re-opened for every job, so
+ * after dropping privileges the target account must be able to open it --
+ * otherwise jobs will fail to start, which is the documented trade-off.
+ */
+static void drop_privileges(void)
+{
+	uid_t uid = getuid();
+	gid_t gid = getgid();
+
+	if (target_user == NULL && target_group == NULL)
+		return;
+	if (target_user != NULL && resolve_user(target_user, &uid, &gid) != 0)
+	{
+		dolog(LOGOPTS, "unknown user '%s'\n", target_user);
+		exit(1);
+	}
+	if (target_group != NULL && resolve_group(target_group, &gid) != 0)
+	{
+		dolog(LOGOPTS, "unknown group '%s'\n", target_group);
+		exit(1);
+	}
+	/*
+	 * Supplementary groups only matter -- and can only be set -- when we
+	 * still hold privilege.  A daemon already running unprivileged is
+	 * allowed to ask for the identity it already has.
+	 */
+	if (geteuid() == 0 && target_user != NULL)
+	{
+		if (initgroups(target_user, gid) < 0)
+			dolog(LOGOPTS, "initgroups: %m\n");
+	}
+	if (setgid(gid) != 0)
+	{
+		dolog(LOGOPTS, "setgid: %m\n");
+		exit(1);
+	}
+	if (setuid(uid) != 0)
+	{
+		dolog(LOGOPTS, "setuid: %m\n");
+		exit(1);
+	}
+	dolog(LOG_NOTICE, "running as uid=%ld gid=%ld\n", (long)uid, (long)gid);
 }
 
 /*
@@ -1691,6 +1814,12 @@ static void one_job(int lpnumber)
 		exit(1);
 	}
 	/* Make sure lp device is open... */
+	/*
+	 * Under (x)inetd the lock is the only privileged step, so drop right
+	 * after taking it: from here on the printer device is opened as the
+	 * -u/-g identity.
+	 */
+	drop_privileges();
 	while ((lp = open_printer(lpnumber)) == -1)
 		sleep(10);
 	if (copy_stream_ex(0, lp, &net_closed, &lp_closed) < 0)
@@ -2003,6 +2132,14 @@ static void server(int lpnumber)
 		}
 		retry_sleep(LISTEN_RETRY_SEC);
 	}
+	/*
+	 * Every privileged step is done by now: the lock file and pid file are
+	 * written and the listening socket is bound, so an unprivileged account
+	 * (one that has no right to bind the port or to create those files) can
+	 * take over from here.  From this point the printer device is opened as
+	 * that identity, so it must be accessible to it.
+	 */
+	drop_privileges();
 	memset(&client, 0, sizeof(client));
 	while (1)
 	{
@@ -2157,7 +2294,7 @@ int main(int argc, char *argv[])
 			progname = p + 1;
 	}
 	lpnumber = '0';
-	while ((c = getopt(argc, argv, "bdi:f:t:v")) != EOF)
+	while ((c = getopt(argc, argv, "bdi:f:t:u:g:v")) != EOF)
 	{
 		switch (c)
 		{
@@ -2202,6 +2339,12 @@ int main(int argc, char *argv[])
 				usage();
 			}
 			idle_timeout = (int)timeout_sec;
+			break;
+		case 'u':
+			target_user = optarg;
+			break;
+		case 'g':
+			target_group = optarg;
 			break;
 		case 'v':
 			show_version();
