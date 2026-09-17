@@ -5,6 +5,7 @@ p910nd \- port 9100+n printer daemon
 .B p910nd
 [\fB-f device\fR]
 [\fB-i bindaddr\fR]
+[\fB-t timeout\fR]
 [\fB-bvd\fR]
 [\fB0|...|9\fR]
 .SH DESCRIPTION
@@ -21,6 +22,13 @@ e.g. /dev/usblp0.
 .LP
 The \fB-i\fR option can be used to specify binding to one address instead
 of all interfaces which is the default.
+.LP
+The \fB-t\fR option sets the idle timeout in seconds: a bidirectional job during
+which neither the network nor the printer has produced anything for that long is
+treated as finished and the connection is closed.  A value of 0 disables the idle
+timer altogether.  The default is 5 seconds.  It does not affect the short grace
+period that is kept after the host has finished sending, which is what allows a
+printer reply arriving just after that point to still be forwarded.
 .LP
 The \fB-b\fR option turns on bidirectional copying.
 .LP

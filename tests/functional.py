@@ -674,6 +674,121 @@ def t_printer_disappears(binpath, tmpdir):
                 pass
 
 
+def _run_raw(binpath, args, timeout=5.0):
+    """Run the binary to completion and return (returncode, combined output)."""
+    import subprocess as _sp
+    try:
+        p = _sp.run([binpath] + list(args), stdout=_sp.PIPE,
+                    stderr=_sp.STDOUT, timeout=timeout)
+        return p.returncode, p.stdout.decode("utf-8", "replace")
+    except Exception as e:  # noqa: BLE001
+        return None, "exception: %r" % (e,)
+
+
+def t_idle_timeout_disconnects(binpath, tmpdir):
+    """-t N must tear the job down after N idle seconds (bidirectional mode)."""
+    name = "idle_timeout_option_disconnects"
+    dev = os.path.join(tmpdir, "printer-idle")
+
+    open(dev, "wb").close()
+    d = Daemon(binpath, dev, 0, bidir=True, extra=["-t", "1"])
+    try:
+        if not d.wait_ready():
+            record(name, False, "daemon did not start")
+            return
+        s = socket.create_connection((IPV4_HOST, d.port), timeout=20)
+        started = time.time()
+        closed = False
+        try:
+            # Send nothing: the job must expire on its own.
+            while True:
+                piece = s.recv(4096)
+                if not piece:
+                    closed = True
+                    break
+        except socket.error:
+            closed = True
+        elapsed = time.time() - started
+        try:
+            s.close()
+        except Exception:
+            pass
+        if not closed:
+            record(name, False, "connection was never closed")
+            return
+        if elapsed < 0.8:
+            # Closing instantly would mean the idle window was not honoured.
+            record(name, False,
+                   "closed after %.2fs, before the 1s idle window elapsed"
+                   % elapsed)
+            return
+        # Bound is deliberately below the 5s compile-time default: if -t were
+        # ignored the job would only end after ~5s and this would fail.
+        if elapsed > 3.5:
+            record(name, False,
+                   "took %.2fs for a 1s idle timeout (-t appears ignored)"
+                   % elapsed)
+            return
+        record(name, True)
+    finally:
+        d.kill()
+
+
+def t_idle_timeout_zero_keeps_open(binpath, tmpdir):
+    """-t 0 must disable the idle timer: an idle client is not dropped."""
+    name = "idle_timeout_zero_keeps_connection"
+    dev = os.path.join(tmpdir, "printer-idle0")
+    open(dev, "wb").close()
+    d = Daemon(binpath, dev, 0, bidir=True, extra=["-t", "0"])
+    try:
+        if not d.wait_ready():
+            record(name, False, "daemon did not start")
+            return
+        s = socket.create_connection((IPV4_HOST, d.port), timeout=20)
+        s.settimeout(6.0)
+        still_open = True
+        try:
+            if not s.recv(4096):
+                still_open = False
+        except socket.timeout:
+            still_open = True
+        except socket.error:
+            still_open = False
+        try:
+            s.close()
+        except Exception:
+            pass
+        if not still_open:
+            record(name, False,
+                   "connection closed even though the idle timer was disabled")
+            return
+        record(name, True)
+    finally:
+        d.kill()
+
+
+def t_invalid_idle_timeout_rejected(binpath, tmpdir):
+    """Non-numeric, negative and overflowing -t values must be refused."""
+    name = "invalid_idle_timeout_rejected"
+    dev = os.path.join(tmpdir, "printer-bad-t")
+    open(dev, "wb").close()
+    for bad in ("abc", "-1", "999999999999999999999", ""):
+        rc, out = _run_raw(binpath, ["-d", "-f", dev, "-t", bad, "0"],
+                           timeout=5.0)
+        if rc is None:
+            record(name, False, "'-t %s' did not terminate (%s)" % (bad, out))
+            return
+        if rc == 0:
+            record(name, False, "'-t %s' was accepted (rc=0)" % bad)
+            return
+        if "invalid idle timeout" not in out:
+            record(name, False,
+                   "'-t %s' rejected without a clear message: %r"
+                   % (bad, out[:120]))
+            return
+    record(name, True)
+
+
 CASES = [
     t_transfer_1byte,
     t_boundaries,
@@ -690,6 +805,9 @@ CASES = [
     t_lock_dir_created,
     t_printer_stall_no_spin,
     t_printer_disappears,
+    t_idle_timeout_disconnects,
+    t_idle_timeout_zero_keeps_open,
+    t_invalid_idle_timeout_rejected,
 ]
 
 

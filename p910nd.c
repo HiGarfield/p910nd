@@ -143,6 +143,8 @@
  * not depend on another header's internals.
  */
 #include <stdint.h>
+/* INT_MAX/LONG_MAX bound the -t and -u numeric arguments. */
+#include <limits.h>
 
 #ifndef MAX
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
@@ -217,6 +219,17 @@ static char *device = NULL;
 static int bidir = 0;
 static char *bindaddr = NULL;
 static int log_to_stdout = 0;
+/*
+ * Seconds without activity before an idle bidirectional job is torn down.
+ * 0 disables that idle timer entirely.  Settable with -t.
+ *
+ * The post-EOF grace window used to catch a printer reply that arrives only
+ * after the host closed its send side deliberately keeps using the compile
+ * time IDLE_TIMEOUT_SEC: that window is what guarantees a job terminates, so
+ * making it configurable to "wait forever" would let one silent printer pin a
+ * connection open indefinitely.
+ */
+static int idle_timeout = IDLE_TIMEOUT_SEC;
 
 /* Helper function: convert a struct sockaddr address (IPv4 and IPv6) to a string */
 static char *get_ip_str(const struct sockaddr *sa, char *s, socklen_t maxlen)
@@ -259,7 +272,7 @@ static uint16_t get_port(const struct sockaddr *sa)
 static void usage(void)
 {
 	fprintf(stderr, "%s %s %s\n", progname, version, copyright);
-	fprintf(stderr, "Usage: %s [-f device] [-i bindaddr] [-bvd] [0|...|9]\n", progname);
+	fprintf(stderr, "Usage: %s [-f device] [-i bindaddr] [-t timeout] [-bvd] [0|...|9]\n", progname);
 	exit(1);
 }
 
@@ -1236,10 +1249,11 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 				 * so a printer that keeps emitting (while the network peer is
 				 * quiet) will NOT be timed out mid-job.
 				 */
-				if (idle_timeout_elapsed(&now, &last_activity, IDLE_TIMEOUT_SEC))
+				if (idle_timeout != 0 &&
+					idle_timeout_elapsed(&now, &last_activity, idle_timeout))
 				{
 					dolog(LOG_NOTICE, "no activity from network or printer for %ds, stop copy stream\n",
-						  IDLE_TIMEOUT_SEC);
+						  idle_timeout);
 					break;
 				}
 			}
@@ -2031,6 +2045,8 @@ int main(int argc, char *argv[])
 	int c, lpnumber;
 	char *p;
 	char *log_ident;
+	char *endptr;
+	long timeout_sec;
 
 	/*
 	 * Broken peer connections can happen while writing in bidirectional mode.
@@ -2047,7 +2063,7 @@ int main(int argc, char *argv[])
 			progname = p + 1;
 	}
 	lpnumber = '0';
-	while ((c = getopt(argc, argv, "bdi:f:v")) != EOF)
+	while ((c = getopt(argc, argv, "bdi:f:t:v")) != EOF)
 	{
 		switch (c)
 		{
@@ -2074,6 +2090,24 @@ int main(int argc, char *argv[])
 				dolog(LOGOPTS, "invalid bind address (empty)\n");
 				usage();
 			}
+			break;
+		case 't':
+			/*
+			 * Idle timeout in seconds.  0 turns the idle timer off.
+			 * strtol() is used rather than atoi() so that junk and out of
+			 * range values are detected instead of silently becoming 0 --
+			 * "-t abc" must not quietly mean "never time out".
+			 */
+			errno = 0;
+			timeout_sec = strtol(optarg, &endptr, 10);
+			if (errno != 0 || endptr == optarg || *endptr != '\0' ||
+			    timeout_sec < 0 || timeout_sec > INT_MAX)
+			{
+				dolog(LOGOPTS, "invalid idle timeout '%s' (seconds, 0 disables)\n",
+				      optarg);
+				usage();
+			}
+			idle_timeout = (int)timeout_sec;
 			break;
 		case 'v':
 			show_version();
