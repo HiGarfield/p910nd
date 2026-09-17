@@ -627,12 +627,54 @@ static int dup_fd_below_fdsetsize(int fd, const char *name)
 	return -1;
 }
 
+/*
+ * Create every directory component leading to `path` (i.e. everything before
+ * the final component, which is the file itself).
+ *
+ * p910nd normally runs on diskless hosts whose /var/lock -- or the directory
+ * chosen through -DLOCKFILE_DIR -- has never been created on the running
+ * image.  Debian bug #634225 is precisely that: the daemon refused to start
+ * because /var/lock/subsys did not exist, and get_lock() failed with ENOENT
+ * even though nothing else was wrong.  Creating the directories here lets the
+ * daemon come up on a fresh image while leaving the documented behaviour
+ * untouched: the lock name, its mode and the semantics of taking it are all
+ * exactly as before, and an existing directory is left alone.
+ *
+ * `path` always comes from a compile-time macro, never from the command line,
+ * so no untrusted input reaches this code.  Failures are deliberately not
+ * logged here: the following open() reports the real reason with the full
+ * path, which is the diagnostic that actually matters.
+ */
+static int ensure_parent_dir(const char *path)
+{
+	char buf[256];
+	size_t len;
+	char *p;
+
+	len = strlen(path);
+	if (len == 0 || len >= sizeof(buf))
+		return -1;
+	memcpy(buf, path, len + 1);
+
+	for (p = buf + 1; *p != '\0'; ++p)
+	{
+		if (*p != '/')
+			continue;
+		*p = '\0';
+		if (mkdir(buf, 0755) < 0 && errno != EEXIST)
+			return -1;
+		*p = '/';
+	}
+	return 0;
+}
+
 static int get_lock(int lpnumber)
 {
 	char lockname[sizeof(LOCKFILE)];
 	struct flock lplock;
 
 	(void)snprintf(lockname, sizeof(lockname), LOCKFILE, lpnumber);
+	(void)ensure_parent_dir(lockname);
 	if ((lockfd = open(lockname, O_CREAT | O_RDWR, 0644)) < 0)
 	{
 		dolog(LOGOPTS, "%s: %m\n", lockname);
@@ -1694,6 +1736,9 @@ static void server(int lpnumber)
 	if (!log_to_stdout)
 	{
 		(void)snprintf(pidfilename, sizeof(pidfilename), PIDFILE, lpnumber);
+		/* Same reasoning as the lock directory above: /var/run need not
+		 * exist on a freshly booted read-only/diskless image. */
+		(void)ensure_parent_dir(pidfilename);
 		if ((f = fopen(pidfilename, "w")) == NULL)
 		{
 			dolog(LOGOPTS, "%s: %m\n", pidfilename);
