@@ -40,6 +40,10 @@ install: $(PROG) $(CONFIG) $(INITSCRIPT) $(MANPAGE)
 	$(INSTALL) $(INITSCRIPT) $(DESTDIR)$(SCRIPTDIR)/$(PROG)
 	$(INSTALL) -m 644 $(MANPAGE) $(DESTDIR)$(MANDIR)
 
+.PHONY: check
+check:
+	sh tests/run.sh
+
 .PHONY: clean
 clean:
 	rm -f *.o $(PROG)

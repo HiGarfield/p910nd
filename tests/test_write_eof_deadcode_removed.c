@@ -111,8 +111,9 @@ static int run_job(int bidir_mode, int printer_abort, long *printer_got)
 	pid_t client, prn;
 	char job[JOB_BYTES];
 	int rc;
+	size_t i;
 
-	for (size_t i = 0; i < sizeof(job); i++)
+	for (i = 0; i < sizeof(job); i++)
 		job[i] = (char)(i * 11 + 5);
 
 	assert(pipe(rep) == 0);
