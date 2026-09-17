@@ -22,7 +22,10 @@ cd "$ROOT" || exit 2
 SRC=p910nd.c
 CC_GCC=${CC_GCC:-gcc}
 CC_CLANG=${CC_CLANG:-clang}
-UNIT_TIMEOUT=${UNIT_TIMEOUT:-120}
+# test_fuzz_timing and test_bidir_printer_preclear_response iterate dozens of
+# jobs through the IDLE_TIMEOUT_SEC grace window and legitimately need ~220s
+# of wall clock (they are cheap in CPU: they mostly sleep).
+UNIT_TIMEOUT=${UNIT_TIMEOUT:-300}
 FILTER=${1:-}
 
 WARN="-Wall -Wextra -Wpedantic"
@@ -115,9 +118,15 @@ for t in tests/*.c; do
 		case "$name" in *"$FILTER"*) ;; *) continue ;; esac
 	fi
 	bin="$BUILD/$name"
-	# -DLOCKFILE_DIR keeps every lock-touching test inside the scratch
-	# directory instead of writing to the host's /var/lock.
-	if ! "$CC_GCC" $STD $WARN -O1 -DTESTING -DLOCKFILE_DIR="\"$LOCKDIR\"" \
+	# Keep lock-touching tests inside the scratch directory instead of the
+	# host's /var/lock, unless the test already pins LOCKFILE_DIR itself.
+	if grep -q 'define LOCKFILE_DIR' "$t"; then
+		lockdef=""
+	else
+		lockdef="-DLOCKFILE_DIR=\"$LOCKDIR\""
+	fi
+	# shellcheck disable=SC2086
+	if ! "$CC_GCC" $STD $WARN -O1 -DTESTING $lockdef \
 		-o "$bin" "$t" 2>"$BUILD/$name.build.log"; then
 		fail "$name (compile)"
 		sed -n '1,15p' "$BUILD/$name.build.log"
@@ -206,29 +215,38 @@ s.close()" 2>/dev/null; then break; fi
 		i=$((i + 1))
 		sleep 0.1
 	done
+	# Several jobs in a row: a descriptor leaked once per job would show up
+	# as a growing number of open sockets.
 	python3 - <<'PY'
 import socket
-d = bytes(range(256)) * 800
-s = socket.create_connection(('127.0.0.1', 9100), timeout=20)
-s.sendall(d)
-s.shutdown(socket.SHUT_WR)
-while s.recv(65536):
-    pass
-s.close()
+for _ in range(10):
+    d = bytes(range(256)) * 400
+    s = socket.create_connection(('127.0.0.1', 9100), timeout=20)
+    s.sendall(d)
+    s.shutdown(socket.SHUT_WR)
+    while s.recv(65536):
+        pass
+    s.close()
 PY
 	sleep 1
 	kill -TERM "$vgpid" 2>/dev/null
 	wait "$vgpid" 2>/dev/null
 	if grep -qE 'definitely lost: [1-9]|indirectly lost: [1-9]' "$vglog"; then
-		fail "valgrind leaks"
+		fail "valgrind: leaked memory"
 		grep -E 'lost:' "$vglog"
+	elif grep -E 'Open (AF_INET|AF_INET6) socket' "$vglog" |
+		grep -v unbound | grep -q '<->'; then
+		# Every accepted connection must have been closed.  The listening
+		# socket is reported as "<-> unbound" and legitimately stays open;
+		# descriptors marked "inherited from parent" belong to caller's
+		# environment, not to the daemon.
+		fail "valgrind: accepted connection left open (fd leak per job)"
+		grep -E 'Open (AF_INET|AF_INET6) socket' "$vglog" | grep -v unbound
 	elif grep -qE 'ERROR SUMMARY: [1-9]' "$vglog"; then
 		fail "valgrind errors"
 		grep -E 'ERROR SUMMARY' "$vglog"
-	elif grep -qE 'FILE DESCRIPTORS: [1-9]' "$vglog"; then
-		fail "valgrind leaked file descriptors"
 	else
-		pass "valgrind clean"
+		pass "valgrind clean (10 jobs, no leaked memory or connection fd)"
 	fi
 else
 	skip "valgrind (not installed or functional build failed)"

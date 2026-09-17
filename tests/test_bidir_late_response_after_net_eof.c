@@ -102,11 +102,11 @@ int main(void)
 	assert(prn >= 0);
 	if (prn == 0)
 	{
+		size_t total = 0;
+		int saw_data = 0;
 		close(net_sv[0]);
 		close(net_sv[1]);
 		close(prn_sv[0]);
-		size_t total = 0;
-		int saw_data = 0;
 		/*
 		 * Drain the whole job with a non-blocking poll (a real printer device
 		 * consumes bytes as they arrive; a socketpair would otherwise deadlock

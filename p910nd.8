@@ -80,6 +80,27 @@ need to set up an intermediate queue anyway to provide print job filtering.
 If built with USE_WRAP, it uses the libwrap library (tcpwrappers).
 Access control can be done with /etc/hosts.allow
 and /etc/hosts.deny. The service name is p910nd.
+.SH SECURITY
+.I p910nd
+performs no authentication and no filtering of the data it forwards: any host
+that can reach the listening port can print, and in bidirectional mode can read
+whatever is returned.  Expose it only to trusted clients, and preferably restrict
+it further with tcpwrappers
+.RB ( USE_WRAP )
+or a host firewall.
+.LP
+Because
+.B \-f
+names an arbitrary path and
+.B \-b
+opens that path read-write, using the two together lets any client that can
+reach the port read and append to the named file; known attacks of this kind
+include CVE-2018-10123.  Do not combine
+.B \-b
+and
+.B \-f
+on a file that must stay private, and note that the daemon traditionally runs
+as root without dropping privileges.
 .SH DIAGNOSTICS
 .I p910nd
 logs error messages to syslog.
@@ -87,6 +108,10 @@ logs error messages to syslog.
 printcap(5), hosts_access(5)
 .SH FILES
 /var/run/p9100d.pid, /var/lock/subsys/p9100d, /etc/hosts.allow, /etc/hosts.deny
+.LP
+The directories holding the pid and lock files are created if they do not yet
+exist, so a host whose /var/run or /var/lock/subsys is missing does not prevent
+the daemon from starting.
 .SH COPYRIGHT
 .I p910nd
 is under the GNU Public License Version 2
