@@ -1004,6 +1004,58 @@ def t_unknown_privilege_targets_rejected(binpath, tmpdir):
     record(name, True)
 
 
+def t_missing_printer_not_accepted_first(binpath, tmpdir):
+    """A missing printer must not let a connection be accepted and then hang."""
+    name = "missing_printer_not_accepted_first"
+    dev = os.path.join(tmpdir, "late-printer")
+    # Deliberately not created yet.
+    d = Daemon(binpath, dev, 0)
+    try:
+        if not d.wait_ready():
+            record(name, False, "daemon did not start with a missing device")
+            return
+        size = 4096
+        data = payload(size)
+        s = socket.create_connection((IPV4_HOST, d.port), timeout=30)
+        try:
+            s.sendall(data)
+            s.shutdown(socket.SHUT_WR)
+            # While the device is absent nothing may be accepted: an accepted
+            # connection the daemon cannot serve is exactly the old behaviour.
+            time.sleep(2.0)
+            # NB: match a distinctive log phrase, not "accepted" alone --
+            # this case's scratch directory name contains that word.
+            if "Connection from" in d.log():
+                record(name, False,
+                       "connection was accepted while the printer was missing"
+                       " (log=%r)" % d.log()[:200])
+                return
+            if os.path.exists(dev):
+                record(name, False, "device appeared unexpectedly")
+                return
+            # Make the printer available; the job must then complete.
+            with open(dev, "wb"):
+                pass
+            got = read_file_bytes(dev, size, timeout=40.0)
+        finally:
+            try:
+                s.close()
+            except Exception:
+                pass
+        if got != data:
+            record(name, False,
+                   "job not served after the printer appeared (%d/%d bytes)"
+                   % (len(got), size))
+            return
+        if "Connection from" not in d.log():
+            record(name, False, "connection never accepted once the device"
+                                " existed (log=%r)" % d.log()[:200])
+            return
+        record(name, True)
+    finally:
+        d.kill()
+
+
 CASES = [
     t_transfer_1byte,
     t_boundaries,
@@ -1027,6 +1079,7 @@ CASES = [
     t_pidfile_symlink_refused,
     t_privilege_drop,
     t_unknown_privilege_targets_rejected,
+    t_missing_printer_not_accepted_first,
 ]
 
 

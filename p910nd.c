@@ -2159,14 +2159,36 @@ static void server(int lpnumber)
 			free_lock();
 			exit(0);
 		}
+		/*
+		 * Open the printer BEFORE accepting a connection.
+		 *
+		 * The daemon used to accept first and only then retry
+		 * open_printer() every 10 seconds.  While the device was missing,
+		 * that already accepted connection could not be served at all --
+		 * and because this daemon handles one job at a time, no other
+		 * client could take its place either.  One client with a wrong -f
+		 * argument, or an unplugged USB printer, was enough to make the
+		 * daemon unreachable.
+		 *
+		 * Opening first means nothing is accepted until the printer is
+		 * actually there.  connect() still succeeds because the kernel
+		 * completes the handshake into the listen backlog, and the job is
+		 * served as soon as the device appears.  Retrying forever, which
+		 * is what hotplug and network printers need, is unchanged.
+		 */
+		lp = open_printer(lpnumber);
+		if (lp < 0)
+		{
+			sleep(10);
+			continue;
+		}
 		fd = accept(netfd, (struct sockaddr *)&client, &clientlen);
 		if (fd < 0)
 		{
 			struct timeval accept_now;
 			int aerr = errno;
+			int fatal = 0;
 
-			if (aerr == EINTR || aerr == ECONNABORTED)
-				continue;
 			if (aerr == EMFILE || aerr == ENFILE ||
 			    aerr == ENOBUFS || aerr == ENOMEM)
 			{
@@ -2178,24 +2200,30 @@ static void server(int lpnumber)
 				if (retry_log_due(accept_now.tv_sec, &last_accept_log))
 					dolog(LOGOPTS, "accept: %m, waiting for a free descriptor\n");
 				accept_backoff(netfd);
-				continue;
 			}
-			if (accept_error_is_fatal(aerr))
+			else if (accept_error_is_fatal(aerr))
+				fatal = 1;
+			else if (aerr != EINTR && aerr != ECONNABORTED)
+			{
+				/*
+				 * A transient network error on the listening socket
+				 * (ENETDOWN, ENETUNREACH, ECONNRESET, EPROTO, ...).  The
+				 * socket stays bound and usable, so the daemon must keep
+				 * serving: exiting here would leave a started daemon that
+				 * never accepts another job even after the network
+				 * recovers.  Wait in select() (no CPU) and try again; a
+				 * broken configuration is still caught by
+				 * accept_error_is_fatal() above.
+				 */
+				(void)gettimeofday(&accept_now, NULL);
+				if (retry_log_due(accept_now.tv_sec, &last_accept_log))
+					dolog(LOGOPTS, "accept: %m, retrying\n");
+				accept_backoff(netfd);
+			}
+			/* The device was opened for a job that never arrived. */
+			(void)close(lp);
+			if (fatal)
 				break;
-			/*
-			 * A transient network error on the listening socket
-			 * (ENETDOWN, ENETUNREACH, ECONNRESET, EPROTO, ...).  The
-			 * socket stays bound and usable, so the daemon must keep
-			 * serving: exiting here would leave a started daemon that
-			 * never accepts another job even after the network
-			 * recovers.  Wait in select() (no CPU) and try again; a
-			 * broken configuration is still caught by
-			 * accept_error_is_fatal() above.
-			 */
-			(void)gettimeofday(&accept_now, NULL);
-			if (retry_log_due(accept_now.tv_sec, &last_accept_log))
-				dolog(LOGOPTS, "accept: %m, retrying\n");
-			accept_backoff(netfd);
 			continue;
 		}
 #ifdef USE_LIBWRAP
@@ -2204,15 +2232,12 @@ static void server(int lpnumber)
 			dolog(LOGOPTS,
 				  "Connection from %s port %hu rejected\n", get_ip_str((struct sockaddr *)&client, host, sizeof(host)), get_port((struct sockaddr *)&client));
 			(void)close(fd);
+			(void)close(lp);
 			continue;
 		}
 #endif
 		dolog(LOG_NOTICE, "Connection from %s port %hu accepted\n", get_ip_str((struct sockaddr *)&client, host, sizeof(host)), get_port((struct sockaddr *)&client));
 		/*write(fd, "Printing", 8); */
-
-		/* Make sure lp device is open... */
-		while ((lp = open_printer(lpnumber)) == -1)
-			sleep(10);
 
 		if (copy_stream_ex(fd, lp, &net_closed, &lp_closed) < 0)
 			dolog(LOGOPTS, "copy_stream: %m\n");

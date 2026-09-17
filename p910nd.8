@@ -22,6 +22,12 @@ The default is port 9100 to /dev/lp0.
 The \fB-f\fR option can be used to specify a different printer device,
 e.g. /dev/usblp0.
 .LP
+If the printer device cannot be opened -- a USB printer that is not plugged in
+yet, for instance -- the daemon keeps retrying rather than exiting, and accepts
+no connection until the device is available.  A client that connects meanwhile
+is queued by the kernel and served as soon as the printer appears, instead of
+being accepted and then left waiting indefinitely.
+.LP
 The \fB-i\fR option can be used to specify binding to one address instead
 of all interfaces which is the default.
 .LP
