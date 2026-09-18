@@ -14,7 +14,12 @@ CROSS ?=
 CC ?= $(CROSS)gcc
 STRIP ?= $(CROSS)strip
 
-override CFLAGS := $(filter-out -W%, $(CFLAGS)) -Wall -Wextra
+# Append this project's warning flags to whatever the caller supplied instead
+# of replacing them.  A distribution's CFLAGS routinely carry hardening
+# switches -- Ubuntu's dpkg-buildflags adds -Werror=format-security, for one --
+# and filtering every -W* out here would silently disable exactly the checks a
+# package build expects to run.
+override CFLAGS := $(CFLAGS) -Wall -Wextra
 
 PROG = p910nd
 CONFIG = aux/p910nd.conf
@@ -35,9 +40,9 @@ strip: $(PROG)
 install: $(PROG) $(CONFIG) $(INITSCRIPT) $(MANPAGE)
 	mkdir -p $(DESTDIR)$(BINDIR) $(DESTDIR)$(CONFIGDIR) \
 			 $(DESTDIR)$(SCRIPTDIR) $(DESTDIR)$(MANDIR)
-	$(INSTALL) $(PROG) $(DESTDIR)$(BINDIR)
+	$(INSTALL) -m 755 $(PROG) $(DESTDIR)$(BINDIR)
 	$(INSTALL) -m 644 $(CONFIG) $(DESTDIR)$(CONFIGDIR)/$(PROG)
-	$(INSTALL) $(INITSCRIPT) $(DESTDIR)$(SCRIPTDIR)/$(PROG)
+	$(INSTALL) -m 755 $(INITSCRIPT) $(DESTDIR)$(SCRIPTDIR)/$(PROG)
 	$(INSTALL) -m 644 $(MANPAGE) $(DESTDIR)$(MANDIR)
 
 .PHONY: check

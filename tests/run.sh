@@ -84,6 +84,19 @@ compile_ok gate-gcc-asan "$BUILD/p910nd-asan" \
 compile_ok gate-gcc-default-make "$BUILD/p910nd-make" \
 	"$CC_GCC" $WARN $SRC
 
+# The Makefile must keep the warning flags the caller passes in: several
+# distributions build with -Werror=... hardening switches, and dropping them
+# would disable checks the package build expects to run.  -n prints the
+# command line without running it; -B forces it to be printed even though a
+# binary may already exist.
+if make -n -B CFLAGS="-Werror -O2" p910nd >"$BUILD/makeflags.log" 2>&1 &&
+	grep -q -- '-Werror' "$BUILD/makeflags.log"; then
+	pass "makefile-keeps-user-wflags"
+else
+	fail "makefile-keeps-user-wflags (caller's -W flags are discarded)"
+	sed -n '1,5p' "$BUILD/makeflags.log"
+fi
+
 # Portability: a second C library and a second word size catch assumptions
 # about sizeof(long), pid_t and friends that only one target would hide.
 # Probed rather than assumed, so a host without them SKIPs instead of failing.
