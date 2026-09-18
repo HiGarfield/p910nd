@@ -36,7 +36,8 @@
  *    EAGAIN, which readBuffer()/writeBuffer() already treat as "no progress".
  * 2. select() on BOTH directions (printer-writable AND network-readable) and
  *    only touch a descriptor that select() reported ready.  select() blocks
- *    with no timeout, so an idle job still burns no CPU.
+ *    (with the idle timer off, as this case runs it), so an idle job still
+ *    burns no CPU.
  *
  * What this test proves
  * ---------------------
@@ -144,6 +145,15 @@ int main(void)
 
 	bidir = 0;
 	log_to_stdout = 0;
+	/*
+	 * This case is about a client that pauses arbitrarily long mid-job, so
+	 * the idle timer (armed by default, U9) is switched off here.  Otherwise
+	 * the job would end after IDLE_TIMEOUT_SEC, which would make the result
+	 * depend on how quickly the slow printer happens to drain: the pause
+	 * would have to be shorter than the timeout.  The timer itself is covered
+	 * by test_idle_timeout_* and the functional suite.
+	 */
+	idle_timeout = 0;
 	(void)alarm(180);
 
 	/* ---- client: one burst, then a long SILENCE, then the tail + FIN ---- */

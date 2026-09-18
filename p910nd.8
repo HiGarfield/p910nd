@@ -34,10 +34,11 @@ of all interfaces which is the default.
 The \fB-t\fR option sets the idle timeout in seconds: a job during which neither
 the network nor the printer has produced anything for that long is treated as
 finished and the connection is closed.  A value of 0 disables the idle timer
-altogether.  The default is 5 seconds.  In unidirectional mode the timer is armed
-only when \fB-t\fR is given explicitly, because those jobs were never timed out
-before and a slow client or a slow printer may pause one for minutes; the job is
-never closed while data is still buffered, so no byte can be lost this way.
+altogether.  The default is 5 seconds, and the timer is armed in both directions,
+so a client that connects and then sends nothing can no longer hold the daemon
+indefinitely.  A job is never closed while data is still buffered, so the timeout
+cannot discard bytes that were already received; raise \fB-t\fR if clients
+legitimately pause for longer than that in the middle of a job.
 .LP
 The same value bounds the short grace period that is kept after the host has
 finished sending, which is what allows a printer reply arriving just after that

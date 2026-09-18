@@ -236,26 +236,23 @@ static int bidir = 0;
 static char *bindaddr = NULL;
 static int log_to_stdout = 0;
 /*
- * Seconds without activity before an idle bidirectional job is torn down.
- * 0 disables that idle timer entirely.  Settable with -t.
+ * Seconds without activity before an idle job is torn down.  0 disables the
+ * timer entirely.  Settable with -t.
+ *
+ * Armed in both directions.  0.97 had no bound at all in unidirectional mode,
+ * so a client that connected and stayed silent could hold the daemon (and
+ * therefore everyone else's printing) forever; that is worth a default.  A job
+ * is only ever closed when nothing is buffered, so the bound cannot discard
+ * data, and a job whose printer stopped accepting data keeps bytes pending and
+ * is never cut short.
  *
  * The post-EOF grace window that catches a printer reply arriving only after
  * the host closed its send side follows -t as well, but falls back to the
- * compile time IDLE_TIMEOUT_SEC when the idle timer is disabled (-t 0): that
- * window is what guarantees a job terminates, so making it configurable to
- * "wait forever" would let one silent printer pin a connection open.
+ * compile time IDLE_TIMEOUT_SEC when the timer is disabled (-t 0): that window
+ * is what guarantees a job terminates, so making it configurable to "wait
+ * forever" would let one silent printer pin a connection open.
  */
 static int idle_timeout = IDLE_TIMEOUT_SEC;
-/*
- * Nonzero once -t was given on the command line.
- *
- * The unidirectional path honours the idle timeout only when the operator
- * asked for it.  0.97 had no timeout there at all and a real job may pause
- * for minutes -- a slow client, or a printer that stops accepting data -- so
- * tearing such a job down by default would be a regression.  Passing -t is
- * the operator's request for that bound.
- */
-static int idle_timeout_set = 0;
 /*
  * Identity to drop to, when -u/-g are given.  NULL means "no change", which
  * is the default: dropping privileges is opt-in so that every existing
@@ -1726,10 +1723,10 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 		fd_set writefds;
 		struct timeval idle_tv;
 		struct timeval idle_now;
-		/* Clock of the last byte moved in either direction, used only when
-		 * the operator asked for an idle bound with -t. */
+		/* Clock of the last byte moved in either direction, for the idle
+		 * bound (armed by default, disabled by -t 0). */
 		struct timeval last_activity;
-		int idle_enabled = (idle_timeout_set && idle_timeout > 0);
+		int idle_enabled = (idle_timeout > 0);
 
 		(void)gettimeofday(&last_activity, NULL);
 		while (!networkToPrinterBuffer.eof_sent &&
@@ -1746,10 +1743,10 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 			 * arming only the printer and then doing a blocking read on a
 			 * possibly-empty socket leaves pending bytes undelivered to a
 			 * printer that is ready for them, for as long as the peer stays
-			 * quiet.  select() blocks with no timeout (a 1s timeout when -t
-			 * was given, so the idle bound can be checked), so an idle job
-			 * consumes no CPU while a missing/again-unavailable printer or a
-			 * quiet peer is waited on.
+			 * quiet.  select() blocks with no timeout when the idle bound is
+			 * disabled (-t 0) and with a 1s one otherwise, so that bound can
+			 * be checked; either way an idle job consumes no CPU while a
+			 * missing/again-unavailable printer or a quiet peer is waited on.
 			 */
 			int maxfd = -1;
 			int want_write = (networkToPrinterBuffer.bytes > 0 ||
@@ -2508,7 +2505,6 @@ int main(int argc, char *argv[])
 				usage();
 			}
 			idle_timeout = (int)timeout_sec;
-			idle_timeout_set = 1;
 			break;
 		case 'u':
 			target_user = optarg;

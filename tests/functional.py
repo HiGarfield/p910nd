@@ -996,9 +996,9 @@ def t_uni_idle_timeout_closes(binpath, tmpdir):
         d.kill()
 
 
-def t_uni_idle_default_keeps_open(binpath, tmpdir):
-    """Without -t a unidirectional job keeps 0.97's behaviour: never timing out."""
-    name = "uni_idle_no_timeout_by_default"
+def t_uni_idle_default_timeout_applies(binpath, tmpdir):
+    """Without -t a unidirectional idle job is dropped after the 5s default."""
+    name = "uni_idle_default_timeout_applies"
     dev = os.path.join(tmpdir, "printer-uni-default")
     open(dev, "wb").close()
     d = Daemon(binpath, dev, 0)
@@ -1007,7 +1007,51 @@ def t_uni_idle_default_keeps_open(binpath, tmpdir):
             record(name, False, "daemon did not start")
             return
         s = socket.create_connection((IPV4_HOST, d.port), timeout=20)
-        s.settimeout(5.0)
+        started = time.time()
+        closed = False
+        try:
+            while True:
+                if not s.recv(4096):
+                    closed = True
+                    break
+        except socket.error:
+            closed = True
+        elapsed = time.time() - started
+        try:
+            s.close()
+        except Exception:
+            pass
+        if not closed:
+            record(name, False,
+                   "an idle unidirectional job was never dropped")
+            return
+        # The bound is the 5s default: much sooner means the wrong value was
+        # used, much later (or never) that the timer is not armed by default.
+        if elapsed < 3.5:
+            record(name, False,
+                   "closed after %.2fs, before the 5s default elapsed"
+                   % elapsed)
+            return
+        if elapsed > 12.0:
+            record(name, False, "took %.2fs for a 5s default" % elapsed)
+            return
+        record(name, True)
+    finally:
+        d.kill()
+
+
+def t_uni_idle_zero_keeps_open(binpath, tmpdir):
+    """-t 0 must disable the idle timer for unidirectional jobs as well."""
+    name = "uni_idle_zero_keeps_connection"
+    dev = os.path.join(tmpdir, "printer-uni-zero")
+    open(dev, "wb").close()
+    d = Daemon(binpath, dev, 0, extra=["-t", "0"])
+    try:
+        if not d.wait_ready():
+            record(name, False, "daemon did not start")
+            return
+        s = socket.create_connection((IPV4_HOST, d.port), timeout=20)
+        s.settimeout(8.0)
         still_open = True
         try:
             if not s.recv(4096):
@@ -1022,7 +1066,7 @@ def t_uni_idle_default_keeps_open(binpath, tmpdir):
             pass
         if not still_open:
             record(name, False,
-                   "an idle unidirectional job was dropped without -t")
+                   "connection closed even though the idle timer was disabled")
             return
         record(name, True)
     finally:
@@ -1497,7 +1541,8 @@ CASES = [
     t_idle_timeout_disconnects,
     t_idle_timeout_zero_keeps_open,
     t_uni_idle_timeout_closes,
-    t_uni_idle_default_keeps_open,
+    t_uni_idle_default_timeout_applies,
+    t_uni_idle_zero_keeps_open,
     t_uni_idle_slow_client_survives,
     t_bidir_grace_follows_timeout,
     t_invalid_idle_timeout_rejected,
