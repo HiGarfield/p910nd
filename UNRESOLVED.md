@@ -1,9 +1,13 @@
-# UNRESOLVED — status: all eight items have been resolved
+# UNRESOLVED
 
-Every item below used to be an open question. Each is now implemented or
-settled by a commit on this branch; the *residual* notes record what still
-cannot be proven on this particular machine, which is a different thing from
-being unresolved.
+The first eight items (U1–U8) are resolved: each used to be an open question and
+is now implemented or settled by a commit on this branch; the *residual* notes
+record what still cannot be proven on this particular machine, which is a
+different thing from being unresolved.
+
+Three **new** items opened during the third pass (U9–U11) are at the bottom of
+this file. They are all deliberate design choices I did not want to make for
+you; say the word and each is a one-line change.
 
 | Item | Subject | Resolution | Commit |
 |---|---|---|---|
@@ -117,3 +121,51 @@ junk, empty strings, negatives and overflow are rejected instead of silently
 becoming 0. The post-EOF grace window deliberately stays at the compile-time
 default, because that window is what guarantees a job terminates — exposing "wait
 forever" there would let one silent printer pin a connection open.
+
+---
+
+# Third pass — open items
+
+## U9 — should the idle bound apply to unidirectional jobs *by default*?
+
+BUG-008 made `-t` work in unidirectional mode, but only when `-t` is passed
+explicitly. That is deliberate: 0.97 had no bound at all there, and the default
+value is 5 s, which is shorter than a pause many real jobs make (a client that
+assembles a page, a printer that stops accepting data mid-job). Applying it
+unconditionally would abort jobs that work today.
+
+The cost of my choice: unless the operator passes `-t`, the pre-existing
+"one idle connection blocks the daemon" behaviour remains. Two alternative
+defaults you may prefer:
+
+1. arm the unidirectional timer by default but with a much larger value (say
+   300 s) — bounded, and no realistic job is that slow; or
+2. keep it opt-in, and document the exposure in the SECURITY section of the man
+   page (not done yet, since it is your call whether to publish it that way).
+
+## U10 — how long should the bidirectional grace window be by default?
+
+Before BUG-009 that window was always 5 s; it now follows `-t`, so a site whose
+printers never answer can set `-t 1` and get jobs that finish in ~1 s instead of
+~5 s. The **default is still 5 s**, which is 5 s more latency than 0.97 had on
+every bidirectional job.
+
+I did not change the default because shortening it risks dropping a genuinely
+late reply (the window exists precisely to catch one). If your printers answer
+immediately, `-t 1` already gives you the old latency; if you would rather the
+compiled-in default were 1 s, that is a one-token change (`IDLE_TIMEOUT_SEC`).
+
+## U11 — `-v` exits; 0.97 printed the version and then ran the daemon
+
+Upstream 0.97's `case 'v'` calls `show_version()` and *breaks*, so `p910nd -v`
+prints the version and then falls through to the normal startup logic and serves
+lp0 as a real daemon. This tree exits 0 instead, which is surely what anyone
+typing `-v` meant, and it is what the man page describes.
+
+The deviation is **inherited, not introduced**: it is present in this fork's
+initial checkin, so it predates the audit and I left it alone. It is listed here
+only because the brief asked for 0.97 parity. Removing `exit(0)` restores strict
+compatibility and is a one-line change.
+
+(The `break;` after `exit(0)` is dead code. It is also inherited and produces no
+diagnostic, so it was left as is rather than touched for tidiness.)

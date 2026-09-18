@@ -35,6 +35,10 @@ musl-gcc -std=c89 ...                                  (second C library)
 gcc   -m32 -std=c89 ...                                (second word size)
 ```
 
+Plus two Makefile policy gates: `make -n -B CFLAGS="-Werror -O2" p910nd` must show
+the caller's `-Werror` in the compile line (BUG-011), and `make -n -B
+USE_LIBWRAP=1 p910nd` must show both `-DUSE_LIBWRAP` and `-lwrap` (BUG-012).
+
 **A2 — cppcheck** with `warning,performance,portability`. Findings are reported;
 only `error:`-level output fails the gate.
 
@@ -51,7 +55,13 @@ printer and is spoken to over TCP:
 | Case | What it proves |
 |---|---|
 | `transfer_1byte`, `boundary_8191/8192/8193` | ring-buffer wrap boundaries |
-| `transfer_1mb_sha256` | 1 MiB payload is byte-identical |
+| `transfer_1mb_sha256`, `transfer_10mb_sha256` | 1 MiB / 10 MiB payloads are byte-identical |
+| `inetd_one_job_serves_connection` | the (x)inetd path: a socket on descriptor 0 is served and the process exits 0 |
+| `uni_idle_timeout_option_closes` | `-t` bounds an idle *unidirectional* job (BUG-008) |
+| `uni_idle_no_timeout_by_default` | without `-t`, 0.97's "never time out" behaviour is kept (BUG-008) |
+| `uni_idle_slow_client_survives` | activity refreshes that timer; no byte is lost (BUG-008) |
+| `bidir_grace_follows_idle_timeout` | `-t` bounds the post-EOF grace window (BUG-009) |
+| `numeric_id_out_of_range_rejected` | `-u 4294967296` is refused instead of truncating to root (BUG-010) |
 | `transfer_slow_chunks` | 137-byte writes with pauses, still byte-identical |
 | `half_close_tail_delivered` | `shutdown(SHUT_WR)` must not truncate the tail |
 | `client_rst_daemon_survives` | RST mid-transfer; the next job still works |

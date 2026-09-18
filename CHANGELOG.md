@@ -98,10 +98,59 @@ the residual caveats that this machine cannot prove.
 * **Portability** gained `-m32` and musl-gcc build gates. arm/mips cross
   compilation still needs a CI runner — recorded, not claimed. (U6)
 
+## Third pass — five more defects, and two coverage gaps closed
+
+### More defects fixed
+
+* **BUG-008 · High · availability** — the unidirectional copy loop had no timeout
+  of its own and ignored `-t` entirely, so a client that opened a connection and
+  then sent nothing held the daemon forever; since one job is served at a time,
+  that stopped every other host from printing, and connecting needs no
+  authentication. `-t` now bounds unidirectional jobs too, but only when it is
+  passed explicitly: 0.97 never bounded them and the default of 5 s is shorter
+  than pauses real jobs make. A job is only closed when nothing is buffered, so
+  no byte already accepted from the network can be discarded.
+* **BUG-009 · Medium · latency** — the post-EOF grace window that catches a late
+  printer reply was hard-wired to 5 s and ignored `-t`, so every bidirectional job
+  on a printer that never reports end-of-stream (any real parallel or USB printer)
+  paid ~5 s on top of its transfer time, against 0.97 which finished as soon as the
+  last byte was delivered. The window now follows `-t`, falling back to the
+  compile-time default for `-t 0` so a job is always bounded.
+* **BUG-010 · Medium · security** — `-u`/`-g` accepted any numeric value `strtol()`
+  could parse and cast it to `uid_t`/`gid_t`. The cast truncates silently and
+  truncating to 0 means root, so `-u 4294967296` reported "running as uid=0 gid=0"
+  and kept full privileges. Values that do not survive a round trip through the
+  target type are now refused.
+* **BUG-011 · Low · build** — the Makefile rebuilt `CFLAGS` as
+  `$(filter-out -W%, $(CFLAGS)) -Wall -Wextra`, discarding every `-W` switch the
+  caller passed; distribution flags routinely include `-Werror=format-security`,
+  so a package build silently lost the check it asked for. The project's warnings
+  are now appended instead, and `install` sets modes explicitly.
+* **BUG-012 · Low · build** — the Makefile honoured only `USE_WRAP` while the macro
+  it defines is `USE_LIBWRAP`, so `make USE_LIBWRAP=1` succeeded and produced a
+  binary with no tcpwrappers support: hosts.allow/hosts.deny silently unenforced.
+  Both spellings are accepted. The man page names the alias.
+
+### Coverage gaps closed (no behaviour change)
+
+* `inetd_one_job_serves_connection` — every case used to pin stdin to `/dev/null`,
+  so `is_standalone()` always chose `server()` and the `one_job()` path used under
+  (x)inetd was never executed. It is now driven for real.
+* `transfer_10mb_sha256` — a job that crosses the ring buffer a few thousand times.
+
+### Verified, no defect (details in BUGS.md)
+
+`ensure_parent_dir()` on relative paths (hypothesis tested and disproved), the
+`gcc -fanalyzer` fd-leak report at `dup_fd_below_fdsetsize()` (false positive),
+clang-tidy, and the `-u`/`-g` ordering.
+
 ## Compatibility
 
-No breaking change. Command line (`-f -i -b -d -v`, `[0-9]`), inetd/standalone
-detection, lockfile semantics, exit codes and log messages are unchanged. Behaviour
-differs in exactly one situation — a lock/pid directory that used to abort startup
-is now created. Memory footprint grows by one 256-byte stack frame in two
-cold paths; no new allocation, no new dependency.
+No breaking change. Command line (`-f -i -b -d -v`, `[0-9]`, plus the opt-in
+`-t -u -g`), inetd/standalone detection, lockfile semantics, exit codes and log
+messages are unchanged. Behaviour differs in exactly three situations, all of them
+previously unbounded or wrong: a lock/pid directory that used to abort startup is
+now created; a printer device that is missing no longer lets one accepted
+connection block the daemon; and an idle job is torn down when `-t` asks for it.
+Memory footprint grows by one 256-byte stack frame in two cold paths plus two
+`struct timeval` in the unidirectional loop; no new allocation, no new dependency.

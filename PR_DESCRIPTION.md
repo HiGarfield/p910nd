@@ -9,8 +9,9 @@ is intentionally conservative: no rewrite, no third-party dependency, no new
 allocation, and **no change to documented behaviour** except where a missing
 directory used to make the daemon refuse to start.
 
-Fixes: **2** defects (1 High, 1 Medium) + 2 C89 portability defects in tests.
-Open items needing your decision: **8**, written up in `UNRESOLVED.md`.
+Across all three passes: **12** defects fixed (2 High, 5 Medium, 5 Low) plus 2 C89
+portability defects in the test sources. Open items needing your decision: **3**
+(new ones are U9–U11 in `UNRESOLVED.md`; U1–U8 are resolved).
 
 ## The fixes
 
@@ -57,6 +58,37 @@ retry makes the assertion fire.
 Two test sources used C99 constructs that break the mandated `-std=c89 -Wpedantic`
 gate. Both fixed. Production sources were already clean, and now also build
 warning-free under gcc, clang and musl-gcc.
+
+## Third pass
+
+Two of these are the kind of bug that only shows up when you stop reading the
+code and start *timing* it.
+
+* **BUG-008 (High)** — a client that connects and sends nothing blocks the daemon
+  forever. The unidirectional loop had no timeout and ignored `-t` completely;
+  the daemon serves one job at a time and connecting is unauthenticated, so this
+  is a trivially triggerable denial of service. `-t` now applies there too, but
+  only when given explicitly (0.97 never bounded these jobs and the 5 s default is
+  shorter than pauses real jobs make), and only when nothing is buffered, so no
+  byte can be lost.
+* **BUG-009 (Medium)** — every bidirectional job took ~5 s longer than 0.97. The
+  post-EOF window that catches a late printer reply was hard-wired to 5 s and
+  ignored `-t`; a real printer never reports end-of-stream, so the window was
+  always used in full. It now follows `-t` (measured 5.2 s → 1.2 s with `-t 1`).
+* **BUG-010 (Medium)** — `-u 4294967296` silently truncated to uid 0: the daemon
+  announced a successful privilege drop and stayed root. Numeric ids that do not
+  fit `uid_t`/`gid_t` are now refused.
+* **BUG-011 (Low)** — the Makefile discarded every `-W` flag the caller passed,
+  which silently drops `-Werror=format-security` from distribution builds.
+* **BUG-012 (Low)** — `make USE_LIBWRAP=1` reported success and produced a binary
+  with no tcpwrappers: the Makefile only knew the `USE_WRAP` spelling while the
+  macro it defines is `USE_LIBWRAP`. An operator asking for access control got
+  hosts.allow/hosts.deny silently unenforced.
+
+Every one of these is backed by a regression test that was first made to fail
+against the unfixed code (mutation-verified), and two coverage gaps were closed
+along the way: the (x)inetd path had never been executed by the suite, and no job
+larger than 1 MiB had been compared byte for byte.
 
 ## The test suite (`make check`)
 
@@ -110,10 +142,17 @@ in two cold paths, no new allocation, no new dependency.
 
 ## Please decide
 
-`UNRESOLVED.md` — the one that matters most is **U1**: `-b` combined with `-f` gives
-any client that can reach the port read/append access to the named file
-(CVE-2018-10123 class). Two hardening designs are written out there, both off by
-default; the man page carries a new SECURITY section regardless. Also worth your
-attention: **U3** (a missing printer lets one client block the whole daemon —
-upstream's documented choice, which I did not silently change) and **U5**
-(libwrap is unverified here because `tcpd.h` is missing).
+U1–U8 are resolved (device allowlist, `-u`/`-g`, printer opened before `accept()`,
+pid-file hardening, libwrap exercised, `-t`, musl/32-bit gates). Three remain:
+
+* **U9** — should the idle bound apply to unidirectional jobs *by default*? It is
+  opt-in today; the exposure it leaves is real but pre-existing, and the 5 s
+  default is too short to impose on jobs that work today.
+* **U10** — the bidirectional grace window still defaults to 5 s, which is 5 s
+  more latency than 0.97 had. `-t 1` already buys the old latency; changing the
+  compiled-in default is a one-token change.
+* **U11** — this fork's `-v` exits after printing the version; upstream 0.97
+  prints it and then serves lp0. Inherited, not introduced; listed for parity.
+
+Also worth knowing: **U6's residual** still stands — arm/mips cross compilation
+needs a CI runner with root, so big-endian targets remain unexercised.
