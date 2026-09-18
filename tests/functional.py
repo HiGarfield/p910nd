@@ -320,6 +320,71 @@ def t_transfer_1mb(binpath, tmpdir):
     run_transfer(binpath, tmpdir, "transfer_1mb_sha256", 1024 * 1024, n=0)
 
 
+def t_transfer_10mb(binpath, tmpdir):
+    run_transfer(binpath, tmpdir, "transfer_10mb_sha256", 10 * 1024 * 1024, n=0)
+
+
+def t_inetd_one_job(binpath, tmpdir):
+    """(x)inetd mode: a connection handed over on descriptor 0 is served.
+
+    This is the one_job() path, which no other case reaches: p910nd must
+    detect the socket on stdin (is_standalone() -> 0) instead of binding a
+    listening socket, and must exit once the job is done so that inetd sees
+    a definite status.
+    """
+    name = "inetd_one_job_serves_connection"
+    dev = os.path.join(tmpdir, "printer-inetd")
+    open(dev, "wb").close()
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind((IPV4_HOST, 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    client = socket.create_connection((IPV4_HOST, port), timeout=20)
+    served, _ = listener.accept()
+    # No -d: that flag forces the standalone path, and stdin must be the
+    # socket itself for is_standalone() to pick one_job().
+    proc = subprocess.Popen([binpath, "-f", dev, "0"], stdin=served.fileno(),
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    served.close()
+    data = payload(200000)
+    try:
+        client.sendall(data)
+        client.shutdown(socket.SHUT_WR)
+        try:
+            while client.recv(65536):
+                pass
+        except socket.error:
+            pass
+        try:
+            rc = proc.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            record(name, False, "inetd instance did not exit")
+            return
+        if rc != 0:
+            record(name, False, "inetd instance exited with %d" % rc)
+            return
+        got = read_file_bytes(dev, len(data))
+        if got != data:
+            record(name, False, "got %d/%d bytes, sha %s vs %s"
+                   % (len(got), len(data), sha(got)[:16], sha(data)[:16]))
+            return
+        record(name, True)
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+        if proc.poll() is None:
+            proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+        listener.close()
+
+
 def t_slow_chunks(binpath, tmpdir):
     run_transfer(binpath, tmpdir, "transfer_slow_chunks", 20000, n=0,
                  chunk=137, delay=0.002)
@@ -1415,6 +1480,8 @@ CASES = [
     t_transfer_1byte,
     t_boundaries,
     t_transfer_1mb,
+    t_transfer_10mb,
+    t_inetd_one_job,
     t_slow_chunks,
     t_half_close_tail,
     t_client_rst_midtransfer,
