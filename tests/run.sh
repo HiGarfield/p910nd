@@ -97,6 +97,18 @@ else
 	sed -n '1,5p' "$BUILD/makeflags.log"
 fi
 
+# USE_LIBWRAP is the macro name in the source; USE_WRAP is the Makefile's.
+# Asking for libwrap with the source's spelling must not silently produce a
+# binary without access control.
+if make -n -B USE_LIBWRAP=1 p910nd >"$BUILD/makelibwrap.log" 2>&1 &&
+	grep -q -- '-DUSE_LIBWRAP' "$BUILD/makelibwrap.log" &&
+	grep -q -- '-lwrap' "$BUILD/makelibwrap.log"; then
+	pass "makefile-use-libwrap-alias"
+else
+	fail "makefile-use-libwrap-alias (USE_LIBWRAP=1 builds without libwrap)"
+	sed -n '1,5p' "$BUILD/makelibwrap.log"
+fi
+
 # Portability: a second C library and a second word size catch assumptions
 # about sizeof(long), pid_t and friends that only one target would hide.
 # Probed rather than assumed, so a host without them SKIPs instead of failing.

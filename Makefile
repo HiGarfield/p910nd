@@ -1,6 +1,9 @@
 # Define USE_WRAP if you want to compile with
-# libwrap (hosts.{allow,deny} access control)
-ifneq ($(USE_WRAP),)
+# libwrap (hosts.{allow,deny} access control).  The source's own macro is
+# USE_LIBWRAP, so spelling it that way on the command line is accepted too:
+# without the alias the build silently produced a binary with no access
+# control, while the operator believed hosts.{allow,deny} were being enforced.
+ifneq ($(strip $(USE_WRAP)$(USE_LIBWRAP)),)
   LIBS += -lwrap
   DEFINES += -DUSE_LIBWRAP
 endif

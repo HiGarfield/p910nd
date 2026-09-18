@@ -108,7 +108,8 @@ at any one time. This can be done by designating one host as the
 spooler and sending all jobs to this host. You will probably
 need to set up an intermediate queue anyway to provide print job filtering.
 .LP
-If built with USE_WRAP, it uses the libwrap library (tcpwrappers).
+If built with USE_WRAP (or its alias USE_LIBWRAP), it uses the libwrap
+library (tcpwrappers).
 Access control can be done with /etc/hosts.allow
 and /etc/hosts.deny. The service name is p910nd.
 .SH SECURITY
