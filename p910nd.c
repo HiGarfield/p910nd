@@ -1530,19 +1530,32 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 					 * torn down mid-job.  See idle_timeout_elapsed below.
 					 */
 					gettimeofday(&last_activity, NULL);
-					gettimeofday(&then, NULL);
-					/* wait 100 msec before reading again. */
-					then.tv_usec += 100000;
-					if (then.tv_usec >= 1000000)
+					/*
+					 * Pace the return stream ONLY while the host is still
+					 * sending the job.  The 100 ms gap stops a chatty printer
+					 * from starving the network->printer direction (it lets
+					 * select() service the socket every iteration).  Once the
+					 * network side has reached EOF there is no network
+					 * direction left for the printer to dominate, so the
+					 * response is forwarded as fast as the device offers it.
+					 * Keeping the throttle after EOF (BUG-014) capped the
+					 * printer->network direction at roughly BUFFER_SIZE per
+					 * 100 ms (~80 KB/s) and needlessly slowed large status /
+					 * PJL / SNMP replies.  (The empty-read branch below still
+					 * paces to avoid a CPU spin on a quiet device.)
+					 */
+					if (!networkToPrinterBuffer.eof_read)
 					{
-						then.tv_usec -= 1000000;
-						then.tv_sec++;
+						gettimeofday(&then, NULL);
+						/* wait 100 msec before reading again. */
+						then.tv_usec += 100000;
+						if (then.tv_usec >= 1000000)
+						{
+							then.tv_usec -= 1000000;
+							then.tv_sec++;
+						}
+						timer = 1;
 					}
-					/* Pace the return stream so the printer cannot dominate
-					 * the network direction.  Previously this was gated on a
-					 * now-removed "need_clear_lp" flag; the throttle must apply
-					 * unconditionally to every printer read. */
-					timer = 1;
 				}
 				else if (result == 0)
 				{
