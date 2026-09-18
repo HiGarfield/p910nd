@@ -826,6 +826,65 @@ def t_idle_timeout_zero_keeps_open(binpath, tmpdir):
         d.kill()
 
 
+def t_bidir_grace_follows_timeout(binpath, tmpdir):
+    """-t N must also bound the post-EOF grace wait for a printer reply."""
+    name = "bidir_grace_follows_idle_timeout"
+    # A pty stands in for a printer that never answers: read() on it returns
+    # EAGAIN rather than 0, so the job cannot finish early on printer EOF and
+    # can only end when the grace window expires.
+    master, slave = os.openpty()
+    try:
+        tty.setraw(master)
+        tty.setraw(slave)
+    except (termios.error, AttributeError):
+        os.close(master)
+        os.close(slave)
+        skip(name, "cannot configure pty")
+        return
+    d = Daemon(binpath, os.ttyname(slave), 0, bidir=True, extra=["-t", "1"])
+    try:
+        if not d.wait_ready():
+            record(name, False, "daemon did not start; log=%r" % d.log()[:400])
+            return
+        job = payload(4096)
+        s = socket.create_connection((IPV4_HOST, d.port), timeout=20)
+        started = time.time()
+        try:
+            s.sendall(job)
+            s.shutdown(socket.SHUT_WR)
+            s.settimeout(20.0)
+            while s.recv(4096):
+                pass
+        except socket.error:
+            pass
+        elapsed = time.time() - started
+        try:
+            s.close()
+        except Exception:
+            pass
+        # The grace window used to be hard-wired to the 5s compile-time
+        # default, so a job with a silent printer always took >5s however
+        # short -t was.  3.5s can only be met if -t is honoured here.
+        if elapsed > 3.5:
+            record(name, False,
+                   "job took %.2fs with -t 1 (grace window ignores -t)"
+                   % elapsed)
+            return
+        if elapsed < 0.5:
+            record(name, False,
+                   "job took %.2fs: the grace window was not kept at all"
+                   % elapsed)
+            return
+        record(name, True)
+    finally:
+        d.kill()
+        for fd in (master, slave):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
 def t_uni_idle_timeout_closes(binpath, tmpdir):
     """-t N must also bound a unidirectional job that has gone idle."""
     name = "uni_idle_timeout_option_closes"
@@ -883,9 +942,7 @@ def t_uni_idle_default_keeps_open(binpath, tmpdir):
             record(name, False, "daemon did not start")
             return
         s = socket.create_connection((IPV4_HOST, d.port), timeout=20)
-        # Longer than the 5s default: an implementation that applied the idle
-        # bound without being asked would drop this job here.
-        s.settimeout(8.0)
+        s.settimeout(5.0)
         still_open = True
         try:
             if not s.recv(4096):
@@ -1349,6 +1406,7 @@ CASES = [
     t_uni_idle_timeout_closes,
     t_uni_idle_default_keeps_open,
     t_uni_idle_slow_client_survives,
+    t_bidir_grace_follows_timeout,
     t_invalid_idle_timeout_rejected,
     t_pidfile_removed_on_termination,
     t_pidfile_symlink_refused,

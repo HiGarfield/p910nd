@@ -194,7 +194,9 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
  * A printer that never responds simply adds at most this much latency to job
  * completion; a printer that does respond gets the full window to finish its
  * reply.  5 seconds is long enough for essentially any printer to answer a
- * just-completed job while keeping the cost for silent printers small. */
+ * just-completed job while keeping the cost for silent printers small.  -t
+ * overrides this window at run time; -t 0 falls back to it, so that a job is
+ * always bounded. */
 #ifndef IDLE_TIMEOUT_SEC
 #define IDLE_TIMEOUT_SEC 5
 #endif
@@ -1360,6 +1362,16 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 		 * two, the loop had no way to know the printer will never speak again
 		 * and had to burn the whole grace window on every job. */
 		int printer_eof = 0;
+		/*
+		 * How long the job stays open after network EOF, waiting for a
+		 * printer reply that only arrives once the host has closed its send
+		 * side.  It follows -t whenever a positive idle timeout was asked
+		 * for -- a site whose printers answer immediately can then keep jobs
+		 * short -- and falls back to the compile time default when the idle
+		 * timer is disabled (-t 0), so the wait is always bounded and one
+		 * silent printer can never pin a connection open.
+		 */
+		int grace_window = (idle_timeout > 0) ? idle_timeout : IDLE_TIMEOUT_SEC;
 		Buffer_t printerToNetworkBuffer;
 		fd_set readfds;
 		fd_set writefds;
@@ -1390,7 +1402,7 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 			{
 				eof_reached = 1;
 				gettimeofday(&grace_deadline, NULL);
-				grace_deadline.tv_sec += IDLE_TIMEOUT_SEC;
+				grace_deadline.tv_sec += grace_window;
 			}
 			FD_ZERO(&readfds);
 			FD_ZERO(&writefds);

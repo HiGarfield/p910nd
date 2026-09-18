@@ -31,12 +31,18 @@ being accepted and then left waiting indefinitely.
 The \fB-i\fR option can be used to specify binding to one address instead
 of all interfaces which is the default.
 .LP
-The \fB-t\fR option sets the idle timeout in seconds: a bidirectional job during
-which neither the network nor the printer has produced anything for that long is
-treated as finished and the connection is closed.  A value of 0 disables the idle
-timer altogether.  The default is 5 seconds.  It does not affect the short grace
-period that is kept after the host has finished sending, which is what allows a
-printer reply arriving just after that point to still be forwarded.
+The \fB-t\fR option sets the idle timeout in seconds: a job during which neither
+the network nor the printer has produced anything for that long is treated as
+finished and the connection is closed.  A value of 0 disables the idle timer
+altogether.  The default is 5 seconds.  In unidirectional mode the timer is armed
+only when \fB-t\fR is given explicitly, because those jobs were never timed out
+before and a slow client or a slow printer may pause one for minutes; the job is
+never closed while data is still buffered, so no byte can be lost this way.
+.LP
+The same value bounds the short grace period that is kept after the host has
+finished sending, which is what allows a printer reply arriving just after that
+point to be forwarded.  With \fB-t 0\fR that grace period reverts to the
+compile-time default of 5 seconds, so a job always terminates.
 .LP
 The \fB-u\fR and \fB-g\fR options make the daemon give up privileges and continue
 as the named user and group, which may also be given numerically.  Both are
