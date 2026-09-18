@@ -1569,6 +1569,22 @@ def t_device_replaced_while_idle(binpath, tmpdir):
         d.kill()
 
 
+def t_version_flag_exits(binpath, tmpdir):
+    """U11: -v prints the version and exits 0 (this fork's behaviour, kept)."""
+    name = "version_flag_exits"
+    rc, out = _run_raw(binpath, ["-v", "0"], timeout=5.0)
+    if rc is None:
+        record(name, False, "p910nd -v kept running (%s)" % out[:120])
+        return
+    if rc != 0:
+        record(name, False, "p910nd -v exited %s" % rc)
+        return
+    if "p910nd" not in out or "version" not in out.lower():
+        record(name, False, "no version string in: %r" % out[:160])
+        return
+    record(name, True)
+
+
 CASES = [
     t_transfer_1byte,
     t_boundaries,
@@ -1606,6 +1622,7 @@ CASES = [
     t_libwrap_allows,
     t_libwrap_denies,
     t_device_replaced_while_idle,
+    t_version_flag_exits,
 ]
 
 

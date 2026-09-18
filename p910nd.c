@@ -2581,7 +2581,6 @@ int main(int argc, char *argv[])
 		case 'v':
 			show_version();
 			exit(0);
-			break;
 		default:
 			usage();
 			break;
