@@ -158,3 +158,52 @@ timeout (5 s by default, `-t` to taste, `-t 0` for the old "never time out"
 behaviour) instead of holding the daemon forever.
 Memory footprint grows by one 256-byte stack frame in two cold paths plus two
 `struct timeval` in the unidirectional loop; no new allocation, no new dependency.
+
+## Fourth round (2026-09-18)
+
+Four more defects closed (one High, one Medium, two Low); three further lines of
+enquiry were evaluated and decided without a behaviour change.
+
+### Fixed
+
+* **BUG-013 · High · silent data loss** — `server()` opened the printer before
+  `accept()` as the BUG-005 gate (do not accept while the printer is missing) and
+  held that descriptor while blocked in `accept()`. A device unlinked and recreated
+  during that wait (USB / parallel hotplug) left the held fd pointing at an
+  unlinked inode, so the next job's bytes were written there and silently lost
+  while the log still reported "Finished job". The printer is now re-opened after
+  `accept()` succeeds; if it is then unavailable the connection is dropped rather
+  than shipped to nowhere. BUG-005 is preserved (the gate still opens before
+  accepting). Regression: `device_replaced_while_idle_reopens`.
+* **BUG-014 · Medium · throughput** — in the bidirectional path every printer read
+  armed a 100 ms timer that cleared the printer read fd, capping the printer→
+  network direction at ~`BUFFER_SIZE` per 100 ms (~80 KB/s). The pace only matters
+  while the host is still sending the job (to stop a chatty printer starving the
+  network direction); after network EOF the reply is now forwarded at full speed.
+  Regression: `test_bidir_post_eof_unthrottled` (2.41 s before, ~0 s after).
+* **BUG-015 · Low · defensive** — the unidirectional loop only calls `select()` when
+  `maxfd >= 0`; a defensive yield plus a comment now prove the `maxfd == -1` case is
+  currently unreachable and stop a future edit turning it into a 100 % CPU spin.
+* **BUG-016 · Low · dead code** — the `break;` after `exit(0)` in `case 'v'` is
+  unreachable and removed.
+
+### Evaluated, no change
+
+* **C3 (clue 3)** — the post-EOF grace window follows `-t` (U10). With the BUG-014
+  throttle gone a large reply now transfers in well under a second, so the window is
+  no longer starved; keeping it coupled to `-t` is the operator's documented choice.
+  Not decoupled (would add a new option and change `-t` semantics).
+* **C5 (clue 5)** — `one_job()` loops `sleep(10)` forever on a missing printer;
+  under inetd `nowait` this piles up processes. Inherited from 0.97, kept to avoid a
+  new option; bounded by running inetd `wait` mode or ensuring the device exists.
+* **C6 (clue 6)** — the test suite now covers a device node replaced while the
+  daemon is idle (`device_replaced_while_idle_reopens`); this gap is what let
+  BUG-013 through the first three rounds.
+
+### Compatibility
+
+No breaking change. The `-v` path keeps `exit(0)` (man page already documents it);
+only the dead `break` is removed. A hotplugged printer now receives the job instead
+of losing it; a bidirectional reply after the host closed its send side is no longer
+rate-limited. Command line, inetd/standalone detection, lockfile and pidfile
+semantics, exit codes and log text are unchanged.

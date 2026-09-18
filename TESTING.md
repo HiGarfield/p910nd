@@ -75,6 +75,8 @@ printer and is spoken to over TCP:
 | `lock_dir_created_automatically` | BUG-001 regression: absent lock dir must not stop startup |
 | `printer_stall_no_cpu_spin` | blocked printer sleeps instead of spinning |
 | `printer_disappears_midjob` | device vanishing must not kill the daemon |
+| `device_replaced_while_idle_reopens` | BUG-013 regression: a device node unlinked+recreated while the daemon is idle in `accept()` must not lose the next job |
+| `version_flag_exits` | `-v` prints the version and exits 0 (this fork's behaviour) |
 
 Bidirectional testing uses a **pty** (`os.openpty()`) rather than a FIFO: with a
 single FIFO the daemon would read back its own writes, which would make the test

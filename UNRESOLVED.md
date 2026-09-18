@@ -6,10 +6,10 @@ record what still cannot be proven on this particular machine, which is a
 different thing from being unresolved.
 
 Three **new** items opened during the third pass (U9–U11) are at the bottom of
-this file. **U9 is now resolved by your decision** (idle timer armed by default
-in both directions); **U10 is resolved as "leave it"** (the bidirectional grace
-window keeps its 5 s default); **U11 remains open** and is a one-line change
-either way.
+this file. **U9 is resolved** (idle timer armed by default in both directions);
+**U10 is resolved as "leave it"** (the bidirectional grace window keeps its 5 s
+default); **U11 is resolved this round** — this fork keeps `exit(0)` (the man
+page already documents it) and the dead `break` after it is removed (BUG-016).
 
 | Item | Subject | Resolution | Commit |
 |---|---|---|---|
@@ -169,3 +169,60 @@ compatibility and is a one-line change.
 
 (The `break;` after `exit(0)` is dead code. It is also inherited and produces no
 diagnostic, so it was left as is rather than touched for tidiness.)
+
+## U11 — resolved this round
+
+**Decision: keep `exit(0)`; remove the dead `break` (BUG-016).**
+
+This fork's `case 'v'` calls `show_version()` then `exit(0)`; that matches the
+man page and is what anyone typing `-v` expects, so it is kept. The `break;`
+immediately after `exit(0)` is unreachable (`exit` is `__attribute__((noreturn))`)
+and is removed. No behaviour change; covered by `version_flag_exits`.
+
+---
+
+# Fourth pass — 2026-09-18
+
+Seven lines of enquiry were raised; four became code fixes (BUG-013..016) and
+three were evaluated and decided without a behaviour change.
+
+## C3 — `-t` also bounds the post-EOF grace window (clue 3)
+
+**Decision: keep coupled to `-t` (U10), document the trade-off, no code change.**
+
+BUG-009 made the grace window follow `-t` (5 s floor only at `-t 0`). With the
+BUG-014 throttle now gone, a large reply transfers in well under a second, so the
+grace window is no longer starved by the throttle. A reply that genuinely arrives
+*more than `-t` seconds* after network EOF can still be dropped — that is the
+operator's `-t` choice, not a defect: raising `-t` lengthens both the idle bound
+and the grace window together. Sites that want a long grace but a short idle are
+an edge case; the documented knob covers them. Deliberately **not** decoupled, to
+avoid a new option that would change the documented `-t` semantics.
+
+## C5 — inetd path can sleep(10) forever on a missing printer (clue 5)
+
+**Decision: leave as upstream; document the limitation, no default change.**
+
+`one_job()` loops `while ((lp = open_printer(...)) == -1) sleep(10);`. Under
+inetd `nowait` each connection forks a process, so a printer that never appears
+makes that process sleep forever — and many such connections pile up. This is
+inherited from 0.97 (the same loop was there) and matches "retry forever" being
+the documented, deployment-preserving choice. An opt-in cap was considered and
+rejected: adding a new option is scope creep against the hard constraint that
+default behaviour must not change, and the risk is already bounded by running
+inetd in `wait` mode (inetd serialises, so no pile-up) or by ensuring the device
+exists before inetd spawns the handler. Recorded as a known limitation.
+
+## C6 — test gap: device state changing between jobs (clue 6)
+
+**Addressed.** The suite had no case for the device node being replaced while the
+daemon is idle, which is exactly why BUG-013 slipped through three rounds.
+`device_replaced_while_idle_reopens` now covers it (mutation-verified). Other
+"state between jobs" scenarios already covered: `printer_disappears_midjob`
+(device vanishes mid-transfer), `t_device_allowlist` / default-build acceptance
+(startup-time device checks), and `inetd_one_job_serves_connection` (a fresh
+process per (x)inetd connection naturally re-opens the device). The remaining
+gap is a device that is *created after the daemon starts but before the first
+connection* — that is covered transitively by the open-before-accept gate plus
+this new re-open test (the first job re-opens too).
+

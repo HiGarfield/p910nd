@@ -90,6 +90,38 @@ against the unfixed code (mutation-verified), and two coverage gaps were closed
 along the way: the (x)inetd path had never been executed by the suite, and no job
 larger than 1 MiB had been compared byte for byte.
 
+## Fourth pass (2026-09-18)
+
+Four more defects, found by re-examining lifecycle/state-between-jobs issues and
+by *timing* the bidirectional path again.
+
+* **BUG-013 (High)** — hotplug silently lost the job. `server()` opened the printer
+  before `accept()` (the BUG-005 gate: do not accept while the printer is missing)
+  and held that fd while blocked in `accept()`. A device unlinked and recreated
+  during that wait (USB / parallel hotplug) left the held fd pointing at an unlinked
+  inode, so the next job's bytes were written there and silently lost while the log
+  still reported "Finished job" (clue 1; reproduced with `rm` + `touch`). The printer
+  is now re-opened after `accept()`; if it is then unavailable the connection is
+  dropped instead of shipped to nowhere. BUG-005 is preserved.
+* **BUG-014 (Medium)** — the bidirectional return stream was rate-limited to ~80 KB/s.
+  Every printer read armed a 100 ms timer that cleared the printer read fd; the pace
+  only matters while the host is still sending, so after network EOF the reply is now
+  forwarded at full speed (clue 2; measured 2.41 s → ~0 s for a 200 KB reply via a
+  socketpair unit test). A pty cannot show this (its flow control masks the cap), so
+  the regression test uses socketpairs.
+* **BUG-015 (Low, defensive)** — the unidirectional loop skipped `select()` when
+  `maxfd < 0`; a comment now proves that case is currently unreachable and a defensive
+  yield stops a future edit turning it into a 100 % CPU spin (clue 4).
+* **BUG-016 (Low)** — the dead `break;` after `exit(0)` in `case 'v'` is removed
+  (clue 7 / U11).
+
+Three further lines of enquiry were evaluated and left unchanged: the post-EOF grace
+window stays coupled to `-t` (U10; with BUG-014 fixed a large reply no longer starves
+it), `one_job()`'s forever `sleep(10)` on a missing printer is upstream behaviour kept
+to avoid a new option (inetd `wait` mode bounds it), and the device-replaced-while-idle
+gap is now covered by `device_replaced_while_idle_reopens` (clue 6) — the gap that let
+BUG-013 through the first three rounds.
+
 ## The test suite (`make check`)
 
 There was none. `tests/run.sh` now runs five phases: build gates (gcc, clang,
