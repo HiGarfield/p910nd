@@ -1789,6 +1789,24 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 				idle_tv.tv_sec = 1;
 				idle_tv.tv_usec = 0;
 			}
+			/*
+			 * maxfd is -1 only when neither descriptor is armed.  In the
+			 * current code that cannot happen while the loop still runs: the
+			 * socket is armed for reading until EOF is read (want_read) and
+			 * the printer is armed for writing until the buffer drains
+			 * (want_write), and both descriptors are always inside
+			 * [0, FD_SETSIZE) after dup_fd_below_fdsetsize(); the loop guard
+			 * (!eof_sent && !WRITE_ERR) also means eof_sent and WRITE_ERR are
+			 * still clear here.  If a future edit breaks that invariant, the
+			 * select() below would be skipped and the loop would busy-spin at
+			 * 100% CPU.  Yield instead so a regression degrades to a slow
+			 * stall rather than a CPU hog.
+			 */
+			if (maxfd < 0)
+			{
+				usleep(10000);
+				continue;
+			}
 			if (maxfd >= 0 &&
 				select(maxfd + 1, &readfds, &writefds, NULL,
 					   idle_enabled ? &idle_tv : NULL) < 0)
