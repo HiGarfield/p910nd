@@ -2376,6 +2376,41 @@ static void server(int lpnumber)
 		dolog(LOG_NOTICE, "Connection from %s port %hu accepted\n", get_ip_str((struct sockaddr *)&client, host, sizeof(host)), get_port((struct sockaddr *)&client));
 		/*write(fd, "Printing", 8); */
 
+		/*
+		 * Re-open the printer here, before the job, so we never write to a
+		 * stale inode.
+		 *
+		 * The device was opened just above, before accept(), but only as a
+		 * gate: the daemon must not accept a connection while the printer is
+		 * missing (BUG-005).  The descriptor it holds, however, keeps pointing
+		 * at the inode that existed when open_printer() succeeded, and a
+		 * USB/parallel device can be unplugged and recreated -- udev removes
+		 * and remakes /dev/usb/lp0 -- while this process is blocked in
+		 * accept().  Writing to that descriptor after such a hotplug lands in
+		 * an unlinked inode: the job is silently lost while the log still
+		 * reports "Finished job".  Opening again now picks up whatever node
+		 * currently exists.  If the device vanished in the (tiny) gap between
+		 * accept() returning and here, there is nowhere valid to write, so the
+		 * connection is dropped instead of shipping bytes to nowhere and lying
+		 * about it.
+		 */
+		{
+			int lp2 = open_printer(lpnumber);
+			if (lp2 >= 0)
+			{
+				(void)close(lp);
+				lp = lp2;
+			}
+			else
+			{
+				dolog(LOG_NOTICE,
+					  "printer unavailable after accept, dropping connection\n");
+				(void)close(fd);
+				(void)close(lp);
+				continue;
+			}
+		}
+
 		if (copy_stream_ex(fd, lp, &net_closed, &lp_closed) < 0)
 			dolog(LOGOPTS, "copy_stream: %m\n");
 		/*

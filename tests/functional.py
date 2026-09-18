@@ -1520,6 +1520,55 @@ def t_libwrap_allows(binpath, tmpdir):
         d.kill()
 
 
+def t_device_replaced_while_idle(binpath, tmpdir):
+    """BUG-013: a device node unlinked+recreated while the daemon is idle in
+    accept() must not send the next job into the stale (unlinked) inode.
+
+    server() opens the printer before accept() as a gate (BUG-005, so a missing
+    printer does not block the daemon), but the descriptor it holds keeps
+    pointing at the inode that existed when open_printer() succeeded.  A USB /
+    parallel device can be unplugged and recreated -- udev removes and remakes
+    /dev/usb/lp0 -- while this process is blocked in accept(); writing to that
+    descriptor then lands in an unlinked inode and the job is silently lost
+    while the log still reports "Finished job".  The fix re-opens the printer
+    after accept(), so the recreated node is used.
+
+    Mutation-verified: without the re-open, the job after the swap leaves the
+    new file empty (got != b) and the case fails.
+    """
+    name = "device_replaced_while_idle_reopens"
+    dev = os.path.join(tmpdir, "printer-hotplug")
+    open(dev, "wb").close()
+    d = Daemon(binpath, dev, 0)
+    try:
+        if not d.wait_ready():
+            record(name, False, "daemon did not start; log=%r" % d.log()[:400])
+            return
+        a = payload(4096)
+        client_send(a, d.port)
+        got = read_file_bytes(dev, len(a))
+        if got != a:
+            record(name, False, "control job lost: %d/%d bytes" % (len(got), len(a)))
+            return
+        # Hotplug: remove the node and recreate it.  The daemon is blocked in
+        # accept() holding the old inode, so the next job must re-open.
+        try:
+            os.unlink(dev)
+        except OSError:
+            pass
+        open(dev, "wb").close()
+        b = payload(8192)
+        client_send(b, d.port)
+        got = read_file_bytes(dev, len(b))
+        if got != b:
+            record(name, False,
+                   "job after hotplug lost: %d/%d bytes (stale inode?)" % (len(got), len(b)))
+            return
+        record(name, True)
+    finally:
+        d.kill()
+
+
 CASES = [
     t_transfer_1byte,
     t_boundaries,
@@ -1556,6 +1605,7 @@ CASES = [
     t_default_build_still_accepts_any_device,
     t_libwrap_allows,
     t_libwrap_denies,
+    t_device_replaced_while_idle,
 ]
 
 
