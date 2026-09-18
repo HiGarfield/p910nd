@@ -237,13 +237,23 @@ static int log_to_stdout = 0;
  * Seconds without activity before an idle bidirectional job is torn down.
  * 0 disables that idle timer entirely.  Settable with -t.
  *
- * The post-EOF grace window used to catch a printer reply that arrives only
- * after the host closed its send side deliberately keeps using the compile
- * time IDLE_TIMEOUT_SEC: that window is what guarantees a job terminates, so
- * making it configurable to "wait forever" would let one silent printer pin a
- * connection open indefinitely.
+ * The post-EOF grace window that catches a printer reply arriving only after
+ * the host closed its send side follows -t as well, but falls back to the
+ * compile time IDLE_TIMEOUT_SEC when the idle timer is disabled (-t 0): that
+ * window is what guarantees a job terminates, so making it configurable to
+ * "wait forever" would let one silent printer pin a connection open.
  */
 static int idle_timeout = IDLE_TIMEOUT_SEC;
+/*
+ * Nonzero once -t was given on the command line.
+ *
+ * The unidirectional path honours the idle timeout only when the operator
+ * asked for it.  0.97 had no timeout there at all and a real job may pause
+ * for minutes -- a slow client, or a printer that stops accepting data -- so
+ * tearing such a job down by default would be a regression.  Passing -t is
+ * the operator's request for that bound.
+ */
+static int idle_timeout_set = 0;
 /*
  * Identity to drop to, when -u/-g are given.  NULL means "no change", which
  * is the default: dropping privileges is opt-in so that every existing
@@ -1693,6 +1703,14 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 		 */
 		fd_set readfds;
 		fd_set writefds;
+		struct timeval idle_tv;
+		struct timeval idle_now;
+		/* Clock of the last byte moved in either direction, used only when
+		 * the operator asked for an idle bound with -t. */
+		struct timeval last_activity;
+		int idle_enabled = (idle_timeout_set && idle_timeout > 0);
+
+		(void)gettimeofday(&last_activity, NULL);
 		while (!networkToPrinterBuffer.eof_sent &&
 			   !(networkToPrinterBuffer.err & WRITE_ERR))
 		{
@@ -1707,7 +1725,8 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 			 * arming only the printer and then doing a blocking read on a
 			 * possibly-empty socket leaves pending bytes undelivered to a
 			 * printer that is ready for them, for as long as the peer stays
-			 * quiet.  select() blocks with no timeout, so an idle job
+			 * quiet.  select() blocks with no timeout (a 1s timeout when -t
+			 * was given, so the idle bound can be checked), so an idle job
 			 * consumes no CPU while a missing/again-unavailable printer or a
 			 * quiet peer is waited on.
 			 */
@@ -1734,8 +1753,14 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 				FD_SET(io_fd, &readfds);
 				maxfd = MAX(maxfd, io_fd);
 			}
+			if (idle_enabled)
+			{
+				idle_tv.tv_sec = 1;
+				idle_tv.tv_usec = 0;
+			}
 			if (maxfd >= 0 &&
-				select(maxfd + 1, &readfds, &writefds, NULL, NULL) < 0)
+				select(maxfd + 1, &readfds, &writefds, NULL,
+					   idle_enabled ? &idle_tv : NULL) < 0)
 			{
 				if (errno == EINTR)
 					continue;
@@ -1743,12 +1768,43 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 				goto out;
 			}
 			/*
+			 * Give up on a job that has produced nothing for -t seconds.
+			 *
+			 * Without this a client that opens a connection and then stays
+			 * silent holds the daemon forever: this loop has no timeout of
+			 * its own and the daemon serves one job at a time, so one idle
+			 * socket is enough to stop every other host from printing.
+			 *
+			 * The condition is deliberately "nothing buffered": bytes == 0
+			 * means every byte accepted from the network has already been
+			 * handed to the printer, so tearing the job down cannot lose
+			 * data.  A job whose printer has stopped accepting data always
+			 * has bytes pending and is therefore never cut short.
+			 */
+			if (idle_enabled)
+			{
+				(void)gettimeofday(&idle_now, NULL);
+				if (networkToPrinterBuffer.bytes == 0 &&
+					idle_timeout_elapsed(&idle_now, &last_activity,
+										 idle_timeout))
+				{
+					dolog(LOG_NOTICE,
+						  "no activity from network for %ds, stop copy stream\n",
+						  idle_timeout);
+					break;
+				}
+			}
+			/*
 			 * Only touch a descriptor select() reported ready.  Reading when
 			 * the socket is not readable is exactly the stall described
 			 * above, and reading when the buffer is full is pointless work.
 			 */
 			if (want_read && FD_ISSET(io_fd, &readfds))
-				(void)readBuffer(&networkToPrinterBuffer);
+			{
+				result = readBuffer(&networkToPrinterBuffer);
+				if (idle_enabled && result > 0)
+					(void)gettimeofday(&last_activity, NULL);
+			}
 			/*
 			 * If EOF arrived on a buffer that was already empty there is
 			 * nothing left to hand to the printer, so the job is complete
@@ -1774,12 +1830,12 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 			 * than a spurious failure.  This mirrors the bidirectional drain
 			 * behaviour and prevents silent data loss on a fast network /
 			 * slow printer.  Bailing out here would both drop buffered data
-			 * and misreport a finished job as failed.  Note: readBuffer()'s
-			 * return value is intentionally not captured above -- its only
-			 * effect we rely on is the side effect (filling the buffer and
-			 * setting eof_read on EOF or READ_ERR on a hard error).
-			 * writeBuffer() below determines forward progress and owns the
-			 * `result` used for the error check.
+			 * and misreport a finished job as failed.  Note: above,
+			 * readBuffer()'s return value is captured only to refresh the
+			 * idle clock; the effect we rely on is the side effect (filling
+			 * the buffer and setting eof_read on EOF or READ_ERR on a hard
+			 * error).  writeBuffer() below determines forward progress and
+			 * owns the `result` used for the error check.
 			 */
 			result = writeBuffer(&networkToPrinterBuffer);
 			if (result < 0)
@@ -1787,6 +1843,8 @@ static int copy_stream_ex(int fd, int lp, int *fd_closed, int *lp_closed)
 				rc = (int)result;
 				goto out;
 			}
+			if (idle_enabled && result > 0)
+				(void)gettimeofday(&last_activity, NULL);
 		}
 		dolog(LOG_NOTICE, "Finished job: %lu/%lu bytes sent to printer\n", networkToPrinterBuffer.totalout, networkToPrinterBuffer.totalin);
 	}
@@ -2429,6 +2487,7 @@ int main(int argc, char *argv[])
 				usage();
 			}
 			idle_timeout = (int)timeout_sec;
+			idle_timeout_set = 1;
 			break;
 		case 'u':
 			target_user = optarg;

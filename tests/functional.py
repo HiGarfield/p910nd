@@ -826,6 +826,123 @@ def t_idle_timeout_zero_keeps_open(binpath, tmpdir):
         d.kill()
 
 
+def t_uni_idle_timeout_closes(binpath, tmpdir):
+    """-t N must also bound a unidirectional job that has gone idle."""
+    name = "uni_idle_timeout_option_closes"
+    dev = os.path.join(tmpdir, "printer-uni-idle")
+    open(dev, "wb").close()
+    d = Daemon(binpath, dev, 0, extra=["-t", "1"])
+    try:
+        if not d.wait_ready():
+            record(name, False, "daemon did not start")
+            return
+        s = socket.create_connection((IPV4_HOST, d.port), timeout=20)
+        started = time.time()
+        closed = False
+        try:
+            # Send nothing: the job must expire on its own.
+            while True:
+                if not s.recv(4096):
+                    closed = True
+                    break
+        except socket.error:
+            closed = True
+        elapsed = time.time() - started
+        try:
+            s.close()
+        except Exception:
+            pass
+        if not closed:
+            record(name, False, "connection was never closed")
+            return
+        if elapsed < 0.8:
+            record(name, False,
+                   "closed after %.2fs, before the 1s idle window elapsed"
+                   % elapsed)
+            return
+        # The pre-fix unidirectional loop had no timeout at all, so the
+        # connection stayed open forever and this bound can never be met.
+        if elapsed > 3.5:
+            record(name, False,
+                   "took %.2fs for a 1s idle timeout (-t appears ignored)"
+                   % elapsed)
+            return
+        record(name, True)
+    finally:
+        d.kill()
+
+
+def t_uni_idle_default_keeps_open(binpath, tmpdir):
+    """Without -t a unidirectional job keeps 0.97's behaviour: never timing out."""
+    name = "uni_idle_no_timeout_by_default"
+    dev = os.path.join(tmpdir, "printer-uni-default")
+    open(dev, "wb").close()
+    d = Daemon(binpath, dev, 0)
+    try:
+        if not d.wait_ready():
+            record(name, False, "daemon did not start")
+            return
+        s = socket.create_connection((IPV4_HOST, d.port), timeout=20)
+        # Longer than the 5s default: an implementation that applied the idle
+        # bound without being asked would drop this job here.
+        s.settimeout(8.0)
+        still_open = True
+        try:
+            if not s.recv(4096):
+                still_open = False
+        except socket.timeout:
+            still_open = True
+        except socket.error:
+            still_open = False
+        try:
+            s.close()
+        except Exception:
+            pass
+        if not still_open:
+            record(name, False,
+                   "an idle unidirectional job was dropped without -t")
+            return
+        record(name, True)
+    finally:
+        d.kill()
+
+
+def t_uni_idle_slow_client_survives(binpath, tmpdir):
+    """With -t, a client that keeps sending keeps its job: no data is lost."""
+    name = "uni_idle_slow_client_survives"
+    dev = os.path.join(tmpdir, "printer-uni-slow")
+    open(dev, "wb").close()
+    # 2s idle window, 1.2s gap between the chunks: activity must refresh it.
+    d = Daemon(binpath, dev, 0, extra=["-t", "2"])
+    try:
+        if not d.wait_ready():
+            record(name, False, "daemon did not start")
+            return
+        data = payload(9000)
+        s = socket.create_connection((IPV4_HOST, d.port), timeout=20)
+        try:
+            s.sendall(data[:4500])
+            time.sleep(1.2)
+            s.sendall(data[4500:])
+            s.shutdown(socket.SHUT_WR)
+            s.settimeout(20.0)
+            while s.recv(4096):
+                pass
+        finally:
+            try:
+                s.close()
+            except Exception:
+                pass
+        got = read_file_bytes(dev, len(data))
+        if got != data:
+            record(name, False, "got %d/%d bytes, sha %s vs %s"
+                   % (len(got), len(data), sha(got)[:16], sha(data)[:16]))
+            return
+        record(name, True)
+    finally:
+        d.kill()
+
+
 def t_invalid_idle_timeout_rejected(binpath, tmpdir):
     """Non-numeric, negative and overflowing -t values must be refused."""
     name = "invalid_idle_timeout_rejected"
@@ -1229,6 +1346,9 @@ CASES = [
     t_printer_disappears,
     t_idle_timeout_disconnects,
     t_idle_timeout_zero_keeps_open,
+    t_uni_idle_timeout_closes,
+    t_uni_idle_default_keeps_open,
+    t_uni_idle_slow_client_survives,
     t_invalid_idle_timeout_rejected,
     t_pidfile_removed_on_termination,
     t_pidfile_symlink_refused,
