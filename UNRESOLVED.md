@@ -6,8 +6,10 @@ record what still cannot be proven on this particular machine, which is a
 different thing from being unresolved.
 
 Three **new** items opened during the third pass (U9–U11) are at the bottom of
-this file. They are all deliberate design choices I did not want to make for
-you; say the word and each is a one-line change.
+this file. **U9 is now resolved by your decision** (idle timer armed by default
+in both directions); **U10 is resolved as "leave it"** (the bidirectional grace
+window keeps its 5 s default); **U11 remains open** and is a one-line change
+either way.
 
 | Item | Subject | Resolution | Commit |
 |---|---|---|---|
@@ -126,34 +128,32 @@ forever" there would let one silent printer pin a connection open.
 
 # Third pass — open items
 
-## U9 — should the idle bound apply to unidirectional jobs *by default*?
+## U9 — should the idle bound apply to unidirectional jobs *by default*? · **RESOLVED: yes**
 
-BUG-008 made `-t` work in unidirectional mode, but only when `-t` is passed
-explicitly. That is deliberate: 0.97 had no bound at all there, and the default
-value is 5 s, which is shorter than a pause many real jobs make (a client that
-assembles a page, a printer that stops accepting data mid-job). Applying it
-unconditionally would abort jobs that work today.
+**Decision (2026-09-18): the timer is armed by default.** Both directions now
+time out after `idle_timeout` seconds (default 5, settable with `-t`, disabled by
+`-t 0`), so the "one silent connection blocks the daemon" exposure is closed
+without the operator having to know about it.
 
-The cost of my choice: unless the operator passes `-t`, the pre-existing
-"one idle connection blocks the daemon" behaviour remains. Two alternative
-defaults you may prefer:
+Implemented by deleting the "was it given explicitly?" flag, so there is one rule
+for both directions. Consequences worth remembering:
 
-1. arm the unidirectional timer by default but with a much larger value (say
-   300 s) — bounded, and no realistic job is that slow; or
-2. keep it opt-in, and document the exposure in the SECURITY section of the man
-   page (not done yet, since it is your call whether to publish it that way).
+* a client that pauses for more than 5 s in the middle of a unidirectional job is
+  now disconnected — the *decision* was taken with that in mind, and `-t 60` (or
+  any larger value) restores the old tolerance without losing the bound;
+* no data can be lost: the job is only closed when the buffer is empty, and a job
+  whose printer stopped accepting data keeps bytes pending and is never cut short;
+* the man page's `-t` paragraph now says the timer is armed in both directions and
+  tells operators to raise it for long-pausing clients.
 
-## U10 — how long should the bidirectional grace window be by default?
+## U10 — how long should the bidirectional grace window be by default? · **RESOLVED: leave it at 5 s**
 
 Before BUG-009 that window was always 5 s; it now follows `-t`, so a site whose
 printers never answer can set `-t 1` and get jobs that finish in ~1 s instead of
-~5 s. The **default is still 5 s**, which is 5 s more latency than 0.97 had on
-every bidirectional job.
-
-I did not change the default because shortening it risks dropping a genuinely
-late reply (the window exists precisely to catch one). If your printers answer
-immediately, `-t 1` already gives you the old latency; if you would rather the
-compiled-in default were 1 s, that is a one-token change (`IDLE_TIMEOUT_SEC`).
+~5 s. **Decision (2026-09-18): the default stays 5 s**, because the window exists
+precisely to catch a genuinely late reply and shortening it would risk dropping
+one. No code change; `-t` remains the knob for sites that want the shorter job
+time.
 
 ## U11 — `-v` exits; 0.97 printed the version and then ran the daemon
 

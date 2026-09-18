@@ -106,10 +106,12 @@ the residual caveats that this machine cannot prove.
   of its own and ignored `-t` entirely, so a client that opened a connection and
   then sent nothing held the daemon forever; since one job is served at a time,
   that stopped every other host from printing, and connecting needs no
-  authentication. `-t` now bounds unidirectional jobs too, but only when it is
-  passed explicitly: 0.97 never bounded them and the default of 5 s is shorter
-  than pauses real jobs make. A job is only closed when nothing is buffered, so
-  no byte already accepted from the network can be discarded.
+  authentication. The idle timer is now armed in both directions: 5 s by default,
+  settable with `-t`, disabled by `-t 0`. (An interim revision armed it only when
+  `-t` was given; by the operator's decision it is on by default, so the exposure
+  is closed without anyone having to know about it. A client that legitimately
+  pauses mid-job for longer than 5 s now needs `-t` raised.) A job is only closed
+  when nothing is buffered, so no byte already accepted can be discarded.
 * **BUG-009 · Medium · latency** — the post-EOF grace window that catches a late
   printer reply was hard-wired to 5 s and ignored `-t`, so every bidirectional job
   on a printer that never reports end-of-stream (any real parallel or USB printer)
@@ -151,6 +153,8 @@ No breaking change. Command line (`-f -i -b -d -v`, `[0-9]`, plus the opt-in
 messages are unchanged. Behaviour differs in exactly three situations, all of them
 previously unbounded or wrong: a lock/pid directory that used to abort startup is
 now created; a printer device that is missing no longer lets one accepted
-connection block the daemon; and an idle job is torn down when `-t` asks for it.
+connection block the daemon; and an idle job is now torn down after the idle
+timeout (5 s by default, `-t` to taste, `-t 0` for the old "never time out"
+behaviour) instead of holding the daemon forever.
 Memory footprint grows by one 256-byte stack frame in two cold paths plus two
 `struct timeval` in the unidirectional loop; no new allocation, no new dependency.

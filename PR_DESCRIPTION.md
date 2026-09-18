@@ -10,8 +10,9 @@ allocation, and **no change to documented behaviour** except where a missing
 directory used to make the daemon refuse to start.
 
 Across all three passes: **12** defects fixed (2 High, 5 Medium, 5 Low) plus 2 C89
-portability defects in the test sources. Open items needing your decision: **3**
-(new ones are U9–U11 in `UNRESOLVED.md`; U1–U8 are resolved).
+portability defects in the test sources. `UNRESOLVED.md` is down to **one** open
+item (U11, this fork's `-v` exiting); U1–U10 are resolved, U9 and U10 by the
+operator's decision.
 
 ## The fixes
 
@@ -67,10 +68,9 @@ code and start *timing* it.
 * **BUG-008 (High)** — a client that connects and sends nothing blocks the daemon
   forever. The unidirectional loop had no timeout and ignored `-t` completely;
   the daemon serves one job at a time and connecting is unauthenticated, so this
-  is a trivially triggerable denial of service. `-t` now applies there too, but
-  only when given explicitly (0.97 never bounded these jobs and the 5 s default is
-  shorter than pauses real jobs make), and only when nothing is buffered, so no
-  byte can be lost.
+  is a trivially triggerable denial of service. The idle timer is now armed in
+  both directions (5 s by default, `-t 0` disables), and a job is only closed when
+  nothing is buffered, so no byte can be lost.
 * **BUG-009 (Medium)** — every bidirectional job took ~5 s longer than 0.97. The
   post-EOF window that catches a late printer reply was hard-wired to 5 s and
   ignored `-t`; a real printer never reports end-of-stream, so the window was
@@ -145,12 +145,13 @@ in two cold paths, no new allocation, no new dependency.
 U1–U8 are resolved (device allowlist, `-u`/`-g`, printer opened before `accept()`,
 pid-file hardening, libwrap exercised, `-t`, musl/32-bit gates). Three remain:
 
-* **U9** — should the idle bound apply to unidirectional jobs *by default*? It is
-  opt-in today; the exposure it leaves is real but pre-existing, and the 5 s
-  default is too short to impose on jobs that work today.
-* **U10** — the bidirectional grace window still defaults to 5 s, which is 5 s
-  more latency than 0.97 had. `-t 1` already buys the old latency; changing the
-  compiled-in default is a one-token change.
+* **U9** — *resolved*: the idle timer is armed by default in both directions, so
+  the "one silent connection blocks the daemon" exposure is closed without the
+  operator having to know about `-t`. A client that legitimately pauses mid-job
+  for longer than 5 s now needs `-t` raised; no data can be lost either way.
+* **U10** — *resolved as "leave it"*: the bidirectional grace window keeps its 5 s
+  default, since the window exists to catch a genuinely late reply. `-t 1` is
+  there for sites whose printers answer immediately.
 * **U11** — this fork's `-v` exits after printing the version; upstream 0.97
   prints it and then serves lp0. Inherited, not introduced; listed for parity.
 

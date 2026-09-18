@@ -58,7 +58,8 @@ printer and is spoken to over TCP:
 | `transfer_1mb_sha256`, `transfer_10mb_sha256` | 1 MiB / 10 MiB payloads are byte-identical |
 | `inetd_one_job_serves_connection` | the (x)inetd path: a socket on descriptor 0 is served and the process exits 0 |
 | `uni_idle_timeout_option_closes` | `-t` bounds an idle *unidirectional* job (BUG-008) |
-| `uni_idle_no_timeout_by_default` | without `-t`, 0.97's "never time out" behaviour is kept (BUG-008) |
+| `uni_idle_default_timeout_applies` | without `-t`, the 5 s default bounds it (BUG-008, U9) |
+| `uni_idle_zero_keeps_connection` | `-t 0` disables that timer too (BUG-008, U9) |
 | `uni_idle_slow_client_survives` | activity refreshes that timer; no byte is lost (BUG-008) |
 | `bidir_grace_follows_idle_timeout` | `-t` bounds the post-EOF grace window (BUG-009) |
 | `numeric_id_out_of_range_rejected` | `-u 4294967296` is refused instead of truncating to root (BUG-010) |
