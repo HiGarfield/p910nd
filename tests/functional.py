@@ -1187,6 +1187,32 @@ def t_unknown_privilege_targets_rejected(binpath, tmpdir):
     record(name, True)
 
 
+def t_numeric_id_out_of_range_rejected(binpath, tmpdir):
+    """A numeric -u/-g that does not fit uid_t/gid_t must be refused."""
+    name = "numeric_id_out_of_range_rejected"
+    dev = os.path.join(tmpdir, "printer-biguid")
+    open(dev, "wb").close()
+    # 2^32 truncates to 0 in a 32-bit uid_t, i.e. "root": accepting it would
+    # silently turn "drop privileges" into "keep them".
+    for opt, what in (("-u", "unknown user"), ("-g", "unknown group")):
+        rc, out = _run_raw(binpath,
+                           ["-d", "-f", dev, opt, "4294967296", "0"],
+                           timeout=5.0)
+        if rc is None:
+            record(name, False, "'%s 4294967296' kept running (%s)"
+                   % (opt, out[:120]))
+            return
+        if rc == 0:
+            record(name, False, "'%s 4294967296' was accepted" % opt)
+            return
+        if what not in out:
+            record(name, False,
+                   "'%s 4294967296' rejected without a clear message: %r"
+                   % (opt, out[:160]))
+            return
+    record(name, True)
+
+
 def t_missing_printer_not_accepted_first(binpath, tmpdir):
     """A missing printer must not let a connection be accepted and then hang."""
     name = "missing_printer_not_accepted_first"
@@ -1412,6 +1438,7 @@ CASES = [
     t_pidfile_symlink_refused,
     t_privilege_drop,
     t_unknown_privilege_targets_rejected,
+    t_numeric_id_out_of_range_rejected,
     t_missing_printer_not_accepted_first,
     t_device_allowlist,
     t_default_build_still_accepts_any_device,

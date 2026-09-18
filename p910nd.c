@@ -753,7 +753,14 @@ static int resolve_user(const char *name, uid_t *uid, gid_t *gid)
 	}
 	errno = 0;
 	value = strtol(name, &endptr, 10);
-	if (errno == 0 && endptr != name && *endptr == '\0' && value >= 0)
+	/*
+	 * The round trip through uid_t rejects an id that does not fit: a cast
+	 * would silently truncate it, and truncating an id to 0 means "stay
+	 * root" -- the opposite of what -u asked for, and reported as a
+	 * successful drop.
+	 */
+	if (errno == 0 && endptr != name && *endptr == '\0' && value >= 0 &&
+		(long)(uid_t)value == value)
 	{
 		pw = getpwuid((uid_t)value);
 		if (pw != NULL)
@@ -785,7 +792,9 @@ static int resolve_group(const char *name, gid_t *gid)
 	}
 	errno = 0;
 	value = strtol(name, &endptr, 10);
-	if (errno == 0 && endptr != name && *endptr == '\0' && value >= 0)
+	/* Same round trip as resolve_user(): never truncate a gid silently. */
+	if (errno == 0 && endptr != name && *endptr == '\0' && value >= 0 &&
+		(long)(gid_t)value == value)
 	{
 		*gid = (gid_t)value;
 		return 0;
