@@ -451,10 +451,12 @@ static int open_printer(int lpnumber)
 	 */
 	if ((lp = open(device, bidir ? (O_RDWR | O_NONBLOCK) : (O_WRONLY | O_NONBLOCK))) == -1)
 	{
-		if (errno == EBUSY)
+		int save_errno = errno;
+		if (save_errno == EBUSY)
 			dolog(LOGOPTS, "%s: %m, will try opening later\n", device);
 		else
 			dolog(LOGOPTS, "%s: %m\n", device);
+		errno = save_errno;
 	}
 	return (lp);
 }
@@ -2443,7 +2445,8 @@ static void server(int lpnumber)
 			lp2 = open_printer(lpnumber);
 			if (lp2 >= 0 || errno != EBUSY)
 				break;
-			retry_sleep(1);
+			if (reopen_tries + 1 < 10)
+				retry_sleep(1);
 		}
 		if (lp2 >= 0)
 		{
