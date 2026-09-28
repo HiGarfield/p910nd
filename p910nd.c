@@ -2426,10 +2426,16 @@ static void server(int lpnumber)
 		 * about it.
 		 */
 		{
-			int lp2 = open_printer(lpnumber);
+			int lp2;
+			/*
+			 * Close the gate descriptor before re-opening so the driver
+			 * does not see a second simultaneous open() and return EBUSY.
+			 */
+			(void)close(lp);
+			lp = -1;
+			lp2 = open_printer(lpnumber);
 			if (lp2 >= 0)
 			{
-				(void)close(lp);
 				lp = lp2;
 			}
 			else
@@ -2437,7 +2443,6 @@ static void server(int lpnumber)
 				dolog(LOG_NOTICE,
 					  "printer unavailable after accept, dropping connection\n");
 				(void)close(fd);
-				(void)close(lp);
 				continue;
 			}
 		}
