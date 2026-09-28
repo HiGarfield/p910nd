@@ -2430,9 +2430,24 @@ static void server(int lpnumber)
 			/*
 			 * Close the gate descriptor before re-opening so the driver
 			 * does not see a second simultaneous open() and return EBUSY.
+			 *
+			 * Some USB/parallel drivers need a short moment after close()
+			 * before the device node is available again.  Retry with a
+			 * brief sleep when EBUSY is returned so a transient kernel
+			 * release delay does not cause the connection to be dropped.
 			 */
 			(void)close(lp);
-			lp2 = open_printer(lpnumber);
+			{
+				int reopen_tries;
+				lp2 = -1;
+				for (reopen_tries = 0; reopen_tries < 10; reopen_tries++)
+				{
+					lp2 = open_printer(lpnumber);
+					if (lp2 >= 0 || errno != EBUSY)
+						break;
+					retry_sleep(1);
+				}
+			}
 			if (lp2 >= 0)
 			{
 				lp = lp2;
