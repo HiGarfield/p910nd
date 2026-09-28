@@ -2312,6 +2312,8 @@ static void server(int lpnumber)
 	while (1)
 	{
 		char host[INET6_ADDRSTRLEN];
+		int lp2;
+		int reopen_tries;
 		clientlen = sizeof(client);
 		/*
 		 * SIGTERM/SIGINT set this flag; acting here rather than inside the
@@ -2425,40 +2427,34 @@ static void server(int lpnumber)
 		 * connection is dropped instead of shipping bytes to nowhere and lying
 		 * about it.
 		 */
+		/*
+		 * Close the gate descriptor before re-opening so the driver
+		 * does not see a second simultaneous open() and return EBUSY.
+		 *
+		 * Some USB/parallel drivers need a short moment after close()
+		 * before the device node is available again.  Retry with a
+		 * brief sleep when EBUSY is returned so a transient kernel
+		 * release delay does not cause the connection to be dropped.
+		 */
+		(void)close(lp);
+		lp2 = -1;
+		for (reopen_tries = 0; reopen_tries < 10; reopen_tries++)
 		{
-			int lp2;
-			/*
-			 * Close the gate descriptor before re-opening so the driver
-			 * does not see a second simultaneous open() and return EBUSY.
-			 *
-			 * Some USB/parallel drivers need a short moment after close()
-			 * before the device node is available again.  Retry with a
-			 * brief sleep when EBUSY is returned so a transient kernel
-			 * release delay does not cause the connection to be dropped.
-			 */
-			(void)close(lp);
-			{
-				int reopen_tries;
-				lp2 = -1;
-				for (reopen_tries = 0; reopen_tries < 10; reopen_tries++)
-				{
-					lp2 = open_printer(lpnumber);
-					if (lp2 >= 0 || errno != EBUSY)
-						break;
-					retry_sleep(1);
-				}
-			}
-			if (lp2 >= 0)
-			{
-				lp = lp2;
-			}
-			else
-			{
-				dolog(LOG_NOTICE,
-					  "printer unavailable after accept, dropping connection\n");
-				(void)close(fd);
-				continue;
-			}
+			lp2 = open_printer(lpnumber);
+			if (lp2 >= 0 || errno != EBUSY)
+				break;
+			retry_sleep(1);
+		}
+		if (lp2 >= 0)
+		{
+			lp = lp2;
+		}
+		else
+		{
+			dolog(LOG_NOTICE,
+				  "printer unavailable after accept, dropping connection\n");
+			(void)close(fd);
+			continue;
 		}
 
 		if (copy_stream_ex(fd, lp, &net_closed, &lp_closed) < 0)
