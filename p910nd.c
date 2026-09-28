@@ -2432,7 +2432,6 @@ static void server(int lpnumber)
 			 * does not see a second simultaneous open() and return EBUSY.
 			 */
 			(void)close(lp);
-			lp = -1;
 			lp2 = open_printer(lpnumber);
 			if (lp2 >= 0)
 			{
