@@ -466,7 +466,9 @@ void prepBuffer(Buffer_t * b, fd_set * readfds, fd_set * writefds)
 	if (b->outfd>=0 && (!(b->err & WRITE_ERR)) && (b->bytes != 0 || b->eof_read)) {
 		FD_SET(b->outfd, writefds);
 	}
-	if (b->infd>=0 && !b->eof_read && b->bytes < sizeof(b->buffer)) {
+	/* reading after a read error would spin on the same failing fd (C2) */
+	if (b->infd>=0 && !b->eof_read && !(b->err & READ_ERR) &&
+	    (size_t)b->bytes < sizeof(b->buffer)) {
 		FD_SET(b->infd, readfds);
 	}
 }
@@ -474,37 +476,46 @@ void prepBuffer(Buffer_t * b, fd_set * readfds, fd_set * writefds)
 /* Reads data into a buffer from its input file. */
 ssize_t readBuffer(Buffer_t * b)
 {
-	int avail;
+	size_t avail;
 	ssize_t result = 0;
-	/* If err, the data will not be written, so no need to store it. */
-	if (b->bytes == 0 || b->err) {
+	/* C1: only reset the ring when it is really empty.  Resetting it while
+	 * an error is pending left bytes inconsistent with the indices, so
+	 * writeBuffer() would emit stale or duplicated data. */
+	if (b->bytes == 0) {
 		/* The buffer is empty. */
 		b->startidx = b->endidx = 0;
 		avail = sizeof(b->buffer);
-	} else if (b->bytes == sizeof(b->buffer)) {
+	} else if ((size_t)b->bytes == sizeof(b->buffer)) {
 		/* The buffer is full. */
 		avail = 0;
 	} else if (b->endidx > b->startidx) {
 		/* The buffer is not wrapped: from endidx to end of buffer is free. */
-		avail = sizeof(b->buffer) - b->endidx;
+		avail = sizeof(b->buffer) - (size_t)b->endidx;
 	} else {
 		/* The buffer is wrapped: gap between endidx and startidx is free. */
-		avail = b->startidx - b->endidx;
+		avail = (size_t)(b->startidx - b->endidx);
 	}
 	if (avail) {
 		result = read(b->infd, b->buffer + b->endidx, avail);
 		if (result > 0) {
 			/* Some data was read. Update accordingly. */
-			b->endidx += result;
-			b->totalin += result;
-			b->bytes += result;
-			if (b->endidx == sizeof(b->buffer)) {
+			b->endidx += (int)result;
+			b->totalin += (uint64_t)result;
+			b->bytes += (int)result;
+			if ((size_t)b->endidx == sizeof(b->buffer)) {
 				/* Time to wrap the buffer. */
 				b->endidx = 0;
 			}
 		} else if (result < 0) {
-			dolog(LOGOPTS, "read: %m\n");
-			b->err |= READ_ERR;
+			int e = errno;
+			/* A3/C4: interrupted by a signal or nothing available right
+			 * now are not errors, the caller waits on select() again. */
+			if (e == EINTR || e == EAGAIN || e == EWOULDBLOCK)
+				result = 0;
+			else {
+				dolog(LOGOPTS, "read: %s\n", strerror(e));	/* D1: %m is a GNU extension */
+				b->err |= READ_ERR;
+			}
 		}
 		else if (b->detectEof) {
 			dolog(LOG_DEBUG, "read: eof\n");
@@ -519,30 +530,47 @@ ssize_t readBuffer(Buffer_t * b)
 /* Writes data from a buffer to the output file or discard if no output file is set. */
 ssize_t writeBuffer(Buffer_t * b)
 {
-	int avail;
+	size_t avail;
 	ssize_t result = 0;
 	if (b->bytes == 0 || (b->err & WRITE_ERR)) {
 		/* Buffer is empty. */
 		avail = 0;
+	} else if (b->endidx > b->startidx) {
+		/* Not wrapped: one contiguous run. */
+		avail = (size_t)(b->endidx - b->startidx);
 	} else {
-		avail = b->bytes;
+		/* Wrapped: only up to the end of the buffer is contiguous, the
+		 * rest is written on the next pass (C1: b->bytes would run past
+		 * the end of the ring). */
+		avail = sizeof(b->buffer) - (size_t)b->startidx;
 	}
 	if (avail) {
 		if (b->outfd>=0)
 			result = write(b->outfd, b->buffer + b->startidx, avail);
 		else
-			result = avail;
+			result = (ssize_t)avail;
 		if (result < 0) {
-			/* Mark the output file in an error condition. */
-			dolog(LOGOPTS, "write: %m\n");
-			b->err |= WRITE_ERR;
+			int e = errno;
+			/* A3/C4: interrupted or "try again later" are not errors. */
+			if (e == EINTR || e == EAGAIN || e == EWOULDBLOCK)
+				result = 0;
+			else if (e == EPIPE || e == ECONNRESET) {
+				/* A1: the peer is gone, not a reason to die or to
+				 * declare the whole job broken. */
+				dolog(LOG_DEBUG, "write: %s, peer closed\n", strerror(e));
+				b->err |= WRITE_ERR;
+			} else {
+				/* Mark the output file in an error condition. */
+				dolog(LOGOPTS, "write: %s\n", strerror(e));
+				b->err |= WRITE_ERR;
+			}
 		} else {
 			/* Zero or more bytes were written. */
-			b->startidx += result;
+			b->startidx += (int)result;
 			if (b->outfd>=0)
-				b->totalout += result;
-			b->bytes -= result;
-			if (b->startidx == sizeof(b->buffer)) {
+				b->totalout += (uint64_t)result;
+			b->bytes -= (int)result;
+			if ((size_t)b->startidx == sizeof(b->buffer)) {
 				/* Unwrap the buffer. */
 				b->startidx = 0;
 			}
@@ -555,6 +583,16 @@ ssize_t writeBuffer(Buffer_t * b)
 	
 	/* Return the write() result, -1 (error) or #bytes written. */
 	return result;
+}
+
+/* Best effort: write out whatever is still buffered before giving up, so an
+ * error never discards data that was already received (C2/C5). */
+static void flush_buffer(Buffer_t * b)
+{
+	while (b->bytes > 0 && !(b->err & WRITE_ERR)) {
+		if (writeBuffer(b) <= 0)
+			break;
+	}
 }
 
 /* Copy network data from file descriptor fd (network) to lp (printer) until EOS */
