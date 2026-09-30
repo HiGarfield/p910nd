@@ -16,6 +16,10 @@
  *	Port 9100+n will then be passively opened
  *	n defaults to 0
  *
+ *	Version 0.98
+ *	Bug fix release: no change to the command line or to the data streams.
+ *	See the "Bug fixes (0.98)" section of README.md for the list.
+ *
  *	Version 0.97
  *	Patches by Stefan Sichler.
  *	Stream to printer is only closed after EOF from network if 
@@ -110,6 +114,7 @@
 #include	<unistd.h>
 #include	<stdlib.h>
 #include	<stdio.h>
+#include	<stdint.h>	/* D8: byte counters must be 64 bit everywhere */
 #include	<getopt.h>
 #include	<ctype.h>
 #include	<string.h>
@@ -118,12 +123,14 @@
 #include	<syslog.h>
 #include	<errno.h>
 #include	<stdarg.h>
+#include	<signal.h>	/* A1/D9: SIGPIPE and clean shutdown */
 #include	<sys/types.h>
 #include	<sys/time.h>
 #include	<sys/resource.h>
 #include	<sys/stat.h>
 #include	<sys/socket.h>
 #include	<netinet/in.h>
+#include	<netinet/tcp.h>	/* B2: TCP_NODELAY and keepalive tuning */
 #include	<arpa/inet.h>
 
 #ifdef	USE_LIBWRAP
@@ -146,6 +153,19 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
 
 #define		BUFFER_SIZE	8192
 
+/* Idle timeout in seconds.  A job is abandoned when neither direction has
+ * moved data for this long, so a client that connects and never sends
+ * anything cannot wedge the single threaded daemon (B1) and a slow printer
+ * or a client waiting for status is not killed (B4/B5).  Only counts while
+ * both buffers are empty.  Override at build time: -DIDLE_TIMEOUT=60 */
+#ifndef		IDLE_TIMEOUT
+#define		IDLE_TIMEOUT	30
+#endif
+/* B3: upper bound on how long a transient printer open failure is retried. */
+#define		OPEN_PRINTER_MAX_WAIT	30
+/* B3: longest single sleep between two open attempts (exponential backoff). */
+#define		OPEN_PRINTER_MAX_SLEEP	10
+
 /* Circular buffer used for each direction. */
 typedef struct {
 	int detectEof;		/* If nonzero, EOF is marked when read returns 0 bytes. */
@@ -154,8 +174,8 @@ typedef struct {
 	int startidx;		/* Index of the start of valid data. */
 	int endidx;		/* Index of the end of valid data. */
 	int bytes;		/* The number of bytes currently buffered. */
-	int totalin;		/* Total bytes that have been read. */
-	int totalout;		/* Total bytes that have been written. */
+	uint64_t totalin;	/* Total bytes that have been read (D8: >2GB jobs). */
+	uint64_t totalout;	/* Total bytes that have been written. */
 	int eof_read;		/* Nonzero indicates the input file has reached EOF. */
 	int eof_sent;		/* Nonzero indicates the output file has fully received all data. */
 	int err;		/* Nonzero indicates an error detected on the output file. */
@@ -165,13 +185,16 @@ typedef struct {
 } Buffer_t;
 
 static char *progname;
-static char version[] = "Version 0.97";
+static char version[] = "Version 0.98";
 static char copyright[] = "Copyright (c) 2008-2014 Ken Yap and others, GPLv2";
 static int lockfd = -1;
 static char *device = 0;
 static int bidir = 0;
 static char *bindaddr = 0;
 static int log_to_stdout = 0;
+/* D9: remembered so the pid file can be removed when the daemon goes away. */
+static char pidfilename[sizeof(PIDFILE)];
+static int have_pidfile = 0;
 
 
 /* Helper function: convert a struct sockaddr address (IPv4 and IPv6) to a string */
@@ -272,8 +295,107 @@ int get_lock(int lpnumber)
 
 void free_lock(void)
 {
-	if (lockfd >= 0)
+	if (lockfd >= 0) {
 		(void)close(lockfd);
+		lockfd = -1;
+	}
+}
+
+/* D9: a stale pid file makes start scripts believe the daemon is running. */
+static void remove_pidfile(void)
+{
+	if (have_pidfile) {
+		(void)unlink(pidfilename);
+		have_pidfile = 0;
+	}
+}
+
+/* D9: shared by atexit() and the termination signal handler. */
+static void cleanup_and_exit(void)
+{
+	remove_pidfile();
+	free_lock();
+}
+
+/* D9: SIGTERM/SIGINT have to clean up instead of just dying. */
+static void terminate_handler(int sig)
+{
+	(void)sig;
+	cleanup_and_exit();
+	exit(0);	/* not _exit(): flush the -d log on the way out */
+}
+
+/* A1/D9: ignoring SIGPIPE keeps a vanished client from killing the daemon,
+ * the write simply fails with EPIPE which is handled as "peer is gone". */
+static void setup_signals(void)
+{
+	struct sigaction sa;
+
+	(void)signal(SIGPIPE, SIG_IGN);
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = terminate_handler;
+	(void)sigemptyset(&sa.sa_mask);
+	sa.sa_flags = 0;	/* no SA_RESTART: blocking calls must return EINTR (A3) */
+	(void)sigaction(SIGTERM, &sa, 0);
+	(void)sigaction(SIGINT, &sa, 0);
+}
+
+/* B1: bound every blocking socket operation, a client that connects and
+ * never sends (or never comes back) used to block the daemon forever.
+ * B2: keepalive detects half open connections (power loss, unplugged cable). */
+static void set_socket_options(int fd)
+{
+	int one = 1;
+	struct timeval tv;
+
+	tv.tv_sec = IDLE_TIMEOUT;
+	tv.tv_usec = 0;
+	(void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	(void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+	(void)setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
+#ifdef	TCP_NODELAY
+	/* status queries want their answer immediately */
+	(void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+#endif
+#ifdef	TCP_KEEPIDLE
+	{
+		int keepidle = 60;	/* probe after a minute of silence */
+		(void)setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle));
+#ifdef	TCP_KEEPINTVL
+		{
+			int keepintvl = 10;
+			(void)setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl));
+		}
+#endif
+#ifdef	TCP_KEEPCNT
+		{
+			int keepcnt = 6;
+			(void)setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt));
+		}
+#endif
+	}
+#endif
+}
+
+/* A4: rlim_max may be RLIM_INFINITY, which made the close loop in server()
+ * endless; rlim_cur is what the process can actually have open. */
+static long fd_limit(void)
+{
+	struct rlimit rl;
+	long n;
+
+	if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY)
+		n = (long)rl.rlim_cur;
+	else {
+		n = (long)sysconf(_SC_OPEN_MAX);
+		if (n < 0)
+			n = 256;	/* last resort */
+	}
+	/* A child right after fork() never has more than a handful of
+	 * descriptors; closing a million of them only delays startup. */
+	if (n > 4096)
+		n = 4096;
+	return n;
 }
 
 /* Initializes the buffer, at the start. */
