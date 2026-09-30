@@ -197,9 +197,17 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
 #ifndef		LOCK_WAIT
 #define		LOCK_WAIT		3
 #endif
-/* R7: how long a job waits for the printer before it is rejected (seconds). */
+/* R7: how long a job waits for the printer before it is rejected (seconds).
+ * T5: shortened to a few seconds so a contended printer fails the new job
+ * fast instead of letting a pile of children block for half a minute each. */
 #ifndef		JOB_LOCK_WAIT
-#define		JOB_LOCK_WAIT		30
+#define		JOB_LOCK_WAIT		3
+#endif
+/* T5: cap on simultaneously forked job children.  Beyond this, new
+ * connections are refused (backpressure) rather than forking a DoS army.
+ * Override with -DMAX_CHILDREN=n. */
+#ifndef		MAX_CHILDREN
+#define		MAX_CHILDREN		12
 #endif
 /* R9/T2: a client that connected but never sent a byte is released after
  * IDLE_TIMEOUT.  A client that has actually streamed data is a real job
@@ -263,7 +271,11 @@ static char lockname[sizeof(LOCKFILE)];
 static int lock_held = 0;
 /* R10: signal handlers only raise a flag, the main loop does the work. */
 static volatile sig_atomic_t got_term = 0;
-static volatile sig_atomic_t got_sigchld = 0;
+/* T5/T10a: number of forked job children still running.  The SIGCHLD handler
+ * reaps and decrements it; server() reads it to apply backpressure.  Replaces
+ * the dead got_sigchld variable. */
+static volatile sig_atomic_t inflight_children = 0;
+static pid_t child_pids[MAX_CHILDREN];
 
 
 /* Helper function: convert a struct sockaddr address (IPv4 and IPv6) to a string */
@@ -497,15 +509,26 @@ static void terminate_handler(int sig)
 	got_term = 1;
 }
 
-/* R7: reap forked job children, otherwise they pile up as zombies. */
+/* R7/T5/T10a: reap forked job children (otherwise they pile up as zombies)
+ * and keep the in-flight count and pid table in sync so server() can apply
+ * backpressure and reap on shutdown. */
 static void sigchld_handler(int sig)
 {
 	int saved_errno = errno;
+	pid_t pid;
+	int i;
 
 	(void)sig;
-	while (waitpid(-1, 0, WNOHANG) > 0)
-		;
-	got_sigchld = 1;
+	while ((pid = waitpid(-1, 0, WNOHANG)) > 0) {
+		for (i = 0; i < MAX_CHILDREN; i++) {
+			if (child_pids[i] == pid) {
+				child_pids[i] = 0;
+				if (inflight_children > 0)
+					inflight_children--;
+				break;
+			}
+		}
+	}
 	errno = saved_errno;
 }
 
@@ -1199,6 +1222,9 @@ void one_job(int lpnumber)
 	free_lock();
 }
 
+/* T10b: declared early because server() calls it on shutdown. */
+static void reap_children_and_exit(int status);
+
 void server(int lpnumber)
 {
 #ifdef	USE_GETPROTOBYNAME
@@ -1389,6 +1415,19 @@ void server(int lpnumber)
 		}
 		/*write(fd, "Printing", 8); */
 
+		/* T5: bound the number of in-flight children.  Past the limit we
+		 * refuse the connection (backpressure) rather than forking a
+		 * denial-of-service army that all block on the printer lock. */
+		if (inflight_children >= MAX_CHILDREN) {
+			dolog(LOG_NOTICE,
+			      "too many in-flight jobs (%d), refusing connection from %s port %hu\n",
+			      (int)inflight_children,
+			      get_ip_str((struct sockaddr *)&client, host, sizeof(host)),
+			      get_port((struct sockaddr *)&client));
+			(void)close(fd);
+			continue;
+		}
+
 		/* R7/R8/R9: one job per child.  A slow printer, a client that
 		 * never closes or a printer that has to be retried must not keep
 		 * the daemon from accepting the next connection; the printer
@@ -1412,11 +1451,46 @@ void server(int lpnumber)
 			_exit(0);
 		}
 		(void)close(fd);
+		/* T5: track the child so the SIGCHLD handler can reap it and the
+		 * shutdown path can signal it. */
+		if (inflight_children < MAX_CHILDREN)
+			child_pids[inflight_children] = pid;
+		inflight_children++;
 	}
 	(void)close(netfd);
+	reap_children_and_exit(terminating ? 0 : 1);
+}
+
+/* T10b: a daemon that exits must not leave printing children as orphans.
+ * init would adopt them and the init script may unmount the device mid-job.
+ * Signal every tracked child and wait a bounded time for them to finish. */
+static void reap_children_and_exit(int status)
+{
+	int i;
+	struct timeval start, now;
+
+	for (i = 0; i < MAX_CHILDREN; i++) {
+		if (child_pids[i] != 0)
+			(void)kill(child_pids[i], SIGTERM);
+	}
+	if (inflight_children > 0) {
+		dolog(LOG_NOTICE, "terminating, waiting for %d in-flight job(s)\n",
+		      (int)inflight_children);
+		gettimeofday(&start, 0);
+		while (inflight_children > 0) {
+			(void)waitpid(-1, 0, 0);
+			gettimeofday(&now, 0);
+			if (now.tv_sec - start.tv_sec >= 5)
+				break;
+		}
+		if (inflight_children > 0)
+			dolog(LOG_NOTICE,
+			      "%d job(s) still running, leaving them to finish\n",
+			      (int)inflight_children);
+	}
 	free_lock();
 	remove_pidfile();	/* D9 */
-	exit(terminating ? 0 : 1);
+	exit(status);
 }
 
 int is_standalone(void)
