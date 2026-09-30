@@ -1025,6 +1025,7 @@ int main(int argc, char *argv[])
 			progname = p + 1;
 	}
 	lpnumber = '0';
+	setup_signals();	/* A1/D9: before any socket or printer work */
 	while ((c = getopt(argc, argv, "bdi:f:v")) != EOF) {
 		switch (c) {
 		case 'b':
@@ -1041,6 +1042,7 @@ int main(int argc, char *argv[])
 			break;
 		case 'v':
 			show_version();
+			exit(0);	/* D5: -v must not start the daemon */
 			break;
 		default:
 			usage();
@@ -1061,8 +1063,10 @@ int main(int argc, char *argv[])
 	 * syslog ignored the LOG_PID and LOG_PERROR option.  I.e. the intention
 	 * was to add both options but the effect was to have neither.
 	 * I disagree with the intention to add PERROR.  --Stef  */
+	/* D6: p is NULL when the program name does not contain "p910n" */
 	if (!log_to_stdout)
-		openlog(p, LOG_PID, LOG_LPR);
+		openlog(p != NULL ? p : progname, LOG_PID, LOG_LPR);
+	(void)atexit(cleanup_and_exit);	/* D9: remove the pid file on any exit */
 
 	if (log_to_stdout || is_standalone())
 		server(lpnumber);
