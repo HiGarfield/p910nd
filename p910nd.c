@@ -806,25 +806,23 @@ void one_job(int lpnumber)
 
 void server(int lpnumber)
 {
-	struct rlimit resourcelimit;
 #ifdef	USE_GETPROTOBYNAME
 	struct protoent *proto;
 #endif
-	int netfd = -1, fd, lp, one = 1;
-	socklen_t clientlen;
-	struct sockaddr_storage client;
+	int netfd = -1, fd, one = 1;
+	int rc;
 	struct addrinfo hints, *res, *ressave;
-	char pidfilename[sizeof(PIDFILE)];
-	char service[sizeof(BASEPORT+lpnumber-'0')+1];
+	char service[16];	/* D7: sizeof(BASEPORT+...) was sizeof(int)+1 */
 	FILE *f;
 	const int bufsiz = 65536;
 
 #ifndef	TESTING
 	if (!log_to_stdout)
 	{
+		long maxfd;
 		switch (fork()) {
 		case -1:
-			dolog(LOGOPTS, "fork: %m\n");
+			dolog(LOGOPTS, "fork: %s\n", strerror(errno));
 			exit(1);
 		case 0:		/* child */
 			break;
@@ -832,29 +830,38 @@ void server(int lpnumber)
 			exit(0);
 		}
 		/* Now in child process */
-		resourcelimit.rlim_max = 0;
-		if (getrlimit(RLIMIT_NOFILE, &resourcelimit) < 0) {
-			dolog(LOGOPTS, "getrlimit: %m\n");
-			exit(1);
-		}
-		for (fd = 0; fd < resourcelimit.rlim_max; ++fd)
+		/* A4: rlim_max may be RLIM_INFINITY, never loop on that */
+		maxfd = fd_limit();
+		for (fd = 0; fd < maxfd; ++fd)
 			(void)close(fd);
 		if (setsid() < 0) {
-			dolog(LOGOPTS, "setsid: %m\n");
+			dolog(LOGOPTS, "setsid: %s\n", strerror(errno));
 			exit(1);
 		}
-		(void)chdir("/");
+		if (chdir("/") < 0) {
+			dolog(LOGOPTS, "chdir: %s\n", strerror(errno));
+			exit(1);
+		}
 		(void)umask(022);
 		fd = open("/dev/null", O_RDWR);	/* stdin */
-		(void)dup(fd);		/* stdout */
-		(void)dup(fd);		/* stderr */
+		if (fd < 0) {
+			dolog(LOGOPTS, "/dev/null: %s\n", strerror(errno));
+			exit(1);
+		}
+		if (dup2(fd, 0) < 0 || dup2(fd, 1) < 0 || dup2(fd, 2) < 0) {
+			dolog(LOGOPTS, "dup2: %s\n", strerror(errno));
+			exit(1);
+		}
+		if (fd > 2)
+			(void)close(fd);
 		(void)snprintf(pidfilename, sizeof(pidfilename), PIDFILE, lpnumber);
 		if ((f = fopen(pidfilename, "w")) == NULL) {
-			dolog(LOGOPTS, "%s: %m\n", pidfilename);
+			dolog(LOGOPTS, "%s: %s\n", pidfilename, strerror(errno));
 			exit(1);
 		}
 		(void)fprintf(f, "%d\n", getpid());
 		(void)fclose(f);
+		have_pidfile = 1;	/* D9: remember it for the exit handler */
 	}
 	if (get_lock(lpnumber) == 0)
 		exit(1);
@@ -863,9 +870,11 @@ void server(int lpnumber)
 	hints.ai_family = PF_UNSPEC;
 	hints.ai_flags = AI_PASSIVE;
 	hints.ai_socktype = SOCK_STREAM;
-	(void)snprintf(service, sizeof(service), "%hu", (BASEPORT + lpnumber - '0'));
-	if (getaddrinfo(bindaddr, service, &hints, &res) != 0) {
-		dolog(LOGOPTS, "getaddr: %m\n");
+	(void)snprintf(service, sizeof(service), "%hu", (unsigned short)(BASEPORT + lpnumber - '0'));
+	if ((rc = getaddrinfo(bindaddr, service, &hints, &res)) != 0) {
+		/* D1: getaddrinfo() does not set errno, use gai_strerror() */
+		dolog(LOGOPTS, "getaddrinfo %s port %s: %s\n",
+		      bindaddr ? bindaddr : "*", service, gai_strerror(rc));
 		exit(1);
 	}
 	ressave = res;
@@ -882,44 +891,74 @@ void server(int lpnumber)
 		if ((netfd = socket(res->ai_family, res->ai_socktype, IPPROTO_IP)) < 0)
 #endif
 		{
-			dolog(LOGOPTS, "socket: %m\n");
+			dolog(LOGOPTS, "socket: %s\n", strerror(errno));
 			close(netfd);
 			res = res->ai_next;
 			continue;
 		}
 		if (setsockopt(netfd, SOL_SOCKET, SO_RCVBUF, &bufsiz, sizeof(bufsiz)) < 0) {
-			dolog(LOGOPTS, "setsocketopt: SO_RCVBUF: %m\n");
+			dolog(LOGOPTS, "setsocketopt: SO_RCVBUF: %s\n", strerror(errno));
 			/* not fatal if it fails */
 		}
 		if (setsockopt(netfd, SOL_SOCKET, SO_SNDBUF, &bufsiz, sizeof(bufsiz)) < 0) {
-			dolog(LOGOPTS, "setsocketopt: SO_SNDBUF: %m\n");
+			dolog(LOGOPTS, "setsocketopt: SO_SNDBUF: %s\n", strerror(errno));
 			/* not fatal if it fails */
 		}
 		if (setsockopt(netfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) < 0) {
-			dolog(LOGOPTS, "setsocketopt: SO_REUSEADDR: %m\n");
+			dolog(LOGOPTS, "setsocketopt: SO_REUSEADDR: %s\n", strerror(errno));
 			close(netfd);
 			res = res->ai_next;
 			continue;
 		}
 		if (bind(netfd, res->ai_addr, res->ai_addrlen) < 0) {
-			dolog(LOGOPTS, "bind: %m\n");
+			dolog(LOGOPTS, "bind: %s\n", strerror(errno));
 			close(netfd);
 			res = res->ai_next;
 			continue;
 		}
 		if (listen(netfd, 30) < 0) {
-			dolog(LOGOPTS, "listen: %m\n");
+			dolog(LOGOPTS, "listen: %s\n", strerror(errno));
 			close(netfd);
 			res = res->ai_next;
 			continue;
 		}
 		break;
-	}
+		}
 	freeaddrinfo(ressave);
-	clientlen = sizeof(client);
-	memset(&client, 0, sizeof(client));
-	while ((fd = accept(netfd, (struct sockaddr *)&client, &clientlen)) >= 0) {
+	for (;;) {
+		struct sockaddr_storage client;
+		socklen_t clientlen;
 		char host[INET6_ADDRSTRLEN];
+		int lp;
+
+		/* D4: accept() truncates clientlen, it has to be reset every
+		 * time, otherwise a shorter address (IPv4 after IPv6) is cut off. */
+		memset(&client, 0, sizeof(client));
+		clientlen = sizeof(client);
+		fd = accept(netfd, (struct sockaddr *)&client, &clientlen);
+		if (fd < 0) {
+			int e = errno;
+			/* A3: a signal is not a reason to stop serving */
+			if (e == EINTR)
+				continue;
+			/* A2: only the connection or the resources failed, the
+			 * listening socket is still usable, so keep going. */
+			if (e == ECONNABORTED || e == EPROTO || e == EPERM) {
+				dolog(LOG_DEBUG, "accept: %s, connection aborted\n", strerror(e));
+				continue;
+			}
+			if (e == EMFILE || e == ENFILE || e == ENOBUFS || e == ENOMEM ||
+			    e == EAGAIN || e == EWOULDBLOCK) {
+				dolog(LOGOPTS, "accept: %s, out of resources, waiting\n", strerror(e));
+				(void)sleep(1);	/* brief backoff instead of a spin */
+				continue;
+			}
+			/* EBADF/ENOTSOCK/EINVAL: the listening socket is really gone */
+			dolog(LOGOPTS, "accept: %s\n", strerror(e));
+			break;
+		}
+		/* B1/B2: bound the socket and detect dead peers before the job starts */
+		set_socket_options(fd);
 #ifdef	USE_LIBWRAP
 		if (hosts_ctl("p910nd", STRING_UNKNOWN, get_ip_str((struct sockaddr *)&client, host, sizeof(host)), STRING_UNKNOWN) == 0) {
 			dolog(LOGOPTS,
@@ -932,16 +971,24 @@ void server(int lpnumber)
 		/*write(fd, "Printing", 8); */
 
 		/* Make sure lp device is open... */
-		while ((lp = open_printer(lpnumber)) == -1)
-			sleep(10);
+		/* B3: bounded backoff, a missing device must not stop the daemon */
+		if ((lp = open_printer_retry(lpnumber)) < 0) {
+			dolog(LOGOPTS, "cannot open printer, connection from %s port %hu closed\n",
+			      get_ip_str((struct sockaddr *)&client, host, sizeof(host)), get_port((struct sockaddr *)&client));
+			(void)close(fd);
+			continue;
+		}
 
+		/* D1: errno has no meaning here, name the client instead */
 		if (copy_stream(fd, lp) < 0)
-			dolog(LOGOPTS, "copy_stream: %m\n");
+			dolog(LOGOPTS, "job from %s port %hu failed\n",
+			      get_ip_str((struct sockaddr *)&client, host, sizeof(host)), get_port((struct sockaddr *)&client));
 		(void)close(fd);
 		(void)close(lp);
 	}
-	dolog(LOGOPTS, "accept: %m\n");
+	(void)close(netfd);
 	free_lock();
+	remove_pidfile();	/* D9 */
 	exit(1);
 }
 
