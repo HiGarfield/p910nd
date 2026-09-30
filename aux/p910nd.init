@@ -260,9 +260,18 @@ rc_reset
 case "$1" in
     start)
 	echo -n "Starting p910nd "
-	## Start daemon with startproc(8). If this fails
-	## the return value is set appropriately by startproc.
-	startproc $P910ND_BIN $P910ND_OPTS $P910ND_NUM
+	## Start the daemon.  startproc(8) is SUSE only and made "start"
+	## fail with command not found on LSB/RH/Debian systems, so probe
+	## for the available starter and fall back to a plain invocation
+	## (p910nd daemonizes itself unless -d is given).
+	if test -x /sbin/start_daemon; then
+		start_daemon $P910ND_BIN $P910ND_OPTS $P910ND_NUM
+	elif test -x /sbin/start-stop-daemon; then
+		start-stop-daemon --start --quiet --exec $P910ND_BIN \
+			-- $P910ND_OPTS $P910ND_NUM
+	else
+		$P910ND_BIN $P910ND_OPTS $P910ND_NUM
+	fi
 
 	# Remember status and be verbose
 	rc_status -v
@@ -273,6 +282,10 @@ case "$1" in
 	## killproc sets the return value according to LSB.
 
 	killproc -TERM $P910ND_BIN
+
+	## Remove a leftover pid file, otherwise monitoring and the next
+	## start believe the daemon is still running.
+	rm -f /var/run/p910[0-9]d.pid
 
 	# Remember status and be verbose
 	rc_status -v
