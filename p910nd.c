@@ -195,6 +195,13 @@ static int log_to_stdout = 0;
 /* D9: remembered so the pid file can be removed when the daemon goes away. */
 static char pidfilename[sizeof(PIDFILE)];
 static int have_pidfile = 0;
+/* R11: the lock file name and whether this process owns the lock, so the
+ * file is only unlinked by its owner and never from under a running peer. */
+static char lockname[sizeof(LOCKFILE)];
+static int lock_held = 0;
+/* R10: signal handlers only raise a flag, the main loop does the work. */
+static volatile sig_atomic_t got_term = 0;
+static volatile sig_atomic_t got_sigchld = 0;
 
 
 /* Helper function: convert a struct sockaddr address (IPv4 and IPv6) to a string */
