@@ -1008,7 +1008,7 @@ int is_standalone(void)
 	if (getsockname(0, (struct sockaddr *)&bind_addr, &ba_len) == 0)
 		return (0);	/* under (x)inetd */
 	if (errno != ENOTSOCK)	/* strange... */
-		dolog(LOGOPTS, "getsockname: %m\n");
+		dolog(LOGOPTS, "getsockname: %s\n", strerror(errno));
 	return (1);
 }
 
