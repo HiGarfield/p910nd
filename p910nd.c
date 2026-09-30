@@ -782,6 +782,9 @@ void one_job(int lpnumber)
 	struct sockaddr_storage client;
 	socklen_t clientlen = sizeof(client);
 
+	/* B1/B2: fd 0 is the socket handed over by (x)inetd */
+	set_socket_options(0);
+	memset(&client, 0, sizeof(client));
 	if (getpeername(0, (struct sockaddr *)&client, &clientlen) >= 0) {
 		char host[INET6_ADDRSTRLEN];
 		dolog(LOG_NOTICE, "Connection from %s port %hu\n", get_ip_str((struct sockaddr *)&client, host, sizeof(host)), get_port((struct sockaddr *)&client));
@@ -789,10 +792,14 @@ void one_job(int lpnumber)
 	if (get_lock(lpnumber) == 0)
 		return;
 	/* Make sure lp device is open... */
-	while ((lp = open_printer(lpnumber)) == -1)
-		sleep(10);
+	/* B3: bounded backoff instead of sleeping forever on a missing device */
+	if ((lp = open_printer_retry(lpnumber)) < 0) {
+		dolog(LOGOPTS, "cannot open printer, giving up\n");
+		free_lock();
+		return;
+	}
 	if (copy_stream(0, lp) < 0)
-		dolog(LOGOPTS, "copy_stream: %m\n");
+		dolog(LOGOPTS, "copy_stream failed\n");	/* D1: errno is meaningless here */
 	close(lp);
 	free_lock();
 }
