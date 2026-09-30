@@ -846,6 +846,15 @@ int copy_stream(int fd, int lp)
 {
 	int result;
 	Buffer_t networkToPrinterBuffer;
+
+	/* T8: select() with an fd >= FD_SETSIZE writes past the end of the
+	 * fd_set, which is undefined behaviour (random corruption / crash).
+	 * A long-running daemon can reach high descriptor numbers, so refuse
+	 * the job instead of risking it. */
+	if (fd < 0 || lp < 0 || fd >= FD_SETSIZE || lp >= FD_SETSIZE) {
+		dolog(LOG_ERR, "T8: descriptor(s) %d/%d out of select() range, refusing job\n", fd, lp);
+		return (-1);
+	}
 	initBuffer(&networkToPrinterBuffer, fd, lp, 1);
 
 	if (bidir) {
@@ -1326,6 +1335,13 @@ void server(int lpnumber)
 		}
 #endif
 		dolog(LOG_NOTICE, "Connection from %s port %hu accepted\n", get_ip_str((struct sockaddr *)&client, host, sizeof(host)), get_port((struct sockaddr *)&client));
+		/* T8: an fd at or past FD_SETSIZE would overflow the fd_set that
+		 * copy_stream() builds for select(), so reject it here. */
+		if (fd >= FD_SETSIZE) {
+			dolog(LOG_ERR, "T8: descriptor %d out of select() range, refusing connection\n", fd);
+			(void)close(fd);
+			continue;
+		}
 		/*write(fd, "Printing", 8); */
 
 		/* R7/R8/R9: one job per child.  A slow printer, a client that
