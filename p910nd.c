@@ -199,10 +199,14 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
 #ifndef		JOB_LOCK_WAIT
 #define		JOB_LOCK_WAIT		30
 #endif
-/* R9: a client that has sent data but never closes is released after this
- * many silent seconds (unidirectional, where no answer is expected). */
+/* R9/T2: a client that connected but never sent a byte is released after
+ * IDLE_TIMEOUT.  A client that has actually streamed data is a real job
+ * that may legitimately pause (CUPS building pages, slow link, congestion),
+ * so it is only abandoned after SILENT_TIMEOUT of no progress, which must be
+ * long enough not to truncate such jobs.  Default raised from 10s to 30s
+ * (override with -DSILENT_TIMEOUT=n). */
 #ifndef		SILENT_TIMEOUT
-#define		SILENT_TIMEOUT		10
+#define		SILENT_TIMEOUT		30
 #endif
 /* R6: consecutive zero byte reads from the printer before its direction is
  * treated as finished, so an EOF device cannot spin the CPU. */
@@ -1093,14 +1097,26 @@ int copy_stream(int fd, int lp)
 				networkToPrinterBuffer.err |= WRITE_ERR;	/* job not delivered */
 				break;
 			}
-			/* R3/R9: only count idle time with an empty buffer, and never
+			/* R3/R9/T2: only count idle time with an empty buffer, and never
 			 * after the client half closed and we are draining.  A client
-			 * that already sent something is released much sooner than a
-			 * connection that never sent a byte. */
+			 * that never sent a byte is a probe and gets the short
+			 * IDLE_TIMEOUT; one that has streamed real data is abandoned
+			 * only after SILENT_TIMEOUT of no progress, so a pause in the
+			 * middle of a job is not mistaken for a dead client. */
 			if (!networkToPrinterBuffer.eof_read && networkToPrinterBuffer.bytes == 0) {
-				long limit = (networkToPrinterBuffer.totalin > 0) ? SILENT_TIMEOUT : IDLE_TIMEOUT;
+				long limit = (networkToPrinterBuffer.totalin == 0) ? IDLE_TIMEOUT : SILENT_TIMEOUT;
 				if (now.tv_sec - last_activity.tv_sec >= limit) {
-					dolog(LOG_NOTICE,"no data transferred for %ld seconds, stop copy stream\n", limit);
+					if (networkToPrinterBuffer.totalout < networkToPrinterBuffer.totalin) {
+						dolog(LOG_ERR,
+						      "no data for %ld seconds, job incomplete: %llu/%llu bytes sent to printer\n",
+						      limit,
+						      (unsigned long long)networkToPrinterBuffer.totalout,
+						      (unsigned long long)networkToPrinterBuffer.totalin);
+						networkToPrinterBuffer.err |= WRITE_ERR;
+					} else {
+						dolog(LOG_NOTICE,
+						      "no data transferred for %ld seconds, stop copy stream\n", limit);
+					}
 					break;
 				}
 			}
