@@ -24,10 +24,17 @@ of all interfaces which is the default.
 .LP
 The \fB-b\fR option turns on bidirectional copying.
 .LP
-The \fB-v\fR option shows the version number.
+The \fB-v\fR option shows the version number and exits.
 .LP
 The \fB-d\fR option causes the daemon to run in the foreground in
 standalone mode and prints log messages to stdout for debugging.
+.LP
+A connection on which no data has moved in either direction for
+30 seconds (change with \fB-DIDLE_TIMEOUT=n\fR at build time) is closed,
+so a client that connects and never sends anything cannot block the
+daemon.  The printer device is only retried for transient errors, with
+a bounded backoff; if it cannot be opened the connection is closed and
+the daemon keeps listening.
 .SH INSTALLATION
 .I p910nd
 can be run as a standalone daemon or from (x)inetd.
@@ -83,14 +90,25 @@ and /etc/hosts.deny. The service name is p910nd.
 .SH DIAGNOSTICS
 .I p910nd
 logs error messages to syslog.
+Error messages use
+.IR strerror (3),
+they never contain the glibc specific \fB%m\fR conversion.
+.SH SIGNALS
+.I p910nd
+ignores SIGPIPE, so a client that disappears does not kill the daemon.
+On SIGTERM and SIGINT it removes its pid file and releases the printer
+lock before exiting.
 .SH "SEE ALSO"
 printcap(5), hosts_access(5)
 .SH FILES
 /var/run/p9100d.pid, /var/lock/subsys/p9100d, /etc/hosts.allow, /etc/hosts.deny
+.LP
+The pid file is removed when the daemon exits normally or on
+SIGTERM/SIGINT.
 .SH COPYRIGHT
 .I p910nd
 is under the GNU Public License Version 2
 .SH AUTHOR
 Ken Yap https://github.com/kenyapcomau/p910nd
 .SH DATE
-Version 0.97 January 2014
+Version 0.98
