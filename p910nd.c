@@ -326,14 +326,14 @@ int get_lock(int lpnumber)
 
 	(void)snprintf(lockname, sizeof(lockname), LOCKFILE, lpnumber);
 	if ((lockfd = open(lockname, O_CREAT | O_RDWR, 0666)) < 0) {
-		dolog(LOGOPTS, "%s: %m\n", lockname);
+		dolog(LOGOPTS, "%s: %s\n", lockname, strerror(errno));	/* D1 */
 		return (0);
 	}
 	memset(&lplock, 0, sizeof(lplock));
 	lplock.l_type = F_WRLCK;
 	lplock.l_pid = getpid();
 	if (fcntl(lockfd, F_SETLKW, &lplock) < 0) {
-		dolog(LOGOPTS, "%s: %m\n", lockname);
+		dolog(LOGOPTS, "%s: %s\n", lockname, strerror(errno));	/* D1 */
 		return (0);
 	}
 	return (1);
