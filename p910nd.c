@@ -949,7 +949,7 @@ int copy_stream(int fd, int lp)
 					/* R6: the printer keeps answering with 0 bytes,
 					 * stop polling it or the loop burns all CPU. */
 					printerToNetworkBuffer.eof_read = 1;
-					dolog(LOG_DEBUG, "printer sent no data, stop reading from printer\n");
+					dolog(LOG_INFO, "printer sent no data, stop reading from printer\n");
 				}
 			}
 			if (FD_ISSET(lp, &writefds)) {
@@ -972,7 +972,7 @@ int copy_stream(int fd, int lp)
 					printerToNetworkBuffer.outfd = -1;
 					printerToNetworkBuffer.err = 0;
 					result = 0;
-					dolog(LOG_DEBUG,"network write error, discarding further printer data\n");	/* D10 */
+					dolog(LOG_INFO,"network write error, discarding further printer data\n");	/* D10 */
 				}
 				else if (result > 0) {
 					if (printerToNetworkBuffer.outfd == -1)
