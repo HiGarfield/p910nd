@@ -404,12 +404,25 @@ static void cleanup_and_exit(void)
 	free_lock();
 }
 
-/* D9: SIGTERM/SIGINT have to clean up instead of just dying. */
+/* R10: a signal handler must only set a flag.  Calling exit() from the
+ * handler could re-enter stdio or the allocator while they were interrupted,
+ * so the main loop does the cleanup in the normal control flow. */
 static void terminate_handler(int sig)
 {
 	(void)sig;
-	cleanup_and_exit();
-	exit(0);	/* not _exit(): flush the -d log on the way out */
+	got_term = 1;
+}
+
+/* R7: reap forked job children, otherwise they pile up as zombies. */
+static void sigchld_handler(int sig)
+{
+	int saved_errno = errno;
+
+	(void)sig;
+	while (waitpid(-1, 0, WNOHANG) > 0)
+		;
+	got_sigchld = 1;
+	errno = saved_errno;
 }
 
 /* A1/D9: ignoring SIGPIPE keeps a vanished client from killing the daemon,
@@ -419,12 +432,18 @@ static void setup_signals(void)
 	struct sigaction sa;
 
 	(void)signal(SIGPIPE, SIG_IGN);
+	(void)signal(SIGHUP, SIG_IGN);	/* R10: don't die when the terminal goes */
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_handler = terminate_handler;
 	(void)sigemptyset(&sa.sa_mask);
 	sa.sa_flags = 0;	/* no SA_RESTART: blocking calls must return EINTR (A3) */
 	(void)sigaction(SIGTERM, &sa, 0);
 	(void)sigaction(SIGINT, &sa, 0);
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = sigchld_handler;
+	(void)sigemptyset(&sa.sa_mask);
+	sa.sa_flags = 0;
+	(void)sigaction(SIGCHLD, &sa, 0);
 }
 
 /* B1: bound every blocking socket operation, a client that connects and
@@ -885,6 +904,7 @@ void server(int lpnumber)
 #endif
 	int netfd = -1, fd, one = 1;
 	int rc;
+	int terminating = 0;
 	struct addrinfo hints, *res, *ressave;
 	char service[16];	/* D7: sizeof(BASEPORT+...) was sizeof(int)+1 */
 	FILE *f;
@@ -1003,7 +1023,14 @@ void server(int lpnumber)
 		struct sockaddr_storage client;
 		socklen_t clientlen;
 		char host[INET6_ADDRSTRLEN];
-		int lp;
+		pid_t pid;
+
+		/* R10: the signal handler only raised a flag, exit cleanly here */
+		if (got_term) {
+			dolog(LOG_NOTICE, "terminating on signal\n");
+			terminating = 1;
+			break;
+		}
 
 		/* D4: accept() truncates clientlen, it has to be reset every
 		 * time, otherwise a shorter address (IPv4 after IPv6) is cut off. */
