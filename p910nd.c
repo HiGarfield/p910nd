@@ -599,7 +599,6 @@ static void flush_buffer(Buffer_t * b)
 /* If bidir, also copy data from printer (lp) to network (fd). */
 int copy_stream(int fd, int lp)
 {
-	int need_clear_lp = 0;
 	int result;
 	Buffer_t networkToPrinterBuffer;
 	initBuffer(&networkToPrinterBuffer, fd, lp, 1);
@@ -608,22 +607,25 @@ int copy_stream(int fd, int lp)
 		struct timeval now;
 		struct timeval then;
 		struct timeval timeout;
-		struct timeval last_read_time;
+		struct timeval last_activity;
 		int timer = 0;
 		Buffer_t printerToNetworkBuffer;
 		initBuffer(&printerToNetworkBuffer, lp, fd, 0);
 		fd_set readfds;
 		fd_set writefds;
-		gettimeofday(&last_read_time, 0);
+		gettimeofday(&last_activity, 0);
 		/* Finish when network sent EOF. */
 		/* Although the printer to network stream may not be finished (does this matter?) */
 		while (!networkToPrinterBuffer.eof_sent && !(networkToPrinterBuffer.err & WRITE_ERR) && !(printerToNetworkBuffer.err & WRITE_ERR)) {
+			int maxfd = lp > fd ? lp : fd;
+			/* C2: a read error only ends the job once the buffer is drained. */
+			if ((networkToPrinterBuffer.err & READ_ERR) && networkToPrinterBuffer.bytes == 0)
+				break;
 			FD_ZERO(&readfds);
 			FD_ZERO(&writefds);
 			prepBuffer(&networkToPrinterBuffer, &readfds, &writefds);
 			prepBuffer(&printerToNetworkBuffer, &readfds, &writefds);
 
-			int maxfd = lp > fd ? lp : fd;
 			if (timer) {
 				/* Delay after reading from the printer, so the */
 				/* return stream cannot dominate. */
@@ -638,25 +640,26 @@ int copy_stream(int fd, int lp)
 			timeout.tv_sec = 0;
 			timeout.tv_usec = 100000;
 			result = select(maxfd + 1, &readfds, &writefds, 0, &timeout);
-			if (result < 0)
-				return (result);
+			if (result < 0) {
+				if (errno == EINTR)	/* A3: interrupted by a signal */
+					continue;
+				dolog(LOGOPTS, "select: %s\n", strerror(errno));
+				break;
+			}
 			if (FD_ISSET(fd, &readfds)) {
 				/* Read network data. */
-				result = readBuffer(&networkToPrinterBuffer);
+				result = (int)readBuffer(&networkToPrinterBuffer);
 				if (result > 0) {
 					dolog(LOG_DEBUG,"%d.%d: read %d bytes from network\n", (int)now.tv_sec, (int)now.tv_usec, result);
-					gettimeofday(&last_read_time, 0);
+					gettimeofday(&last_activity, 0);
 				}
-			}
-			if (now.tv_sec - last_read_time.tv_sec >= 30) {
-				dolog(LOG_NOTICE,"read no data from network for 30s, stop copy stream\n");
-				break;
 			}
 			if (FD_ISSET(lp, &readfds)) {
 				/* Read printer data, but pace it more slowly. */
-				result = readBuffer(&printerToNetworkBuffer);
+				result = (int)readBuffer(&printerToNetworkBuffer);
 				if (result > 0) {
 					dolog(LOG_DEBUG,"%d.%d: read %d bytes from printer\n", (int)now.tv_sec, (int)now.tv_usec, result);
+					gettimeofday(&last_activity, 0);
 					gettimeofday(&then, 0);
 					// wait 100 msec before reading again.
 					then.tv_usec += 100000;
@@ -664,71 +667,111 @@ int copy_stream(int fd, int lp)
 						then.tv_usec -= 1000000;
 						then.tv_sec++;
 					}
-					if (!need_clear_lp) {
-						timer = 1;
-					}
+					/* C8: need_clear_lp was never set to 1, so the two
+					 * buffer clearing branches were unreachable. */
+					timer = 1;
 				}
 			}
 			if (FD_ISSET(lp, &writefds)) {
 				/* Write data to printer. */
-				result = writeBuffer(&networkToPrinterBuffer);
+				result = (int)writeBuffer(&networkToPrinterBuffer);
 				if (result > 0) {
-					if (need_clear_lp) {
-						need_clear_lp = 0;
-						printerToNetworkBuffer.startidx = 0;
-						printerToNetworkBuffer.endidx = 0;
-						printerToNetworkBuffer.bytes = 0;
-						printerToNetworkBuffer.totalin = 0;
-						printerToNetworkBuffer.totalout = 0;
-					}
 					dolog(LOG_DEBUG,"%d.%d: wrote %d bytes to printer\n", (int)now.tv_sec, (int)now.tv_usec, result);
+					gettimeofday(&last_activity, 0);
 				}
 			}
 			if (FD_ISSET(fd, &writefds) || printerToNetworkBuffer.outfd == -1) {
-				if (need_clear_lp) {
-					printerToNetworkBuffer.startidx = 0;
-					printerToNetworkBuffer.endidx = 0;
-					printerToNetworkBuffer.bytes = 0;
-					printerToNetworkBuffer.totalin = 0;
-					printerToNetworkBuffer.totalout = 0;
-					continue;
-				}
 				/* Write data to network. */
-				result = writeBuffer(&printerToNetworkBuffer);
+				result = (int)writeBuffer(&printerToNetworkBuffer);
 				/* If socket write error, discard further data from printer */
 				if (result < 0) {
+					/* C3: only the printer to network direction stops,
+					 * the job keeps going to the printer. */
 					printerToNetworkBuffer.outfd = -1;
 					printerToNetworkBuffer.err = 0;
 					result = 0;
-					dolog(LOG_DEBUG,"network write error, discarding further printer data\n",result);
-					break;
+					dolog(LOG_DEBUG,"network write error, discarding further printer data\n");	/* D10 */
 				}
 				else if (result > 0) {
 					if (printerToNetworkBuffer.outfd == -1)
 						dolog(LOG_DEBUG,"discarded %d bytes from printer\n",result);				
-					else
+					else {
 						dolog(LOG_DEBUG,"%d.%d: wrote %d bytes to network\n", (int)now.tv_sec, (int)now.tv_usec, result);
+						gettimeofday(&last_activity, 0);
+					}
 				}
 			}
-			if ((networkToPrinterBuffer.err & READ_ERR) && now.tv_sec - last_read_time.tv_sec >= 10) {
-				dolog(LOG_NOTICE,"read no data from network err, stop copy stream in 10s\n");
+			/* B4/B5: one idle timeout fed by both directions, so a large job
+			 * that is still printing, or a client waiting for the status
+			 * reply, is never cut short. */
+			gettimeofday(&now, 0);
+			if (now.tv_sec - last_activity.tv_sec >= IDLE_TIMEOUT) {
+				dolog(LOG_NOTICE,"no data transferred for %d seconds, stop copy stream\n", (int)IDLE_TIMEOUT);
 				break;
 			}
 		}
+		/* C5: deliver what was already received before giving up. */
+		flush_buffer(&networkToPrinterBuffer);
 		dolog(LOG_NOTICE,
-		       "Finished job: %d/%d bytes sent to printer, %d/%d bytes sent to network\n",
-		       networkToPrinterBuffer.totalout,networkToPrinterBuffer.totalin, printerToNetworkBuffer.totalout, printerToNetworkBuffer.totalin);
+		       "Finished job: %llu/%llu bytes sent to printer, %llu/%llu bytes sent to network\n",
+		       (unsigned long long)networkToPrinterBuffer.totalout,
+		       (unsigned long long)networkToPrinterBuffer.totalin,
+		       (unsigned long long)printerToNetworkBuffer.totalout,
+		       (unsigned long long)printerToNetworkBuffer.totalin);
+		/* C6: an error in either direction has to be reported. */
+		return ((networkToPrinterBuffer.err || printerToNetworkBuffer.err) ? -1 : 0);
 	} else {
-		/* Unidirectional: simply read from network, and write to printer. */
-		while (!networkToPrinterBuffer.eof_sent && !networkToPrinterBuffer.err) {
-			result = readBuffer(&networkToPrinterBuffer);
-			if (result > 0)
-				dolog(LOG_DEBUG,"read %d bytes from network\n",result);
-			result = writeBuffer(&networkToPrinterBuffer);
-			if (result > 0)
-				dolog(LOG_DEBUG,"wrote %d bytes to printer\n",result);
+		struct timeval now;
+		struct timeval timeout;
+		struct timeval last_activity;
+		fd_set readfds;
+		fd_set writefds;
+		int maxfd = lp > fd ? lp : fd;
+		gettimeofday(&last_activity, 0);
+		/* Unidirectional: simply read from network, and write to printer,
+		 * but driven by select() with a timeout, a blocking read() let one
+		 * silent client stop the daemon for everybody (B1). */
+		while (!networkToPrinterBuffer.eof_sent && !(networkToPrinterBuffer.err & WRITE_ERR)) {
+			/* C2: a read error only ends the job once the buffer is drained. */
+			if ((networkToPrinterBuffer.err & READ_ERR) && networkToPrinterBuffer.bytes == 0)
+				break;
+			FD_ZERO(&readfds);
+			FD_ZERO(&writefds);
+			prepBuffer(&networkToPrinterBuffer, &readfds, &writefds);
+			timeout.tv_sec = 1;	/* wake up regularly to check idle time */
+			timeout.tv_usec = 0;
+			result = select(maxfd + 1, &readfds, &writefds, 0, &timeout);
+			if (result < 0) {
+				if (errno == EINTR)	/* A3 */
+					continue;
+				dolog(LOGOPTS, "select: %s\n", strerror(errno));
+				break;
+			}
+			if (FD_ISSET(fd, &readfds)) {
+				result = (int)readBuffer(&networkToPrinterBuffer);
+				if (result > 0) {
+					dolog(LOG_DEBUG,"read %d bytes from network\n",result);
+					gettimeofday(&last_activity, 0);
+				}
+			}
+			if (FD_ISSET(lp, &writefds)) {
+				result = (int)writeBuffer(&networkToPrinterBuffer);
+				if (result > 0) {
+					dolog(LOG_DEBUG,"wrote %d bytes to printer\n",result);
+					gettimeofday(&last_activity, 0);
+				}
+			}
+			gettimeofday(&now, 0);
+			if (now.tv_sec - last_activity.tv_sec >= IDLE_TIMEOUT) {
+				dolog(LOG_NOTICE,"no data transferred for %d seconds, stop copy stream\n", (int)IDLE_TIMEOUT);
+				break;
+			}
 		}
-		dolog(LOG_NOTICE, "Finished job: %d/%d bytes sent to printer\n", networkToPrinterBuffer.totalout, networkToPrinterBuffer.totalin);
+		/* C2: don't throw away data received before the error. */
+		flush_buffer(&networkToPrinterBuffer);
+		dolog(LOG_NOTICE, "Finished job: %llu/%llu bytes sent to printer\n",
+		      (unsigned long long)networkToPrinterBuffer.totalout,
+		      (unsigned long long)networkToPrinterBuffer.totalin);
 	}
 	return (networkToPrinterBuffer.err?-1:0);
 }
