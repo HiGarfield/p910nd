@@ -181,10 +181,15 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
 #ifndef		PRINTER_DRAIN_TIMEOUT
 #define		PRINTER_DRAIN_TIMEOUT	5
 #endif
-/* R4/E7: after the client half closed the printer may still owe an answer,
- * wait this long for it (seconds, deliberately longer than IDLE_TIMEOUT). */
-#ifndef		PRINTER_REPLY_TIMEOUT
-#define		PRINTER_REPLY_TIMEOUT	120
+/* T1: once the client has half-closed and both buffers are drained, keep the
+ * connection only long enough for the printer's reply (status query answer)
+ * to drain.  Do NOT wait on the printer direction EOF: character devices such
+ * as /dev/lpX and usblp never signal EOF, so the old fixed 120s wait locked
+ * the connection and the byte-1 job lock for two minutes on every bi-di job.
+ * The window is measured from the last real printer->network movement, so a
+ * still-talking device is never cut off.  Override with -DPRINTER_REPLY_WINDOW. */
+#ifndef		PRINTER_REPLY_WINDOW
+#define		PRINTER_REPLY_WINDOW	10
 #endif
 /* R2: how long get_lock() waits for the printer lock before giving up. */
 #ifndef		LOCK_WAIT
@@ -863,8 +868,6 @@ int copy_stream(int fd, int lp)
 		struct timeval timeout;
 		struct timeval last_activity;
 		struct timeval last_print;
-		struct timeval eof_done;
-		int eof_done_set = 0;
 		int timer = 0;
 		int moved;
 		Buffer_t printerToNetworkBuffer;
@@ -873,7 +876,6 @@ int copy_stream(int fd, int lp)
 		fd_set writefds;
 		gettimeofday(&last_activity, 0);
 		gettimeofday(&last_print, 0);
-		gettimeofday(&eof_done, 0);
 		/* Finish when network sent EOF. */
 		/* The printer to network stream may however not be finished: the
 		 * answer to a status query arrives after the client half closed,
@@ -995,18 +997,27 @@ int copy_stream(int fd, int lp)
 				dolog(LOG_NOTICE,"no data transferred for %d seconds, stop copy stream\n", (int)IDLE_TIMEOUT);
 				break;
 			}
-			/* R4/E7: the job is out but the printer may still owe an
-			 * answer (status query).  Keep the connection alive until the
-			 * answer has been forwarded, the printer is done or the reply
-			 * timeout expires. */
-			if (networkToPrinterBuffer.eof_sent && printerToNetworkBuffer.bytes == 0) {
-				if (!eof_done_set) {
-					gettimeofday(&eof_done, 0);
-					eof_done_set = 1;
-				}
-				if (printerToNetworkBuffer.eof_read ||
-				    now.tv_sec - eof_done.tv_sec >= PRINTER_REPLY_TIMEOUT)
+			/* R4/E7/T1: the job is out but the printer may still owe an
+			 * answer (status query).  For a regular file eof_read marks a
+			 * real end, but character devices (/dev/lpX, usblp) never signal
+			 * EOF, so waiting on it pinned the connection for the full window.
+			 * Once the client has half-closed and both buffers are empty, give
+			 * up as soon as there has been no printer->network progress for
+			 * PRINTER_REPLY_WINDOW seconds, while still forwarding anything
+			 * that arrives (the buffers are non-empty while data flows). */
+			if (networkToPrinterBuffer.eof_sent &&
+			    networkToPrinterBuffer.bytes == 0 && printerToNetworkBuffer.bytes == 0) {
+				if (printerToNetworkBuffer.eof_read) {
+					dolog(LOG_INFO,
+					      "printer finished sending, bi-directional job complete\n");
 					break;
+				}
+				if (now.tv_sec - last_activity.tv_sec >= PRINTER_REPLY_WINDOW) {
+					dolog(LOG_NOTICE,
+					      "no printer reply for %d seconds, closing bi-directional job\n",
+					      (int)PRINTER_REPLY_WINDOW);
+					break;
+				}
 			}
 			/* R6: never poll with zero delay, an idle iteration always
 			 * costs at least this pause. */
