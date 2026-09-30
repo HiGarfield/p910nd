@@ -319,24 +319,59 @@ static int open_printer_retry(int lpnumber)
 	}
 }
 
+/* R2: F_SETLKW waited forever, so a second instance (and therefore
+ * "service p910nd restart") hung with no message at all.  Take the lock
+ * without blocking and retry for at most LOCK_WAIT seconds. */
+static int take_lock(int lockfd, off_t start, int wait_seconds, const char *busy_msg)
+{
+	struct flock lplock;
+	int waited_ms = 0;
+
+	memset(&lplock, 0, sizeof(lplock));
+	lplock.l_type = F_WRLCK;
+	lplock.l_whence = SEEK_SET;
+	lplock.l_start = start;
+	lplock.l_len = 1;
+	lplock.l_pid = getpid();
+	for (;;) {
+		if (fcntl(lockfd, F_SETLK, &lplock) == 0)
+			return (1);
+		if (errno != EACCES && errno != EAGAIN && errno != EINTR) {
+			dolog(LOGOPTS, "lock: %s\n", strerror(errno));	/* D1 */
+			return (0);
+		}
+		if (waited_ms >= wait_seconds * 1000) {
+			if (busy_msg != 0)
+				dolog(LOGOPTS, "%s\n", busy_msg);
+			return (0);
+		}
+		sleep_us(200000);	/* brief backoff, never an endless wait */
+		waited_ms += 200;
+	}
+}
+
 int get_lock(int lpnumber)
 {
-	char lockname[sizeof(LOCKFILE)];
-	struct flock lplock;
-
 	(void)snprintf(lockname, sizeof(lockname), LOCKFILE, lpnumber);
 	if ((lockfd = open(lockname, O_CREAT | O_RDWR, 0666)) < 0) {
 		dolog(LOGOPTS, "%s: %s\n", lockname, strerror(errno));	/* D1 */
 		return (0);
 	}
-	memset(&lplock, 0, sizeof(lplock));
-	lplock.l_type = F_WRLCK;
-	lplock.l_pid = getpid();
-	if (fcntl(lockfd, F_SETLKW, &lplock) < 0) {
-		dolog(LOGOPTS, "%s: %s\n", lockname, strerror(errno));	/* D1 */
+	if (take_lock(lockfd, 0, LOCK_WAIT,
+		      "another p910nd is already running for this printer") == 0)
 		return (0);
-	}
+	lock_held = 1;	/* R11: only the owner removes the lock file */
 	return (1);
+}
+
+/* R7: one printer, one writer.  The daemon holds the instance lock on byte 0
+ * for its whole lifetime, every job child contends for byte 1 of the same
+ * file, so jobs stay serialized although accepting no longer is. */
+static int lock_printer_job(void)
+{
+	if (lockfd < 0)
+		return (1);
+	return (take_lock(lockfd, 1, JOB_LOCK_WAIT, "printer is busy, job rejected"));
 }
 
 void free_lock(void)
@@ -344,6 +379,12 @@ void free_lock(void)
 	if (lockfd >= 0) {
 		(void)close(lockfd);
 		lockfd = -1;
+	}
+	/* R11: drop the lock file too, but only when this process owned the
+	 * lock, so a running instance never loses its lock file. */
+	if (lock_held) {
+		(void)unlink(lockname);
+		lock_held = 0;
 	}
 }
 
