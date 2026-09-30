@@ -597,7 +597,7 @@ void initBuffer(Buffer_t * b, int infd, int outfd, int detectEof)
 /* Sets the readfds and writefds (used by select) based on current buffer state. */
 void prepBuffer(Buffer_t * b, fd_set * readfds, fd_set * writefds)
 {
-	if (b->outfd>=0 && (!(b->err & WRITE_ERR)) && (b->bytes != 0 || b->eof_read)) {
+	if (b->outfd>=0 && (!(b->err & WRITE_ERR)) && (b->bytes != 0 || (b->eof_read && !b->eof_sent))) {
 		FD_SET(b->outfd, writefds);
 	}
 	/* reading after a read error would spin on the same failing fd (C2) */
@@ -716,7 +716,7 @@ ssize_t writeBuffer(Buffer_t * b)
 			}
 		}
 	}
-	else if (b->eof_read) {
+	else if (b->eof_read && !b->eof_sent) {
 		b->eof_sent = 1;
 		dolog(LOG_DEBUG, "write: eof\n");
 	}
