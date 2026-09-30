@@ -821,9 +821,38 @@ int copy_stream(int fd, int lp)
 	return (networkToPrinterBuffer.err?-1:0);
 }
 
-void one_job(int lpnumber)
+/* R7/R8: everything that can block lives here.  In standalone mode this runs
+ * in a forked child so the accept loop is never blocked, under (x)inetd it
+ * runs in the one and only process. */
+static void handle_connection(int fd, int lpnumber)
 {
 	int lp;
+
+	if (!lock_printer_job()) {
+		close_connection(fd);
+		return;
+	}
+	/* Make sure lp device is open... */
+	/* B3: bounded backoff instead of sleeping forever on a missing device */
+	if ((lp = open_printer_retry(lpnumber)) < 0) {
+		dolog(LOGOPTS, "cannot open printer, job abandoned\n");
+		close_connection(fd);
+		return;
+	}
+	/* D1: errno has no meaning here */
+	if (copy_stream(fd, lp) < 0)
+		dolog(LOGOPTS, "copy_stream failed\n");
+	else
+		/* R5: give the device a bounded chance to take the last write
+		 * before the stream is closed, otherwise the tail of the job can
+		 * be lost.  A failed job (stalled printer) is closed right away. */
+		wait_printer_idle(lp);
+	(void)close(lp);
+	close_connection(fd);	/* R4: FIN, not RST */
+}
+
+void one_job(int lpnumber)
+{
 	struct sockaddr_storage client;
 	socklen_t clientlen = sizeof(client);
 
