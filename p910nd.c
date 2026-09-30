@@ -695,6 +695,37 @@ static void wait_printer_idle(int lp)
 	      (int)PRINTER_DRAIN_TIMEOUT);
 }
 
+/* R4: closing a socket that still has unread data makes the kernel send RST,
+ * the client then sees ECONNRESET instead of a clean end of job and any
+ * status data still in flight is lost.  Send FIN first, then read what is
+ * left, bounded in time and volume. */
+static void close_connection(int fd)
+{
+	struct timeval start;
+	struct timeval now;
+	struct timeval tv;
+	char drain[4096];
+	size_t total = 0;
+	ssize_t n;
+
+	tv.tv_sec = 1;
+	tv.tv_usec = 0;
+	(void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	if (shutdown(fd, SHUT_WR) < 0 && errno != ENOTCONN)
+		dolog(LOG_DEBUG, "shutdown: %s\n", strerror(errno));
+	gettimeofday(&start, 0);
+	for (;;) {
+		gettimeofday(&now, 0);
+		if (now.tv_sec - start.tv_sec >= DRAIN_TIMEOUT || total >= DRAIN_MAX_BYTES)
+			break;
+		n = read(fd, drain, sizeof(drain));
+		if (n <= 0)
+			break;
+		total += (size_t)n;
+	}
+	(void)close(fd);
+}
+
 /* Copy network data from file descriptor fd (network) to lp (printer) until EOS */
 /* If bidir, also copy data from printer (lp) to network (fd). */
 int copy_stream(int fd, int lp)
