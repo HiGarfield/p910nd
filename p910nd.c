@@ -662,6 +662,39 @@ static void flush_buffer(Buffer_t * b)
 	}
 }
 
+/* R5: the 0.97 change log says the device stream may only be closed when the
+ * printer is no longer busy, otherwise the driver may drop the last write().
+ * Wait until the device can take data again, with a hard limit. */
+static void wait_printer_idle(int lp)
+{
+	struct timeval start;
+	struct timeval now;
+	int loops = PRINTER_DRAIN_TIMEOUT * 10;
+
+	gettimeofday(&start, 0);
+	while (loops-- > 0) {
+		fd_set writefds;
+		struct timeval tv;
+
+		FD_ZERO(&writefds);
+		FD_SET(lp, &writefds);
+		tv.tv_sec = 0;
+		tv.tv_usec = 100000;
+		if (select(lp + 1, 0, &writefds, 0, &tv) < 0) {
+			if (errno == EINTR)	/* A3 */
+				continue;
+			return;
+		}
+		if (FD_ISSET(lp, &writefds))
+			return;		/* room in the device: no longer busy */
+		gettimeofday(&now, 0);
+		if (now.tv_sec - start.tv_sec >= PRINTER_DRAIN_TIMEOUT)
+			break;
+	}
+	dolog(LOG_NOTICE, "printer still busy after %d seconds, closing anyway\n",
+	      (int)PRINTER_DRAIN_TIMEOUT);
+}
+
 /* Copy network data from file descriptor fd (network) to lp (printer) until EOS */
 /* If bidir, also copy data from printer (lp) to network (fd). */
 int copy_stream(int fd, int lp)
