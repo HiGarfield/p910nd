@@ -168,6 +168,54 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
 /* B3: longest single sleep between two open attempts (exponential backoff). */
 #define		OPEN_PRINTER_MAX_SLEEP	10
 
+/* R1: a printer that accepts no data for this long is considered stalled and
+ * the job is abandoned (seconds).  Override with -DPRINTER_STALL_TIMEOUT=n */
+#ifndef		PRINTER_STALL_TIMEOUT
+#define		PRINTER_STALL_TIMEOUT	60
+#endif
+/* R1: total budget for the final flush of a job (seconds). */
+#ifndef		PRINTER_FLUSH_TIMEOUT
+#define		PRINTER_FLUSH_TIMEOUT	10
+#endif
+/* R5: how long to wait for the device to go idle before closing it. */
+#ifndef		PRINTER_DRAIN_TIMEOUT
+#define		PRINTER_DRAIN_TIMEOUT	5
+#endif
+/* R4/E7: after the client half closed the printer may still owe an answer,
+ * wait this long for it (seconds, deliberately longer than IDLE_TIMEOUT). */
+#ifndef		PRINTER_REPLY_TIMEOUT
+#define		PRINTER_REPLY_TIMEOUT	120
+#endif
+/* R2: how long get_lock() waits for the printer lock before giving up. */
+#ifndef		LOCK_WAIT
+#define		LOCK_WAIT		3
+#endif
+/* R7: how long a job waits for the printer before it is rejected (seconds). */
+#ifndef		JOB_LOCK_WAIT
+#define		JOB_LOCK_WAIT		30
+#endif
+/* R9: a client that has sent data but never closes is released after this
+ * many silent seconds (unidirectional, where no answer is expected). */
+#ifndef		SILENT_TIMEOUT
+#define		SILENT_TIMEOUT		10
+#endif
+/* R6: consecutive zero byte reads from the printer before its direction is
+ * treated as finished, so an EOF device cannot spin the CPU. */
+#ifndef		PRINTER_EOF_ZERO_READS
+#define		PRINTER_EOF_ZERO_READS	20
+#endif
+/* R6: pause after an iteration that moved nothing (microseconds). */
+#ifndef		NO_PROGRESS_USLEEP
+#define		NO_PROGRESS_USLEEP	20000
+#endif
+/* R4: bounds for draining a socket so close() sends FIN instead of RST. */
+#ifndef		DRAIN_TIMEOUT
+#define		DRAIN_TIMEOUT		3
+#endif
+#ifndef		DRAIN_MAX_BYTES
+#define		DRAIN_MAX_BYTES	(256 * 1024)
+#endif
+
 /* Circular buffer used for each direction. */
 typedef struct {
 	int detectEof;		/* If nonzero, EOF is marked when read returns 0 bytes. */
@@ -299,7 +347,11 @@ int open_printer(int lpnumber)
 #endif
 	if (device == 0)
 		device = lpname;
-	if ((lp = open(device, bidir ? (O_RDWR|O_NONBLOCK) : O_WRONLY)) == -1) {
+	/* R1: never open the device blocking.  A blocking write() to a printer
+	 * that is out of paper, off line or simply full hangs forever, and
+	 * neither SO_SNDTIMEO nor the idle timeout can rescue the process
+	 * because it never gets back to select(). */
+	if ((lp = open(device, bidir ? (O_RDWR|O_NONBLOCK) : (O_WRONLY|O_NONBLOCK))) == -1) {
 		/* D2: save errno, dolog() may clobber it, and log one message only. */
 		e = errno;
 		open_printer_errno = e;
@@ -672,12 +724,44 @@ ssize_t writeBuffer(Buffer_t * b)
 }
 
 /* Best effort: write out whatever is still buffered before giving up, so an
- * error never discards data that was already received (C2/C5). */
-static void flush_buffer(Buffer_t * b)
+ * error never discards data that was already received (C2/C5).
+ * R1: bounded in time and safe on a non-blocking device - the old loop spun
+ * on a blocking write() and hung the daemon forever. */
+static void flush_buffer(Buffer_t * b, int timeout_secs)
 {
+	struct timeval start;
+	struct timeval now;
+
+	gettimeofday(&start, 0);
 	while (b->bytes > 0 && !(b->err & WRITE_ERR)) {
-		if (writeBuffer(b) <= 0)
+		if (writeBuffer(b) > 0) {
+			gettimeofday(&start, 0);	/* progress: keep going */
+			continue;
+		}
+		if (b->err & WRITE_ERR)
 			break;
+		if (b->outfd >= 0) {
+			fd_set writefds;
+			struct timeval tv;
+
+			FD_ZERO(&writefds);
+			FD_SET(b->outfd, &writefds);
+			tv.tv_sec = 0;
+			tv.tv_usec = 100000;
+			if (select(b->outfd + 1, 0, &writefds, 0, &tv) < 0) {
+				if (errno == EINTR)	/* A3 */
+					continue;
+				break;
+			}
+			if (!FD_ISSET(b->outfd, &writefds))
+				sleep_us(NO_PROGRESS_USLEEP);
+		}
+		gettimeofday(&now, 0);
+		if (now.tv_sec - start.tv_sec >= timeout_secs) {
+			dolog(LOG_NOTICE, "gave up flushing %d bytes after %d seconds\n",
+			      b->bytes, timeout_secs);
+			break;
+		}
 	}
 }
 
@@ -767,16 +851,25 @@ int copy_stream(int fd, int lp)
 		struct timeval then;
 		struct timeval timeout;
 		struct timeval last_activity;
+		struct timeval last_print;
+		struct timeval eof_done;
+		int eof_done_set = 0;
 		int timer = 0;
+		int moved;
 		Buffer_t printerToNetworkBuffer;
-		initBuffer(&printerToNetworkBuffer, lp, fd, 0);
+		initBuffer(&printerToNetworkBuffer, lp, fd, printer_is_regular(lp));
 		fd_set readfds;
 		fd_set writefds;
 		gettimeofday(&last_activity, 0);
+		gettimeofday(&last_print, 0);
+		gettimeofday(&eof_done, 0);
 		/* Finish when network sent EOF. */
-		/* Although the printer to network stream may not be finished (does this matter?) */
-		while (!networkToPrinterBuffer.eof_sent && !(networkToPrinterBuffer.err & WRITE_ERR) && !(printerToNetworkBuffer.err & WRITE_ERR)) {
+		/* The printer to network stream may however not be finished: the
+		 * answer to a status query arrives after the client half closed,
+		 * so the loop below waits for it. */
+		while (!(networkToPrinterBuffer.err & WRITE_ERR) && !(printerToNetworkBuffer.err & WRITE_ERR)) {
 			int maxfd = lp > fd ? lp : fd;
+			moved = 0;
 			/* C2: a read error only ends the job once the buffer is drained. */
 			if ((networkToPrinterBuffer.err & READ_ERR) && networkToPrinterBuffer.bytes == 0)
 				break;
@@ -955,6 +1048,7 @@ int copy_stream(int fd, int lp)
 			if (FD_ISSET(fd, &readfds)) {
 				result = (int)readBuffer(&networkToPrinterBuffer);
 				if (result > 0) {
+					moved = 1;
 					dolog(LOG_DEBUG,"read %d bytes from network\n",result);
 					gettimeofday(&last_activity, 0);
 				}
@@ -962,18 +1056,38 @@ int copy_stream(int fd, int lp)
 			if (FD_ISSET(lp, &writefds)) {
 				result = (int)writeBuffer(&networkToPrinterBuffer);
 				if (result > 0) {
+					moved = 1;
 					dolog(LOG_DEBUG,"wrote %d bytes to printer\n",result);
 					gettimeofday(&last_activity, 0);
+					gettimeofday(&last_print, 0);
 				}
 			}
 			gettimeofday(&now, 0);
-			if (now.tv_sec - last_activity.tv_sec >= IDLE_TIMEOUT) {
-				dolog(LOG_NOTICE,"no data transferred for %d seconds, stop copy stream\n", (int)IDLE_TIMEOUT);
+			/* R1: data is pending but the device takes none of it */
+			if (networkToPrinterBuffer.bytes == 0)
+				gettimeofday(&last_print, 0);
+			else if (now.tv_sec - last_print.tv_sec >= PRINTER_STALL_TIMEOUT) {
+				dolog(LOG_NOTICE,"printer accepted no data for %d seconds, stop copy stream\n", (int)PRINTER_STALL_TIMEOUT);
+				networkToPrinterBuffer.err |= WRITE_ERR;	/* job not delivered */
 				break;
 			}
+			/* R3/R9: only count idle time with an empty buffer, and never
+			 * after the client half closed and we are draining.  A client
+			 * that already sent something is released much sooner than a
+			 * connection that never sent a byte. */
+			if (!networkToPrinterBuffer.eof_read && networkToPrinterBuffer.bytes == 0) {
+				long limit = (networkToPrinterBuffer.totalin > 0) ? SILENT_TIMEOUT : IDLE_TIMEOUT;
+				if (now.tv_sec - last_activity.tv_sec >= limit) {
+					dolog(LOG_NOTICE,"no data transferred for %ld seconds, stop copy stream\n", limit);
+					break;
+				}
+			}
+			/* R6: never poll with zero delay */
+			if (!moved)
+				sleep_us(NO_PROGRESS_USLEEP);
 		}
 		/* C2: don't throw away data received before the error. */
-		flush_buffer(&networkToPrinterBuffer);
+		flush_buffer(&networkToPrinterBuffer, PRINTER_FLUSH_TIMEOUT);
 		dolog(LOG_NOTICE, "Finished job: %llu/%llu bytes sent to printer\n",
 		      (unsigned long long)networkToPrinterBuffer.totalout,
 		      (unsigned long long)networkToPrinterBuffer.totalin);
