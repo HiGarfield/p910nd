@@ -997,6 +997,15 @@ void server(int lpnumber)
 			res = res->ai_next;
 			continue;
 		}
+#ifdef	IPV6_V6ONLY
+		if (res->ai_family == AF_INET6) {
+			/* R12: with net.ipv6.bindv6only=1 an IPv6 wildcard socket
+			 * refuses IPv4 clients, so ask for dual stack explicitly. */
+			int v6only = 0;
+			if (setsockopt(netfd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only)) < 0)
+				dolog(LOG_DEBUG, "setsockopt: IPV6_V6ONLY: %s\n", strerror(errno));
+		}
+#endif
 		if (setsockopt(netfd, SOL_SOCKET, SO_RCVBUF, &bufsiz, sizeof(bufsiz)) < 0) {
 			dolog(LOGOPTS, "setsocketopt: SO_RCVBUF: %s\n", strerror(errno));
 			/* not fatal if it fails */
