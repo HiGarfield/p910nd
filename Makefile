@@ -14,7 +14,7 @@ CROSS =
 CC = $(CROSS)gcc
 STRIP = $(CROSS)strip
 
-CFLAGS += -O2  -Wall
+CFLAGS += -O2  -Wall -Wextra
 
 PROG = p910nd
 CONFIG = p910nd.conf
