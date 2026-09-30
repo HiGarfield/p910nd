@@ -472,16 +472,18 @@ static int lock_printer_job(void)
 
 void free_lock(void)
 {
+	/* T6: the lock file is intentionally NOT unlinked.  Unlinking it while
+	 * another instance holds a lock on the same inode would let a later
+	 * instance open a brand new inode and run concurrently, breaking mutual
+	 * exclusion (two processes writing one printer, interleaved output).
+	 * Keeping the file stable means every instance locks the same inode and
+	 * fcntl() serialises them correctly; a stale lock file is harmless
+	 * because the lock is released when the owning process exits. */
 	if (lockfd >= 0) {
 		(void)close(lockfd);
 		lockfd = -1;
 	}
-	/* R11: drop the lock file too, but only when this process owned the
-	 * lock, so a running instance never loses its lock file. */
-	if (lock_held) {
-		(void)unlink(lockname);
-		lock_held = 0;
-	}
+	lock_held = 0;
 }
 
 /* D9: a stale pid file makes start scripts believe the daemon is running. */
@@ -1180,8 +1182,21 @@ int copy_stream(int fd, int lp)
 static void handle_connection(int fd, int lpnumber)
 {
 	int lp;
+	struct sockaddr_storage client;
+	socklen_t clientlen = sizeof(client);
+	char host[INET6_ADDRSTRLEN];
 
+	host[0] = '\0';
+	if (getpeername(fd, (struct sockaddr *)&client, &clientlen) >= 0)
+		get_ip_str((struct sockaddr *)&client, host, sizeof(host));
 	if (!lock_printer_job()) {
+		/* T6/T10c: the printer was busy; log the rejection with the client
+		 * address.  We keep the clean FIN (R4) rather than an abrupt RST:
+		 * AppSocket has no application-layer acknowledgement, so a RST would
+		 * only risk discarding in-flight data while the client still believes
+		 * the job succeeded.  The LOG_ERR at least makes the rejection
+		 * visible; see the Third-round notes in README for the trade-off. */
+		dolog(LOG_ERR, "printer %c busy, job rejected from %s\n", lpnumber, host);
 		close_connection(fd);
 		return;
 	}
@@ -1208,16 +1223,24 @@ void one_job(int lpnumber)
 {
 	struct sockaddr_storage client;
 	socklen_t clientlen = sizeof(client);
+	char host[INET6_ADDRSTRLEN];
 
 	/* B1/B2: fd 0 is the socket handed over by (x)inetd */
 	set_socket_options(0);
+	host[0] = '\0';
 	memset(&client, 0, sizeof(client));
-	if (getpeername(0, (struct sockaddr *)&client, &clientlen) >= 0) {
-		char host[INET6_ADDRSTRLEN];
-		dolog(LOG_NOTICE, "Connection from %s port %hu\n", get_ip_str((struct sockaddr *)&client, host, sizeof(host)), get_port((struct sockaddr *)&client));
-	}
-	if (get_lock(lpnumber) == 0)
+	if (getpeername(0, (struct sockaddr *)&client, &clientlen) >= 0)
+		dolog(LOG_NOTICE, "Connection from %s port %hu\n",
+		      get_ip_str((struct sockaddr *)&client, host, sizeof(host)),
+		      get_port((struct sockaddr *)&client));
+	if (get_lock(lpnumber) == 0) {
+		/* T6/T10c: a silent return closed the connection with no trace.  Log
+		 * the failure with the client address so the operator can see why the
+		 * job was dropped. */
+		dolog(LOG_ERR, "printer %c: could not acquire instance lock, refusing connection from %s\n",
+		      lpnumber, host);
 		return;
+	}
 	handle_connection(0, lpnumber);
 	free_lock();
 }
