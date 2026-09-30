@@ -260,10 +260,16 @@ void dolog(int level, char* msg, ...)
 	va_end(argp);	
 }
 
+/* D2: errno of the last open attempt, saved because dolog() (vsyslog) may
+ * overwrite errno before the caller gets a chance to look at it (B3). */
+static int open_printer_errno = 0;
+
 int open_printer(int lpnumber)
 {
 	int lp;
-	char lpname[sizeof(PRINTERFILE)];
+	int e;
+	/* C7: static storage, the global device used to point into this frame. */
+	static char lpname[sizeof(PRINTERFILE)];
 
 #ifdef	TESTING
 	(void)snprintf(lpname, sizeof(lpname), "/dev/tty");
@@ -273,11 +279,44 @@ int open_printer(int lpnumber)
 	if (device == 0)
 		device = lpname;
 	if ((lp = open(device, bidir ? (O_RDWR|O_NONBLOCK) : O_WRONLY)) == -1) {
-		if (errno != EBUSY)
-			dolog(LOGOPTS, "%s: %m\n", device);
-		dolog(LOGOPTS, "%s: %m, will try opening later\n", device);
-	}
+		/* D2: save errno, dolog() may clobber it, and log one message only. */
+		e = errno;
+		open_printer_errno = e;
+		if (e == EBUSY)
+			dolog(LOGOPTS, "%s: %s, will try opening later\n", device, strerror(e));
+		else
+			dolog(LOGOPTS, "%s: %s\n", device, strerror(e));
+	} else
+		open_printer_errno = 0;
 	return (lp);
+}
+
+/* B3: a busy printer is worth retrying, a missing device node or a
+ * permission problem will never fix itself by waiting. */
+static int printer_open_is_temporary(int e)
+{
+	return (e == EBUSY || e == EAGAIN || e == EINTR ||
+		e == ENOMEM || e == ENFILE || e == EMFILE);
+}
+
+/* B3: bounded exponential backoff instead of "while (...) sleep(10);" which
+ * pinned the daemon (or the inetd instance) forever and stopped accepting. */
+static int open_printer_retry(int lpnumber)
+{
+	int lp;
+	int waited = 0;
+	int sleepfor = 1;
+
+	for (;;) {
+		if ((lp = open_printer(lpnumber)) >= 0)
+			return lp;
+		if (!printer_open_is_temporary(open_printer_errno) || waited >= OPEN_PRINTER_MAX_WAIT)
+			return -1;
+		(void)sleep((unsigned int)sleepfor);
+		waited += sleepfor;
+		if (sleepfor < OPEN_PRINTER_MAX_SLEEP)
+			sleepfor *= 2;
+	}
 }
 
 int get_lock(int lpnumber)
