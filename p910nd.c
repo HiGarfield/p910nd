@@ -1139,16 +1139,7 @@ void one_job(int lpnumber)
 	}
 	if (get_lock(lpnumber) == 0)
 		return;
-	/* Make sure lp device is open... */
-	/* B3: bounded backoff instead of sleeping forever on a missing device */
-	if ((lp = open_printer_retry(lpnumber)) < 0) {
-		dolog(LOGOPTS, "cannot open printer, giving up\n");
-		free_lock();
-		return;
-	}
-	if (copy_stream(0, lp) < 0)
-		dolog(LOGOPTS, "copy_stream failed\n");	/* D1: errno is meaningless here */
-	close(lp);
+	handle_connection(0, lpnumber);
 	free_lock();
 }
 
@@ -1335,26 +1326,34 @@ void server(int lpnumber)
 		dolog(LOG_NOTICE, "Connection from %s port %hu accepted\n", get_ip_str((struct sockaddr *)&client, host, sizeof(host)), get_port((struct sockaddr *)&client));
 		/*write(fd, "Printing", 8); */
 
-		/* Make sure lp device is open... */
-		/* B3: bounded backoff, a missing device must not stop the daemon */
-		if ((lp = open_printer_retry(lpnumber)) < 0) {
-			dolog(LOGOPTS, "cannot open printer, connection from %s port %hu closed\n",
-			      get_ip_str((struct sockaddr *)&client, host, sizeof(host)), get_port((struct sockaddr *)&client));
+		/* R7/R8/R9: one job per child.  A slow printer, a client that
+		 * never closes or a printer that has to be retried must not keep
+		 * the daemon from accepting the next connection; the printer
+		 * itself stays exclusive through the job lock. */
+		pid = fork();
+		if (pid < 0) {
+			dolog(LOGOPTS, "fork: %s\n", strerror(errno));
 			(void)close(fd);
 			continue;
 		}
-
-		/* D1: errno has no meaning here, name the client instead */
-		if (copy_stream(fd, lp) < 0)
-			dolog(LOGOPTS, "job from %s port %hu failed\n",
-			      get_ip_str((struct sockaddr *)&client, host, sizeof(host)), get_port((struct sockaddr *)&client));
+		if (pid == 0) {		/* child */
+			(void)close(netfd);
+			/* The child owns neither the pid file nor the lock file, but
+			 * it keeps lockfd: POSIX locks are per process, so it can
+			 * take the job lock through the inherited descriptor and
+			 * loses it automatically when it exits. */
+			have_pidfile = 0;
+			lock_held = 0;
+			handle_connection(fd, lpnumber);
+			(void)fflush(NULL);	/* keep -d output in order */
+			_exit(0);
+		}
 		(void)close(fd);
-		(void)close(lp);
 	}
 	(void)close(netfd);
 	free_lock();
 	remove_pidfile();	/* D9 */
-	exit(1);
+	exit(terminating ? 0 : 1);
 }
 
 int is_standalone(void)
