@@ -765,14 +765,18 @@ int copy_stream(int fd, int lp)
 		struct timeval now;
 		struct timeval timeout;
 		struct timeval last_activity;
+		struct timeval last_print;
 		fd_set readfds;
 		fd_set writefds;
 		int maxfd = lp > fd ? lp : fd;
+		int moved;
 		gettimeofday(&last_activity, 0);
+		gettimeofday(&last_print, 0);
 		/* Unidirectional: simply read from network, and write to printer,
 		 * but driven by select() with a timeout, a blocking read() let one
 		 * silent client stop the daemon for everybody (B1). */
 		while (!networkToPrinterBuffer.eof_sent && !(networkToPrinterBuffer.err & WRITE_ERR)) {
+			moved = 0;
 			/* C2: a read error only ends the job once the buffer is drained. */
 			if ((networkToPrinterBuffer.err & READ_ERR) && networkToPrinterBuffer.bytes == 0)
 				break;
