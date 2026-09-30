@@ -6,7 +6,7 @@ The repository at https://sourceforge.net/projects/p910nd/ is being phased out. 
 
 ## Version
 
-0.99
+1.0
 
 Note that this is the same version as the last released version from 2014. No features have been added, nor any bugs fixed from that version. Several distributions have packaged this software ready to use. If you are not a developer there is no advantage to cloning this repository. The move to Github is to facilitate any submission of bug fixes and contributions.
 
@@ -96,10 +96,123 @@ loop and exits cleanly (running `atexit()`/`cleanup_and_exit()`). `SIGHUP` is
 explicitly ignored.
 11. **R11 the lock file was left behind.** `free_lock()` only closed the fd,
 leaving `/var/lock/p9100d`. The owner now unlinks the lock file on exit
-(`lock_held` guards against removing another instance's file).
+(`lock_held` guards against removing another instance's file). **Note:** the
+third round (T6) removed that `unlink()` again — see below. The lock file is
+now kept for the process lifetime so its inode stays stable and mutual
+exclusion between instances (inetd mode) is preserved.
 12. **R12 dual-stack bind edge case.** With `net.ipv6.bindv6only=1` the IPv6
 wildcard socket rejected IPv4 clients. The socket is now explicitly put into
 dual-stack mode (`IPV6_V6ONLY=0`, `#ifdef` guarded).
+
+## Third round fixes (1.0)
+
+Third round of fixes. All changes are still confined to `p910nd.c`. New
+tunables (override with `-D` at build time): `PRINTER_REPLY_WINDOW` (10s, the
+bi-directional reply wait), `MAX_CHILDREN` (12, cap on simultaneously forked
+job children). Changed defaults: `SILENT_TIMEOUT` 10s -> 30s, `JOB_LOCK_WAIT`
+30s -> 3s, `PRINTER_STALL_TIMEOUT` 60s -> 30s. The action of the first two
+rounds is preserved (non-blocking I/O, `shutdown()`+drain before `close()`,
+`wait_printer_idle()`, fork-per-connection, `SIGCHLD` reaping, `IPV6_V6ONLY`,
+signal-only flags, lock-file ownership, `F_SETLK` with a bounded wait).
+
+1. **T1 bi-directional jobs held the connection and the byte-1 job lock for 120s
+   on every job (measured: 37/40 concurrent jobs rejected).** Root cause: the
+   completion test `printerToNetworkBuffer.eof_read || now - eof_done >=
+   PRINTER_REPLY_TIMEOUT(120)`. For character devices (`/dev/lpX`, `usblp`)
+   `eof_read` is essentially never set (it needs 20 consecutive zero reads and
+   the `FD_ISSET(lp,readfds)` branch to be reached), so every job waited the
+   full fixed 120s before the connection and lock were released. Fix: the fixed
+   `PRINTER_REPLY_TIMEOUT` is gone, replaced by `PRINTER_REPLY_WINDOW` (default
+   10s). Once the client has half-closed and **both** buffers are drained, the
+   job ends as soon as there has been no printer->network progress for that
+   window, while any in-flight reply keeps flowing (the buffers are non-empty
+   while data moves). The window is measured from the *last real printer->network
+   movement*, so an actively talking device is never cut off and a silent one is
+   released within seconds. Normal completion (regular-file EOF) and reply
+   timeout are logged distinctly.
+
+2. **T2 a slow client was silently truncated and told success (measured: second
+   4KB segment dropped, `Finished job: 4096/4096`).** Root cause: the unidir
+   branch used `SILENT_TIMEOUT` (10s) the moment `totalin > 0`. Real printing
+   pauses often (CUPS building pages, congestion, slow link) so 10s is far too
+   aggressive. Fix: `SILENT_TIMEOUT` default raised to 30s; the unidir idle
+   check now uses `IDLE_TIMEOUT` only for a connection that has sent *no* byte
+   (a probe) and `SILENT_TIMEOUT` for one that has streamed real data, so a
+   mid-job pause is no longer mistaken for a dead client. If the no-progress
+   timeout still fires with `totalout < totalin`, the job is marked failed and
+   logged as incomplete, not as a misleading `Finished job`.
+
+3. **T3 `zero_reads` was uninitialised and never cleared on a successful read,
+   so the printer->network direction could be disabled (measured: status/reply
+   data permanently dropped).** Root cause: the field is on the stack; if the
+   garbage value was large it counted as 20 zero reads immediately and set
+   `eof_read`. Fix: `initBuffer()` sets `zero_reads = 0` and `readBuffer()`
+   resets it to 0 on every `result > 0` read, incrementing only on a genuine
+   empty read.
+
+4. **T4 a stalled printer cost ~70s and still reported success (measured: 50-80s
+   hold, `Finished job: 65536/73728`, 8KB lost).** Root cause: the stall path
+   set only a local flag and `flush_buffer()` gave up after `PRINTER_FLUSH_TIMEOUT`
+   without marking an error, so `copy_stream()` returned 0 and the caller treated
+   the job as done. Fix: `flush_buffer()` now sets `WRITE_ERR` when it gives up
+   still holding bytes; `PRINTER_STALL_TIMEOUT` is 30s and its comment notes it
+   shares the budget with `PRINTER_FLUSH_TIMEOUT`, so the worst case is ~40s not
+   70s. Both the bi-directional and unidirectional tails log `Job incomplete`
+   (with bytes sent/total) at `LOG_ERR` when `err` is set, and `copy_stream()`
+   returns -1 so the connection is closed and the job lock released at once
+   instead of being held for minutes.
+
+5. **T5 fork-per-connection had no concurrency cap and could be amplified into a
+   DoS (measured: 40 connections -> 40 children all blocking 30s on the lock).**
+   Root cause: `server()` `fork()`ed unconditionally and `JOB_LOCK_WAIT` was 30s,
+   so a flood of connections became a pile of blocking children. Fix:
+   `MAX_CHILDREN` (default 12) bounds in-flight children; past the limit the
+   connection is logged and refused (backpressure) instead of forking.
+   `JOB_LOCK_WAIT` default is 3s so a contended printer fails the new job fast.
+   The dead `got_sigchld` variable is replaced by a live `inflight_children`
+   counter plus a `child_pids[]` table; the `SIGCHLD` handler reaps and keeps
+   both in sync, and `server()` applies the backpressure check before `fork()`.
+
+6. **T6 the lock file was unlinked, breaking mutual exclusion in inetd mode
+   (instance B holding inode1's lock and instance C holding a freshly created
+   inode2 could run at once, interleaving output).** Root cause: `free_lock()`
+   `unlink()`ed the lock file while another instance might hold a lock on the
+   same inode. Fix: `free_lock()` no longer unlinks the lock file, so its inode
+   stays stable and every instance `fcntl()`-locks the same inode (serialised
+   correctly). `one_job()` and `handle_connection()` now log (at `LOG_ERR`, with
+   client address) when the instance lock or the job lock cannot be acquired,
+   instead of silently closing the connection. A clean FIN is kept rather than a
+   RST: AppSocket has no application-layer acknowledgement, so a RST would only
+   risk discarding in-flight data while the client still believes the job
+   succeeded (see trade-off note in `p910nd.8`).
+
+7. **T7 in non `-d` mode every `LOG_DEBUG` message was dropped, so a fault could
+   not be diagnosed from syslog.** Fix: the genuinely useful "why did the job
+   stop" messages are raised above `LOG_DEBUG` — "printer sent no data, stop
+   reading from printer" and "network write error, discarding further printer
+   data" are now `LOG_INFO`. The per-chunk read/write traces stay `LOG_DEBUG`
+   to avoid flooding.
+
+8. **T8 `select()` was used with `fd`/`lp` never checked against `FD_SETSIZE`, so
+   a high descriptor number overran the `fd_set` (undefined behaviour: random
+   corruption or crash).** Fix: `copy_stream()` refuses the job when either
+   descriptor is `< 0` or `>= FD_SETSIZE`, and `server()` closes and skips the
+   connection after `accept()` if the new `fd >= FD_SETSIZE` (both logged at
+   `LOG_ERR`).
+
+9. **T9 after `eof_sent` the loop kept arming the printer-write `fd_set` and
+   re-logging "write: eof" ~10x/s for the whole window (CPU burn and log
+   flood).** Fix: `prepBuffer()` no longer arms the write fd for a buffer whose
+   EOF has already been forwarded, and `writeBuffer()` only marks/sends EOF
+   once. Combined with the T1 bounded window the loop goes quiet once drained.
+
+10. **T10 cleanup.** (a) `got_sigchld` was a dead variable; replaced by the live
+    `inflight_children` counter (see T5). (b) a terminating daemon left printing
+    children as orphans (`init` would adopt them and the init script could
+    unmount the device mid-job); `server()` now calls `reap_children_and_exit()`
+    which signals every tracked child with `SIGTERM` and waits up to 5s, logging
+    how many jobs were in progress. (c) rejected jobs (busy printer / no
+    instance lock) now log `LOG_ERR` with the client address (see T6).
 
 ## Bug fixes (0.98)
 
