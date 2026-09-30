@@ -16,7 +16,7 @@
  *	Port 9100+n will then be passively opened
  *	n defaults to 0
  *
- *	Version 0.98
+ *	Version 0.99
  *	Bug fix release: no change to the command line or to the data streams.
  *	See the "Bug fixes (0.98)" section of README.md for the list.
  *
@@ -236,7 +236,7 @@ typedef struct {
 } Buffer_t;
 
 static char *progname;
-static char version[] = "Version 0.98";
+static char version[] = "Version 0.99";
 static char copyright[] = "Copyright (c) 2008-2014 Ken Yap and others, GPLv2";
 static int lockfd = -1;
 static char *device = 0;

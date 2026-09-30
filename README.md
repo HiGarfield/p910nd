@@ -6,9 +6,100 @@ The repository at https://sourceforge.net/projects/p910nd/ is being phased out. 
 
 ## Version
 
-0.98
+0.99
 
 Note that this is the same version as the last released version from 2014. No features have been added, nor any bugs fixed from that version. Several distributions have packaged this software ready to use. If you are not a developer there is no advantage to cloning this repository. The move to Github is to facilitate any submission of bug fixes and contributions.
+
+## Bug fixes (0.99)
+
+Second round of fixes. All changes are confined to `p910nd.c`. The command
+line, the default device `/dev/lp%c`, the port numbering 9100+n and the
+semantics of both data streams are unchanged. New tunables (override with
+`-D` at build time): `PRINTER_STALL_TIMEOUT` (60s), `PRINTER_FLUSH_TIMEOUT`
+(10s), `PRINTER_DRAIN_TIMEOUT` (5s), `LOCK_WAIT` (3s), `JOB_LOCK_WAIT` (30s),
+`SILENT_TIMEOUT` (10s), `PRINTER_EOF_ZERO_READS` (20), `NO_PROGRESS_USLEEP`
+(20000µs), `DRAIN_TIMEOUT` (3s), `DRAIN_MAX_BYTES` (256KiB). The action of
+round one is preserved: SIGPIPE ignored, `accept()` keeps serving on
+`ECONNABORTED`/`EPROTO`/`EPERM`/`EINTR`, non-blocking printer fd, no `%m`,
+64-bit byte counters, `-v` exits, and the pid/lock files are cleaned up.
+
+**P0: the daemon could hang forever**
+
+1. **R1 a stalled printer hung the daemon permanently.** A blocking `write()`
+to a printer that is off line, out of paper or simply full never returns, so
+the daemon left the `select()` loop, sat in `pipe_write`/`usblp_write` and
+never accepted another connection. The printer fd is now opened non-blocking
+(`O_WRONLY|O_NONBLOCK` / `O_RDWR|O_NONBLOCK`) and writes are driven by the
+`select()` writable event; `flush_buffer()` waits on `select()` too. A new
+`PRINTER_STALL_TIMEOUT` abandons the job if no byte reaches the device for
+that long, after which the connection is closed and the daemon returns to
+`accept()`.
+2. **R2 a second instance hung on `F_SETLKW`.** The instance lock used a
+blocking `F_SETLKW`, so `service p910nd restart` (and any second start) hung
+with no message. It now uses `F_SETLK` and retries for `LOCK_WAIT` seconds,
+then logs "another p910nd is already running for this printer" and exits
+non-zero.
+
+**P1: data loss**
+
+3. **R3 the idle timeout fired on a momentarily paused printer.** The
+documented "only when both buffers are empty" rule was never implemented; any
+pause longer than `IDLE_TIMEOUT` (30s) truncated the job. The idle timer now
+only advances when `networkToPrinterBuffer.bytes == 0` (and, bidirectionally,
+`printerToNetworkBuffer.bytes == 0`) and is suppressed once the client has
+half closed (`eof_read`); a stalled device (data pending but unwritten) is
+handled by the separate `PRINTER_STALL_TIMEOUT` instead.
+4. **R4 the connection was torn down with RST.** On timeout/error the socket
+was closed without `shutdown()`, so the client (CUPS/LPRng) got
+`ECONNRESET` and any in-flight status data was lost. `close_connection()` now
+sends `SHUT_WR` (FIN), drains the receive side with a time and byte cap, then
+closes. Bidirectional jobs also flush the printer's reply before closing.
+5. **R5 the device was closed before it had drained.** The 0.97 change log
+requires waiting until the printer is no longer busy before closing, otherwise
+the driver may drop the last write. `handle_connection()` now calls
+`wait_printer_idle()` (bounded by `PRINTER_DRAIN_TIMEOUT`) before `close(lp)`,
+skipped when the job itself failed (a stalled device is not going to drain).
+
+**P2: CPU spinning**
+
+6. **R6 an EOF device spun at 100% CPU.** A character device that only ever
+returns 0 bytes (regular file, `/dev/null`, a wedged USB device) made
+`select()` report readable forever. `readBuffer()` now counts consecutive
+zero reads and, after `PRINTER_EOF_ZERO_READS`, marks the printer direction
+`eof_read` so it is no longer polled; every iteration that moves no data also
+pauses for `NO_PROGRESS_USLEEP`, so the loop can never busy-poll.
+
+**P3: throughput / starvation**
+
+7. **R7 one job blocked the whole daemon.** `server()` ran everything
+serially, so a slow printer or a client that did not close starved every
+later connection. Each connection is now served by its own `fork()`ed child;
+the parent reaps children (`SIGCHLD`), and the per-printer lock (F_SETLK,
+byte 1) keeps writes serialized so the GLOP (one printer, one writer) is
+preserved. The instance lock (byte 0) is held for the daemon's whole life.
+8. **R8 opening the printer blocked the accept loop.** `open_printer_retry()`
+could sleep for up to `OPEN_PRINTER_MAX_WAIT` (30s) inside the accept loop.
+With R7 the retry now happens in the per-job child, so the parent never
+blocks on a missing printer.
+9. **R9 a client that finished sending but did not close cost an extra 30s.**
+The unidirectional path now releases a silent-but-half-closed client via
+`SILENT_TIMEOUT` (10s) once `totalin > 0`; a connection that never sent a
+byte still waits the full `IDLE_TIMEOUT`, and a half-closed client just waits
+for the buffer to drain, never the idle timer.
+
+**P4: misc**
+
+10. **R10 the signal handler was not async-signal-safe.** It called `exit()`
+from the handler, risking a re-entrant deadlock. The handler now only sets a
+`volatile sig_atomic_t` flag; `server()` checks it at the top of the accept
+loop and exits cleanly (running `atexit()`/`cleanup_and_exit()`). `SIGHUP` is
+explicitly ignored.
+11. **R11 the lock file was left behind.** `free_lock()` only closed the fd,
+leaving `/var/lock/p9100d`. The owner now unlinks the lock file on exit
+(`lock_held` guards against removing another instance's file).
+12. **R12 dual-stack bind edge case.** With `net.ipv6.bindv6only=1` the IPv6
+wildcard socket rejected IPv4 clients. The socket is now explicitly put into
+dual-stack mode (`IPV6_V6ONLY=0`, `#ifdef` guarded).
 
 ## Bug fixes (0.98)
 
