@@ -590,6 +590,7 @@ void initBuffer(Buffer_t * b, int infd, int outfd, int detectEof)
 	b->totalout = 0;
 	b->eof_read = 0;
 	b->eof_sent = 0;
+	b->zero_reads = 0;	/* T3: must be initialised, it is on the stack */
 	b->err = 0;
 }
 
@@ -635,6 +636,7 @@ ssize_t readBuffer(Buffer_t * b)
 			b->endidx += (int)result;
 			b->totalin += (uint64_t)result;
 			b->bytes += (int)result;
+			b->zero_reads = 0;	/* T3: a real read clears the empty streak */
 			if ((size_t)b->endidx == sizeof(b->buffer)) {
 				/* Time to wrap the buffer. */
 				b->endidx = 0;
