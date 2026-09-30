@@ -168,10 +168,12 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
 /* B3: longest single sleep between two open attempts (exponential backoff). */
 #define		OPEN_PRINTER_MAX_SLEEP	10
 
-/* R1: a printer that accepts no data for this long is considered stalled and
- * the job is abandoned (seconds).  Override with -DPRINTER_STALL_TIMEOUT=n */
+/* R1/T4: a printer that accepts no data for this long is considered stalled
+ * and the job is abandoned (seconds).  The final flush (PRINTER_FLUSH_TIMEOUT)
+ * shares this overall budget, so the two no longer stack to 70s; 30 + 10 = 40s
+ * is the worst case.  Override with -DPRINTER_STALL_TIMEOUT=n */
 #ifndef		PRINTER_STALL_TIMEOUT
-#define		PRINTER_STALL_TIMEOUT	60
+#define		PRINTER_STALL_TIMEOUT	30
 #endif
 /* R1: total budget for the final flush of a job (seconds). */
 #ifndef		PRINTER_FLUSH_TIMEOUT
@@ -769,8 +771,9 @@ static void flush_buffer(Buffer_t * b, int timeout_secs)
 		}
 		gettimeofday(&now, 0);
 		if (now.tv_sec - start.tv_sec >= timeout_secs) {
-			dolog(LOG_NOTICE, "gave up flushing %d bytes after %d seconds\n",
+			dolog(LOG_NOTICE, "gave up flushing %d bytes after %d seconds, job not delivered\n",
 			      b->bytes, timeout_secs);
+			b->err |= WRITE_ERR;	/* T4: the buffered data was not all written */
 			break;
 		}
 	}
@@ -1032,12 +1035,21 @@ int copy_stream(int fd, int lp)
 		flush_buffer(&networkToPrinterBuffer, PRINTER_FLUSH_TIMEOUT);
 		/* R4: and deliver the printer's answer as well */
 		flush_buffer(&printerToNetworkBuffer, PRINTER_FLUSH_TIMEOUT);
-		dolog(LOG_NOTICE,
-		       "Finished job: %llu/%llu bytes sent to printer, %llu/%llu bytes sent to network\n",
-		       (unsigned long long)networkToPrinterBuffer.totalout,
-		       (unsigned long long)networkToPrinterBuffer.totalin,
-		       (unsigned long long)printerToNetworkBuffer.totalout,
-		       (unsigned long long)printerToNetworkBuffer.totalin);
+		/* T4/C6: distinguish a clean finish from a truncated one. */
+		if (networkToPrinterBuffer.err || printerToNetworkBuffer.err)
+			dolog(LOG_ERR,
+			      "Job incomplete: %llu/%llu bytes sent to printer, %llu/%llu bytes sent to network\n",
+			      (unsigned long long)networkToPrinterBuffer.totalout,
+			      (unsigned long long)networkToPrinterBuffer.totalin,
+			      (unsigned long long)printerToNetworkBuffer.totalout,
+			      (unsigned long long)printerToNetworkBuffer.totalin);
+		else
+			dolog(LOG_NOTICE,
+			      "Finished job: %llu/%llu bytes sent to printer, %llu/%llu bytes sent to network\n",
+			      (unsigned long long)networkToPrinterBuffer.totalout,
+			      (unsigned long long)networkToPrinterBuffer.totalin,
+			      (unsigned long long)printerToNetworkBuffer.totalout,
+			      (unsigned long long)printerToNetworkBuffer.totalin);
 		/* C6: an error in either direction has to be reported. */
 		return ((networkToPrinterBuffer.err || printerToNetworkBuffer.err) ? -1 : 0);
 	} else {
@@ -1126,9 +1138,15 @@ int copy_stream(int fd, int lp)
 		}
 		/* C2: don't throw away data received before the error. */
 		flush_buffer(&networkToPrinterBuffer, PRINTER_FLUSH_TIMEOUT);
-		dolog(LOG_NOTICE, "Finished job: %llu/%llu bytes sent to printer\n",
-		      (unsigned long long)networkToPrinterBuffer.totalout,
-		      (unsigned long long)networkToPrinterBuffer.totalin);
+		/* T4/C6: report a truncated job as a failure, not a success. */
+		if (networkToPrinterBuffer.err)
+			dolog(LOG_ERR, "Job incomplete: %llu/%llu bytes sent to printer\n",
+			      (unsigned long long)networkToPrinterBuffer.totalout,
+			      (unsigned long long)networkToPrinterBuffer.totalin);
+		else
+			dolog(LOG_NOTICE, "Finished job: %llu/%llu bytes sent to printer\n",
+			      (unsigned long long)networkToPrinterBuffer.totalout,
+			      (unsigned long long)networkToPrinterBuffer.totalin);
 	}
 	return (networkToPrinterBuffer.err?-1:0);
 }
