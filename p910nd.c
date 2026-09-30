@@ -200,17 +200,24 @@ static int have_pidfile = 0;
 /* Helper function: convert a struct sockaddr address (IPv4 and IPv6) to a string */
 char *get_ip_str(const struct sockaddr *sa, char *s, size_t maxlen)
 {
+	if (s == 0 || maxlen == 0)
+		return s;
 	switch(sa->sa_family) {
 		case AF_INET:
-			inet_ntop(AF_INET, &(((struct sockaddr_in *)sa)->sin_addr), s, maxlen);
+			if (inet_ntop(AF_INET, &(((const struct sockaddr_in *)sa)->sin_addr), s, maxlen) == NULL)
+				(void)snprintf(s, maxlen, "Unknown AF");
 			break;
 		case AF_INET6:
-			inet_ntop(AF_INET6, &(((struct sockaddr_in6 *)sa)->sin6_addr), s, maxlen);
+			if (inet_ntop(AF_INET6, &(((const struct sockaddr_in6 *)sa)->sin6_addr), s, maxlen) == NULL)
+				(void)snprintf(s, maxlen, "Unknown AF");
 			break;
 		default:
-			strncpy(s, "Unknown AF", maxlen);
-		return NULL;
+			(void)snprintf(s, maxlen, "Unknown AF");
+			break;
 	}
+	/* D3: callers feed the result straight to %s/hosts_ctl(), never return
+	 * NULL and always guarantee the NUL termination. */
+	s[maxlen - 1] = '\0';
 	return s;
 }
 
