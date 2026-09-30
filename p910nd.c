@@ -124,7 +124,9 @@
 #include	<errno.h>
 #include	<stdarg.h>
 #include	<signal.h>	/* A1/D9: SIGPIPE and clean shutdown */
+#include	<time.h>	/* nanosleep()/struct timespec (R6 polling pause) */
 #include	<sys/types.h>
+#include	<sys/wait.h>	/* waitpid() for forked job children (R7) */
 #include	<sys/time.h>
 #include	<sys/resource.h>
 #include	<sys/stat.h>
@@ -178,6 +180,7 @@ typedef struct {
 	uint64_t totalout;	/* Total bytes that have been written. */
 	int eof_read;		/* Nonzero indicates the input file has reached EOF. */
 	int eof_sent;		/* Nonzero indicates the output file has fully received all data. */
+	int zero_reads;		/* Consecutive read()s that returned 0 bytes (R6). */
 	int err;		/* Nonzero indicates an error detected on the output file. */
 #define READ_ERR  0x01
 #define WRITE_ERR 0x02
@@ -265,6 +268,17 @@ void dolog(int level, char* msg, ...)
 	else if (level != LOG_DEBUG)
 		vsyslog(level, msg, argp);
 	va_end(argp);	
+}
+
+/* Sleep for a fraction of a second, retrying when a signal interrupts it. */
+static void sleep_us(long usec)
+{
+	struct timespec ts;
+
+	ts.tv_sec = usec / 1000000L;
+	ts.tv_nsec = (usec % 1000000L) * 1000L;
+	while (nanosleep(&ts, &ts) < 0 && errno == EINTR)
+		;
 }
 
 /* D2: errno of the last open attempt, saved because dolog() (vsyslog) may
@@ -587,8 +601,13 @@ ssize_t readBuffer(Buffer_t * b)
 		else if (b->detectEof) {
 			dolog(LOG_DEBUG, "read: eof\n");
 			b->eof_read = 1;
-		} else
+		} else {
+			/* R6: count the empty reads, a device that only ever
+			 * returns 0 (regular file, /dev/null, a wedged USB
+			 * device) is finished and must not be polled again. */
+			b->zero_reads++;
 			result = 0; // in case there is still data in the buffer, ignore the error by now
+		}
 	}
 	/* Return the value returned by read(), which is -1 (error), or #bytes read. */
 	return result;
@@ -726,6 +745,15 @@ static void close_connection(int fd)
 	(void)close(fd);
 }
 
+/* R6: a regular file has a real end of data, character devices (real
+ * printers, /dev/null) may only return 0 bytes temporarily. */
+static int printer_is_regular(int lp)
+{
+	struct stat st;
+
+	return (fstat(lp, &st) == 0 && S_ISREG(st.st_mode));
+}
+
 /* Copy network data from file descriptor fd (network) to lp (printer) until EOS */
 /* If bidir, also copy data from printer (lp) to network (fd). */
 int copy_stream(int fd, int lp)
@@ -781,6 +809,7 @@ int copy_stream(int fd, int lp)
 				/* Read network data. */
 				result = (int)readBuffer(&networkToPrinterBuffer);
 				if (result > 0) {
+					moved = 1;
 					dolog(LOG_DEBUG,"%d.%d: read %d bytes from network\n", (int)now.tv_sec, (int)now.tv_usec, result);
 					gettimeofday(&last_activity, 0);
 				}
@@ -789,6 +818,7 @@ int copy_stream(int fd, int lp)
 				/* Read printer data, but pace it more slowly. */
 				result = (int)readBuffer(&printerToNetworkBuffer);
 				if (result > 0) {
+					moved = 1;
 					dolog(LOG_DEBUG,"%d.%d: read %d bytes from printer\n", (int)now.tv_sec, (int)now.tv_usec, result);
 					gettimeofday(&last_activity, 0);
 					gettimeofday(&then, 0);
@@ -801,14 +831,22 @@ int copy_stream(int fd, int lp)
 					/* C8: need_clear_lp was never set to 1, so the two
 					 * buffer clearing branches were unreachable. */
 					timer = 1;
+				} else if (!printerToNetworkBuffer.eof_read &&
+					   printerToNetworkBuffer.zero_reads >= PRINTER_EOF_ZERO_READS) {
+					/* R6: the printer keeps answering with 0 bytes,
+					 * stop polling it or the loop burns all CPU. */
+					printerToNetworkBuffer.eof_read = 1;
+					dolog(LOG_DEBUG, "printer sent no data, stop reading from printer\n");
 				}
 			}
 			if (FD_ISSET(lp, &writefds)) {
 				/* Write data to printer. */
 				result = (int)writeBuffer(&networkToPrinterBuffer);
 				if (result > 0) {
+					moved = 1;
 					dolog(LOG_DEBUG,"%d.%d: wrote %d bytes to printer\n", (int)now.tv_sec, (int)now.tv_usec, result);
 					gettimeofday(&last_activity, 0);
+					gettimeofday(&last_print, 0);
 				}
 			}
 			if (FD_ISSET(fd, &writefds) || printerToNetworkBuffer.outfd == -1) {
@@ -827,22 +865,54 @@ int copy_stream(int fd, int lp)
 					if (printerToNetworkBuffer.outfd == -1)
 						dolog(LOG_DEBUG,"discarded %d bytes from printer\n",result);				
 					else {
+						moved = 1;
 						dolog(LOG_DEBUG,"%d.%d: wrote %d bytes to network\n", (int)now.tv_sec, (int)now.tv_usec, result);
 						gettimeofday(&last_activity, 0);
 					}
 				}
 			}
-			/* B4/B5: one idle timeout fed by both directions, so a large job
-			 * that is still printing, or a client waiting for the status
-			 * reply, is never cut short. */
 			gettimeofday(&now, 0);
-			if (now.tv_sec - last_activity.tv_sec >= IDLE_TIMEOUT) {
+			/* R1: the device has data pending but takes none of it.  This is
+			 * a stalled printer (off line, out of paper, full buffer), so
+			 * give up instead of waiting forever. */
+			if (networkToPrinterBuffer.bytes == 0)
+				gettimeofday(&last_print, 0);
+			else if (now.tv_sec - last_print.tv_sec >= PRINTER_STALL_TIMEOUT) {
+				dolog(LOG_NOTICE,"printer accepted no data for %d seconds, stop copy stream\n", (int)PRINTER_STALL_TIMEOUT);
+				networkToPrinterBuffer.err |= WRITE_ERR;	/* job not delivered */
+				break;
+			}
+			/* R3/R9: idle only counts when both buffers are empty, and never
+			 * after the client has half closed - then we are just waiting
+			 * for the printer to drain. */
+			if (networkToPrinterBuffer.bytes == 0 && printerToNetworkBuffer.bytes == 0 &&
+			    !networkToPrinterBuffer.eof_read &&
+			    now.tv_sec - last_activity.tv_sec >= IDLE_TIMEOUT) {
 				dolog(LOG_NOTICE,"no data transferred for %d seconds, stop copy stream\n", (int)IDLE_TIMEOUT);
 				break;
 			}
+			/* R4/E7: the job is out but the printer may still owe an
+			 * answer (status query).  Keep the connection alive until the
+			 * answer has been forwarded, the printer is done or the reply
+			 * timeout expires. */
+			if (networkToPrinterBuffer.eof_sent && printerToNetworkBuffer.bytes == 0) {
+				if (!eof_done_set) {
+					gettimeofday(&eof_done, 0);
+					eof_done_set = 1;
+				}
+				if (printerToNetworkBuffer.eof_read ||
+				    now.tv_sec - eof_done.tv_sec >= PRINTER_REPLY_TIMEOUT)
+					break;
+			}
+			/* R6: never poll with zero delay, an idle iteration always
+			 * costs at least this pause. */
+			if (!moved)
+				sleep_us(NO_PROGRESS_USLEEP);
 		}
 		/* C5: deliver what was already received before giving up. */
-		flush_buffer(&networkToPrinterBuffer);
+		flush_buffer(&networkToPrinterBuffer, PRINTER_FLUSH_TIMEOUT);
+		/* R4: and deliver the printer's answer as well */
+		flush_buffer(&printerToNetworkBuffer, PRINTER_FLUSH_TIMEOUT);
 		dolog(LOG_NOTICE,
 		       "Finished job: %llu/%llu bytes sent to printer, %llu/%llu bytes sent to network\n",
 		       (unsigned long long)networkToPrinterBuffer.totalout,
