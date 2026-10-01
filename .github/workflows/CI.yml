@@ -1,0 +1,158 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Build p910nd-${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - aarch64
+          - aarch64be
+          - armv5-eabi
+          - armv6-eabihf
+          - armv7-eabihf
+          - armebv7-eabihf
+          - mips32
+          - mips32el
+          - mips32r5el
+          - mips32r6el
+          - mips64-n32
+          - mips64el-n32
+          - mips64r6el-n32
+          - microblazebe
+          - microblazeel
+          - openrisc
+          - powerpc-440fp
+          - powerpc-e300c3
+          - powerpc-e500mc
+          - powerpc64-e6500
+          - powerpc64-power8
+          - powerpc64le-power8
+          - riscv32-ilp32d
+          - riscv64-lp64d
+          - s390x-z13
+          - sh-sh4
+          - sh-sh4aeb
+          - x86-64
+          - x86-64-core-i7
+          - x86-64-v2
+          - x86-64-v3
+          - x86-64-v4
+          - x86-core2
+          - x86-i686
+    steps:
+      - name: Checkout
+        uses: actions/checkout@main
+        with:
+          fetch-depth: 0
+
+      - name: Cache toolchain archive
+        id: cache
+        uses: actions/cache@main
+        with:
+          path: ${{ runner.temp }}/${{ matrix.arch }}--musl--stable-2026.08-1.tar.xz
+          key: bootlin-${{ matrix.arch }}-2026.08-1
+
+      - name: Download bootlin musl toolchain (p910nd-${{ matrix.arch }})
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          url="https://toolchains.bootlin.com/downloads/releases/toolchains/${{ matrix.arch }}/tarballs/${{ matrix.arch }}--musl--stable-2026.08-1.tar.xz"
+          curl -fL "$url" -o "${{ runner.temp }}/${{ matrix.arch }}--musl--stable-2026.08-1.tar.xz"
+
+      - name: Extract toolchain
+        run: |
+          set -euo pipefail
+          TUPLE="${{ matrix.arch }}--musl--stable-2026.08-1"
+          rm -rf "${{ github.workspace }}/$TUPLE"
+          mkdir -p "${{ github.workspace }}/$TUPLE"
+          tar -xJf "${{ runner.temp }}/$TUPLE.tar.xz" -C "${{ github.workspace }}"
+          CC_PATH="$(ls "${{ github.workspace }}/$TUPLE"/bin/*-gcc | head -1)"
+          test -x "$CC_PATH"
+          echo "CC=${CC_PATH}" >> "$GITHUB_ENV"
+
+      - name: Build static p910nd (p910nd-${{ matrix.arch }})
+        # Static musl binaries avoid any libc version dependency and the per-arch
+        # bootlin toolchain already targets the arch baseline, so the result runs
+        # on very old Linux kernels / embedded printer boxes.
+        run: |
+          set -euo pipefail
+          make clean
+          make CC="${CC}" \
+               CFLAGS="-O2 -static -ffunction-sections -fdata-sections -Wl,--gc-sections -s -Wall -Wextra" \
+               p910nd
+          file ./p910nd
+          mv p910nd "p910nd-${{ matrix.arch }}"
+
+      - name: Upload binary artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@main
+        with:
+          name: p910nd-${{ matrix.arch }}
+          path: p910nd-${{ matrix.arch }}
+
+  upload-releases:
+    needs: [build]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@main
+      - id: version
+        shell: bash
+        run: |
+          v=$(TZ=Asia/Shanghai git log -1 --format="%cd" --date=format-local:'%Y%m%d%H%M')
+          echo "release_version=$v" >> $GITHUB_OUTPUT
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@main
+        with:
+          pattern: p910nd-*
+          merge-multiple: true
+          path: artifacts/
+      - name: Upload binaries to release
+        uses: HiGarfield/action-gh-release@master
+        with:
+          tag_name: ${{ steps.version.outputs.release_version }}
+          files: artifacts/*
+          make_latest: true
+          overwrite_files: true
+
+  cleanup-releases:
+    needs: [upload-releases]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: HiGarfield/delete-release-action@master
+        continue-on-error: true
+        with:
+          release-drop: true
+          release-keep-count: 0
+          release-drop-tag: true
+          pre-release-drop: true
+          pre-release-keep-count: -1
+          pre-release-drop-tag: true
+          draft-drop: true
+          draft-drop-count: -1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
