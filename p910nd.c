@@ -215,16 +215,6 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
 #ifndef		PRINTER_REPLY_IDLE
 #define		PRINTER_REPLY_IDLE	5
 #endif
-/* R2: how long get_lock() waits for the printer lock before giving up. */
-#ifndef		LOCK_WAIT
-#define		LOCK_WAIT		3
-#endif
-/* R7: how long a job waits for the printer before it is rejected (seconds).
- * T5: shortened to a few seconds so a contended printer fails the new job
- * fast instead of letting a pile of children block for half a minute each. */
-#ifndef		JOB_LOCK_WAIT
-#define		JOB_LOCK_WAIT		3
-#endif
 /* T5: cap on simultaneously forked job children.  Beyond this, new
  * connections are refused (backpressure) rather than forking a DoS army.
  * Override with -DMAX_CHILDREN=n. */
@@ -502,13 +492,14 @@ static int open_printer_retry(int lpnumber)
 	}
 }
 
-/* R2: F_SETLKW waited forever, so a second instance (and therefore
- * "service p910nd restart") hung with no message at all.  Take the lock
- * without blocking and retry for at most LOCK_WAIT seconds. */
-static int take_lock(int lockfd, off_t start, int wait_seconds, const char *busy_msg)
+/* Queue for a record lock with no time limit.  A printer that is busy or not
+ * switched on yet must make the job wait its turn, never be refused: dropping
+ * a print job is worse than letting it queue.  F_SETLKW blocks in the kernel,
+ * so waiting costs no CPU; EINTR is retried because SIGCHLD is delivered
+ * whenever another job child exits.  got_term keeps shutdown prompt. */
+static int take_lock(int lockfd, off_t start)
 {
 	struct flock lplock;
-	int waited_ms = 0;
 
 	memset(&lplock, 0, sizeof(lplock));
 	lplock.l_type = F_WRLCK;
@@ -517,19 +508,15 @@ static int take_lock(int lockfd, off_t start, int wait_seconds, const char *busy
 	lplock.l_len = 1;
 	lplock.l_pid = getpid();
 	for (;;) {
-		if (fcntl(lockfd, F_SETLK, &lplock) == 0)
+		if (fcntl(lockfd, F_SETLKW, &lplock) == 0)
 			return (1);
-		if (errno != EACCES && errno != EAGAIN && errno != EINTR) {
-			dolog(LOGOPTS, "lock: %s\n", strerror(errno));	/* D1 */
-			return (0);
+		if (errno == EINTR) {
+			if (got_term)
+				return (0);
+			continue;
 		}
-		if (waited_ms >= wait_seconds * 1000) {
-			if (busy_msg != 0)
-				dolog(LOGOPTS, "%s\n", busy_msg);
-			return (0);
-		}
-		sleep_us(200000);	/* brief backoff, never an endless wait */
-		waited_ms += 200;
+		dolog(LOGOPTS, "lock: %s\n", strerror(errno));	/* D1 */
+		return (0);
 	}
 }
 
@@ -540,8 +527,8 @@ int get_lock(int lpnumber)
 		dolog(LOGOPTS, "%s: %s\n", lockname, strerror(errno));	/* D1 */
 		return (0);
 	}
-	if (take_lock(lockfd, 0, LOCK_WAIT,
-		      "another p910nd is already running for this printer") == 0)
+	/* Queue until the instance already running for this printer exits. */
+	if (take_lock(lockfd, 0) == 0)
 		return (0);
 	lock_held = 1;	/* R11: only the owner removes the lock file */
 	return (1);
@@ -549,12 +536,14 @@ int get_lock(int lpnumber)
 
 /* R7: one printer, one writer.  The daemon holds the instance lock on byte 0
  * for its whole lifetime, every job child contends for byte 1 of the same
- * file, so jobs stay serialized although accepting no longer is. */
+ * file, so jobs stay serialized although accepting no longer is.  Contention
+ * queues: the job waits until the printer (or the device node for it) is
+ * available instead of being rejected. */
 static int lock_printer_job(void)
 {
 	if (lockfd < 0)
 		return (1);
-	return (take_lock(lockfd, 1, JOB_LOCK_WAIT, "printer is busy, job rejected"));
+	return (take_lock(lockfd, 1));
 }
 
 /* V7: release the byte-1 job lock while this connection is only waiting for the
@@ -1519,10 +1508,12 @@ static void handle_connection(int fd, int lpnumber)
 	if (getpeername(fd, (struct sockaddr *)&client, &clientlen) >= 0)
 		get_ip_str((struct sockaddr *)&client, host, sizeof(host));
 	if (!lock_printer_job()) {
-		/* T6/T10c: the printer was busy; log the rejection with the client
-		 * address.  This is a failure, so the client gets RST (V3) and knows
-		 * to retry, rather than a clean FIN that would look like success. */
-		dolog(LOG_ERR, "printer %c busy, job rejected from %s\n", lpnumber, host);
+		/* Only a real lock failure (or shutdown) gets here: a busy printer
+		 * queues the job.  Failure means the client must see RST (V3) so it
+		 * knows to retry, rather than a clean FIN that would look like
+		 * success. */
+		dolog(LOG_ERR, "printer %c: could not take the job lock, job abandoned, client %s\n",
+		      lpnumber, host);
 		close_connection(fd, 1);
 		return;
 	}
