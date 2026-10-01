@@ -864,8 +864,11 @@ ssize_t writeBuffer(Buffer_t * b)
 /* Best effort: write out whatever is still buffered before giving up, so an
  * error never discards data that was already received (C2/C5).
  * R1: bounded in time and safe on a non-blocking device - the old loop spun
- * on a blocking write() and hung the daemon forever. */
-static void flush_buffer(Buffer_t * b, int timeout_secs)
+ * on a blocking write() and hung the daemon forever.
+ * Returns the number of bytes that could NOT be delivered (0 if all flushed).
+ * V6: on timeout the undelivered bytes are reported at LOG_ERR as discarded and
+ * unrecoverable - they are never silently dropped without a trace. */
+static int flush_buffer(Buffer_t * b, int timeout_secs)
 {
 	struct timeval start;
 	struct timeval now;
@@ -896,12 +899,18 @@ static void flush_buffer(Buffer_t * b, int timeout_secs)
 		}
 		gettimeofday(&now, 0);
 		if (now.tv_sec - start.tv_sec >= timeout_secs) {
-			dolog(LOG_NOTICE, "gave up flushing %d bytes after %d seconds, job not delivered\n",
+			/* V6: discarding buffered data is only acceptable if it is made
+			 * explicit and unrecoverable.  Report it at LOG_ERR so the lost
+			 * byte count is never hidden, and let the caller's print_ok /
+			 * Job-incomplete line and the RST close (V3) tell the client. */
+			dolog(LOG_ERR,
+			      "discarded %d undelivered bytes after %d seconds flushing to printer; job NOT recoverable\n",
 			      b->bytes, timeout_secs);
 			b->err |= WRITE_ERR;	/* T4: the buffered data was not all written */
 			break;
 		}
 	}
+	return b->bytes;	/* V6: undelivered byte count for the caller */
 }
 
 /* R5/U8a: the 0.97 change log says the device stream may only be closed when
