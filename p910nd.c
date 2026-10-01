@@ -173,12 +173,17 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
 /* B3: longest single sleep between two open attempts (exponential backoff). */
 #define		OPEN_PRINTER_MAX_SLEEP	10
 
-/* R1/T4: a printer that accepts no data for this long is considered stalled
- * and the job is abandoned (seconds).  The final flush (PRINTER_FLUSH_TIMEOUT)
- * shares this overall budget, so the two no longer stack to 70s; 30 + 10 = 40s
- * is the worst case.  Override with -DPRINTER_STALL_TIMEOUT=n */
+/* R1/T4/U1/U2: a printer that accepts no data for this long (while we still
+ * have bytes to send) is considered stalled.  This is now a *recoverable*
+ * budget: an out-of-paper / off-line / full-buffer condition reports EAGAIN and
+ * we keep retrying, so a job survives a transient lapse of up to this long and
+ * resumes automatically when the printer recovers.  A printer that reports a
+ * permanent fault (ENODEV/EIO) fails at once via writeBuffer().  Default raised
+ * 30s -> 120s so a slow or briefly stalled printer is no longer mis-judged as
+ * dead (U1/U2).  The final flush (PRINTER_FLUSH_TIMEOUT) runs afterwards, so the
+ * worst case is 120 + 10 = 130s.  Override with -DPRINTER_STALL_TIMEOUT=n. */
 #ifndef		PRINTER_STALL_TIMEOUT
-#define		PRINTER_STALL_TIMEOUT	30
+#define		PRINTER_STALL_TIMEOUT	120
 #endif
 /* R1: total budget for the final flush of a job (seconds). */
 #ifndef		PRINTER_FLUSH_TIMEOUT
@@ -1073,14 +1078,15 @@ int copy_stream(int fd, int lp)
 				}
 			}
 			gettimeofday(&now, 0);
-			/* R1: the device has data pending but takes none of it.  This is
-			 * a stalled printer (off line, out of paper, full buffer), so
-			 * give up instead of waiting forever. */
+			/* R1/U1/U2: data pending but the printer takes none of it for
+			 * PRINTER_STALL_TIMEOUT - a stalled printer (off line, out of paper,
+			 * full buffer).  Stop, but do NOT mark failure here: the final flush
+			 * gets one last chance and we judge by bytes delivered, so a printer
+			 * that recovers within the window is never reported dead. */
 			if (networkToPrinterBuffer.bytes == 0)
 				gettimeofday(&last_print, 0);
 			else if (now.tv_sec - last_print.tv_sec >= PRINTER_STALL_TIMEOUT) {
-				dolog(LOG_NOTICE,"printer accepted no data for %d seconds, stop copy stream\n", (int)PRINTER_STALL_TIMEOUT);
-				networkToPrinterBuffer.err |= WRITE_ERR;	/* job not delivered */
+				dolog(LOG_NOTICE,"printer accepted no data for %d seconds, stopping job\n", (int)PRINTER_STALL_TIMEOUT);
 				break;
 			}
 			/* R3/R9: idle only counts when both buffers are empty, and never
@@ -1166,7 +1172,7 @@ int copy_stream(int fd, int lp)
 		/* Unidirectional: simply read from network, and write to printer,
 		 * but driven by select() with a timeout, a blocking read() let one
 		 * silent client stop the daemon for everybody (B1). */
-		while (!networkToPrinterBuffer.eof_sent && !(networkToPrinterBuffer.err & WRITE_ERR)) {
+		while (!(networkToPrinterBuffer.err & WRITE_ERR)) {
 			moved = 0;
 			/* C2: a read error only ends the job once the buffer is drained. */
 			if ((networkToPrinterBuffer.err & READ_ERR) && networkToPrinterBuffer.bytes == 0)
@@ -1201,12 +1207,14 @@ int copy_stream(int fd, int lp)
 				}
 			}
 			gettimeofday(&now, 0);
-			/* R1: data is pending but the device takes none of it */
+			/* R1/U1/U2: data pending but the device takes none of it for
+			 * PRINTER_STALL_TIMEOUT.  Stop, but do NOT mark failure here; the
+			 * final flush and the bytes-delivered judgement decide the verdict,
+			 * so a printer that recovers within the window is not reported dead. */
 			if (networkToPrinterBuffer.bytes == 0)
 				gettimeofday(&last_print, 0);
 			else if (now.tv_sec - last_print.tv_sec >= PRINTER_STALL_TIMEOUT) {
-				dolog(LOG_NOTICE,"printer accepted no data for %d seconds, stop copy stream\n", (int)PRINTER_STALL_TIMEOUT);
-				networkToPrinterBuffer.err |= WRITE_ERR;	/* job not delivered */
+				dolog(LOG_NOTICE,"printer accepted no data for %d seconds, stopping job\n", (int)PRINTER_STALL_TIMEOUT);
 				break;
 			}
 			/* R3/R9/T2: only count idle time with an empty buffer, and never
@@ -1215,7 +1223,8 @@ int copy_stream(int fd, int lp)
 			 * IDLE_TIMEOUT; one that has streamed real data is abandoned
 			 * only after SILENT_TIMEOUT of no progress, so a pause in the
 			 * middle of a job is not mistaken for a dead client. */
-			if (!networkToPrinterBuffer.eof_read && networkToPrinterBuffer.bytes == 0) {
+			if (!networkToPrinterBuffer.eof_read && !networkToPrinterBuffer.eof_sent &&
+		    networkToPrinterBuffer.bytes == 0) {
 				long limit = (networkToPrinterBuffer.totalin == 0) ? IDLE_TIMEOUT : SILENT_TIMEOUT;
 				if (now.tv_sec - last_activity.tv_sec >= limit) {
 					if (networkToPrinterBuffer.totalout < networkToPrinterBuffer.totalin) {
@@ -1232,6 +1241,12 @@ int copy_stream(int fd, int lp)
 					break;
 				}
 			}
+			/* U1/U3: once the client has half-closed and everything is
+			 * flushed to the printer, the job is done - even if we are
+			 * still inside the recoverable stall window waiting for the
+			 * printer to take the last bytes. */
+			if (networkToPrinterBuffer.eof_sent && networkToPrinterBuffer.bytes == 0)
+				break;
 			/* R6: never poll with zero delay */
 			if (!moved)
 				sleep_us(NO_PROGRESS_USLEEP);
