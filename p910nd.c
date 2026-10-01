@@ -117,7 +117,6 @@
 #include	<unistd.h>
 #include	<stdlib.h>
 #include	<stdio.h>
-#include	<stdint.h>	/* D8: byte counters must be 64 bit everywhere */
 #include	<getopt.h>
 #include	<ctype.h>
 #include	<string.h>
@@ -314,8 +313,23 @@ typedef struct {
 	int startidx;		/* Index of the start of valid data. */
 	int endidx;		/* Index of the end of valid data. */
 	int bytes;		/* The number of bytes currently buffered. */
-	uint64_t totalin;	/* Total bytes that have been read (D8: >2GB jobs). */
-	uint64_t totalout;	/* Total bytes that have been written. */
+	/* D8: byte counters are unsigned long, never int: an int overflowed at
+	 * 2 GB and destroyed the print_ok verdict.  On LP64 this is a full 64
+	 * bit counter; on ILP32 it wraps at 4 GB.
+	 *
+	 * WRAPPING IS SAFE ONLY IF comparisions keep using differences:
+	 *   (totalin - totalout) is the number of bytes not yet delivered.
+	 * Unsigned subtraction returns that difference modulo the type width,
+	 * and the difference is bounded by BUFFER_SIZE, so the result is the
+	 * exact value across a wrap.  NEVER write "totalout >= totalin" here:
+	 * it flips when one counter has wrapped and the other has not. */
+	unsigned long totalin;	/* Total bytes that have been read. */
+	unsigned long totalout;	/* Total bytes that have been written. */
+	/* Whether at least one byte was ever read into this buffer.  Used to
+	 * tell a probe (never sent anything) from a real job.  It must NOT be
+	 * derived from totalin == 0: on ILP32 totalin can wrap around to 0
+	 * again, which would mistake a multi-gigabyte job for a probe. */
+	int saw_data;
 	int eof_read;		/* Nonzero indicates the input file has reached EOF. */
 	int eof_sent;		/* Nonzero indicates the output file has fully received all data. */
 	int zero_reads;		/* Consecutive read()s that returned 0 bytes (R6). */
@@ -378,9 +392,9 @@ char *get_ip_str(const struct sockaddr *sa, char *s, size_t maxlen)
 	return s;
 }
 
-uint16_t get_port(const struct sockaddr *sa)
+unsigned short get_port(const struct sockaddr *sa)
 {
-	uint16_t port;
+	unsigned short port;
 	switch(sa->sa_family) {
 		case AF_INET:
 			port = ntohs(((struct sockaddr_in *)sa)->sin_port);
@@ -795,6 +809,7 @@ void initBuffer(Buffer_t * b, int infd, int outfd, int detectEof)
 	b->bytes = 0;
 	b->totalin = 0;
 	b->totalout = 0;
+	b->saw_data = 0;
 	b->eof_read = 0;
 	b->eof_sent = 0;
 	b->zero_reads = 0;	/* T3: must be initialised, it is on the stack */
@@ -849,8 +864,9 @@ ssize_t readBuffer(Buffer_t * b)
 		if (result > 0) {
 			/* Some data was read. Update accordingly. */
 			b->endidx += (int)result;
-			b->totalin += (uint64_t)result;
+			b->totalin += (unsigned long)result;
 			b->bytes += (int)result;
+			b->saw_data = 1;
 			b->zero_reads = 0;	/* T3: a real read clears the empty streak */
 			if ((size_t)b->endidx == sizeof(b->buffer)) {
 				/* Time to wrap the buffer. */
@@ -884,7 +900,7 @@ ssize_t readBuffer(Buffer_t * b)
 			 * returns 0 (regular file, /dev/null, a wedged USB
 			 * device) is finished and must not be polled again. */
 			b->zero_reads++;
-			result = 0; // in case there is still data in the buffer, ignore the error by now
+			result = 0; /* still data buffered, ignore it for now */
 		}
 	}
 	/* Return the value returned by read(), which is -1 (error), or #bytes read. */
@@ -932,7 +948,7 @@ ssize_t writeBuffer(Buffer_t * b)
 			/* Zero or more bytes were written. */
 			b->startidx += (int)result;
 			if (b->outfd>=0)
-				b->totalout += (uint64_t)result;
+				b->totalout += (unsigned long)result;
 			b->bytes -= (int)result;
 			if ((size_t)b->startidx == sizeof(b->buffer)) {
 				/* Unwrap the buffer. */
@@ -1101,8 +1117,8 @@ static void close_connection(int fd, int failure)
 	}
 	if (total >= DRAIN_MAX_BYTES)
 		dolog(LOG_NOTICE,
-		      "close: %zu bytes still unread after draining, sending RST\n",
-		      total);
+		      "close: %lu bytes still unread after draining, sending RST\n",
+		      (unsigned long)total);
 	(void)close(fd);
 }
 
@@ -1141,6 +1157,7 @@ int copy_stream(int fd, int lp)
 		struct timeval last_pn_progress;	/* V1: printer->network progress */
 		Buffer_t printerToNetworkBuffer;
 		struct pollfd pfd[2];
+		long w;		/* U4: reply window, set once it is needed */
 		initBuffer(&printerToNetworkBuffer, lp, fd, printer_is_regular(lp));
 		gettimeofday(&last_activity, 0);
 		gettimeofday(&last_print, 0);
@@ -1204,7 +1221,7 @@ int copy_stream(int fd, int lp)
 					gettimeofday(&last_activity, 0);
 					printer_replied = 1;	/* U4: printer has produced output */
 					gettimeofday(&then, 0);
-					// wait PRINTER_READ_PACE_US before reading again.
+					/* wait PRINTER_READ_PACE_US before reading again. */
 					then.tv_usec += PRINTER_READ_PACE_US;
 					if (then.tv_usec > 1000000) {
 						then.tv_usec -= 1000000;
@@ -1337,7 +1354,7 @@ int copy_stream(int fd, int lp)
 				 * printer has actually replied, release the connection
 				 * shortly afterwards (preserving T1's quick release for a
 				 * normal job).  Either way, forward any data that arrives. */
-				long w = printer_replied ? PRINTER_REPLY_IDLE : PRINTER_REPLY_WINDOW;
+				w = printer_replied ? PRINTER_REPLY_IDLE : PRINTER_REPLY_WINDOW;
 				if (now.tv_sec - last_activity.tv_sec >= w) {
 					if (printer_replied)
 						dolog(LOG_INFO,
@@ -1383,23 +1400,31 @@ int copy_stream(int fd, int lp)
 		 * fully printed job into "Job incomplete" (that would make CUPS
 		 * re-print and duplicate the job). */
 		{
-			int print_ok = (networkToPrinterBuffer.totalout >= networkToPrinterBuffer.totalin) &&
+			/* Judge by the bytes still undelivered, never by writing
+			 * "totalout >= totalin": that comparison flips if the counters
+			 * wrapped (see the note on the fields above).  Unsigned
+			 * subtraction yields the true difference modulo the type width,
+			 * and that difference is bounded by BUFFER_SIZE, so the result
+			 * is exact whether or not a wrap happened. */
+			unsigned long undelivered = networkToPrinterBuffer.totalin -
+						    networkToPrinterBuffer.totalout;
+			int print_ok = (undelivered == 0) &&
 			               !(networkToPrinterBuffer.err & WRITE_ERR);
 			if (!print_ok) {
 				dolog(LOG_ERR,
-				      "Job incomplete: %llu/%llu bytes sent to printer, %llu/%llu bytes sent to network\n",
-				      (unsigned long long)networkToPrinterBuffer.totalout,
-				      (unsigned long long)networkToPrinterBuffer.totalin,
-				      (unsigned long long)printerToNetworkBuffer.totalout,
-				      (unsigned long long)printerToNetworkBuffer.totalin);
+				      "Job incomplete: %lu/%lu bytes sent to printer, %lu/%lu bytes sent to network\n",
+				      (unsigned long)networkToPrinterBuffer.totalout,
+				      (unsigned long)networkToPrinterBuffer.totalin,
+				      (unsigned long)printerToNetworkBuffer.totalout,
+				      (unsigned long)printerToNetworkBuffer.totalin);
 				return (-1);
 			}
 			dolog(LOG_NOTICE,
-			      "Finished job: %llu/%llu bytes sent to printer, %llu/%llu bytes sent to network\n",
-			      (unsigned long long)networkToPrinterBuffer.totalout,
-			      (unsigned long long)networkToPrinterBuffer.totalin,
-			      (unsigned long long)printerToNetworkBuffer.totalout,
-			      (unsigned long long)printerToNetworkBuffer.totalin);
+			      "Finished job: %lu/%lu bytes sent to printer, %lu/%lu bytes sent to network\n",
+			      (unsigned long)networkToPrinterBuffer.totalout,
+			      (unsigned long)networkToPrinterBuffer.totalin,
+			      (unsigned long)printerToNetworkBuffer.totalout,
+			      (unsigned long)printerToNetworkBuffer.totalin);
 			if (printerToNetworkBuffer.outfd == -1)
 				dolog(LOG_INFO, "client disconnected before reply, print completed\n");
 			return (0);
@@ -1511,18 +1536,18 @@ int copy_stream(int fd, int lp)
 			 * middle of a job is not mistaken for a dead client. */
 			if (!networkToPrinterBuffer.eof_read && !networkToPrinterBuffer.eof_sent &&
 		    networkToPrinterBuffer.bytes == 0) {
-				long limit = (networkToPrinterBuffer.totalin == 0) ? IDLE_TIMEOUT : SILENT_TIMEOUT;
+				long limit = (networkToPrinterBuffer.saw_data == 0) ? IDLE_TIMEOUT : SILENT_TIMEOUT;
 				if (now.tv_sec - last_activity.tv_sec >= limit) {
 					/* U3/U10c: stop waiting on the (possibly just slow)
 					 * client, but do NOT mark the job failed here - the final
 					 * flush may still deliver what is buffered, and the
 					 * bytes-delivered check makes the real verdict. */
-					if (networkToPrinterBuffer.totalout < networkToPrinterBuffer.totalin)
+					if (networkToPrinterBuffer.totalin - networkToPrinterBuffer.totalout > 0)
 						dolog(LOG_NOTICE,
-						      "no data for %ld seconds, stopping (sent %llu/%llu to printer)\n",
+						      "no data for %ld seconds, stopping (sent %lu/%lu to printer)\n",
 						      limit,
-						      (unsigned long long)networkToPrinterBuffer.totalout,
-						      (unsigned long long)networkToPrinterBuffer.totalin);
+						      (unsigned long)networkToPrinterBuffer.totalout,
+						      (unsigned long)networkToPrinterBuffer.totalin);
 					else
 						dolog(LOG_NOTICE,
 						      "no data transferred for %ld seconds, stop copy stream\n", limit);
@@ -1549,17 +1574,21 @@ int copy_stream(int fd, int lp)
 		 * timed-out client that left data undelivered is reported as a
 		 * failure, never as a misleading "Finished job". */
 		{
-			int print_ok = (networkToPrinterBuffer.totalout >= networkToPrinterBuffer.totalin) &&
+			/* Same wrap-safe form as above: compare the undelivered byte
+			 * count, not "totalout >= totalin". */
+			unsigned long undelivered = networkToPrinterBuffer.totalin -
+						    networkToPrinterBuffer.totalout;
+			int print_ok = (undelivered == 0) &&
 			               !(networkToPrinterBuffer.err & WRITE_ERR);
 			if (!print_ok) {
-				dolog(LOG_ERR, "Job incomplete: %llu/%llu bytes sent to printer\n",
-				      (unsigned long long)networkToPrinterBuffer.totalout,
-				      (unsigned long long)networkToPrinterBuffer.totalin);
+				dolog(LOG_ERR, "Job incomplete: %lu/%lu bytes sent to printer\n",
+				      (unsigned long)networkToPrinterBuffer.totalout,
+				      (unsigned long)networkToPrinterBuffer.totalin);
 				return (-1);
 			}
-			dolog(LOG_NOTICE, "Finished job: %llu/%llu bytes sent to printer\n",
-			      (unsigned long long)networkToPrinterBuffer.totalout,
-			      (unsigned long long)networkToPrinterBuffer.totalin);
+			dolog(LOG_NOTICE, "Finished job: %lu/%lu bytes sent to printer\n",
+			      (unsigned long)networkToPrinterBuffer.totalout,
+			      (unsigned long)networkToPrinterBuffer.totalin);
 			return (0);
 		}
 	}
@@ -1792,6 +1821,9 @@ void server(int lpnumber)
 		socklen_t clientlen;
 		char host[INET6_ADDRSTRLEN];
 		pid_t pid;
+		/* U7: block SIGCHLD across fork + record so the handler cannot
+		 * reap a child before its pid is stored. */
+		sigset_t chld_mask, chld_omask;
 
 		/* R10: the signal handler only raised a flag, exit cleanly here */
 		if (got_term) {
@@ -1856,17 +1888,8 @@ void server(int lpnumber)
 		 * itself stays exclusive through the job lock.  There is no cap on
 		 * the number of children: every client is served and simply queues
 		 * on the printer lock. */
-		sigset_t chld_mask, chld_omask;
 		sigemptyset(&chld_mask);
 		sigaddset(&chld_mask, SIGCHLD);
-		/* U7: block SIGCHLD across fork + record.  A child that exits
-		 * between fork() and the slot assignment would otherwise be reaped
-		 * by the handler before its pid is stored in child_pids, so it
-		 * could not be matched and the in-flight count would never be
-		 * decremented.  Recording the pid with SIGCHLD blocked also makes
-		 * growing the pid table safe.  Restoring the mask only afterwards
-		 * lets the pending SIGCHLD deliver into a handler that can now
-		 * match the child. */
 		sigprocmask(SIG_BLOCK, &chld_mask, &chld_omask);
 		pid = fork();
 		if (pid < 0) {

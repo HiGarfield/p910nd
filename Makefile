@@ -6,7 +6,9 @@ DEFINES += -DUSE_LIBWRAP
 endif
 
 # If you don't have it in /var/log/subsys, uncomment and define
-#CFLAGS += -DLOCKFILE_DIR=\"/var/log\"
+# (override is needed: CFLAGS carries the override flag below, and a plain
+# assignment to such a variable is ignored)
+#override CFLAGS += -DLOCKFILE_DIR=\"/var/log\"
 
 # GNU target string
 CROSS = 
@@ -14,7 +16,25 @@ CROSS =
 CC = $(CROSS)gcc
 STRIP = $(CROSS)strip
 
-CFLAGS += -O2  -Wall -Wextra
+override CFLAGS += -O2  -Wall -Wextra
+
+# The daemon is written to strict ISO C89 (ANSI X3.159-1989): no C99 types or
+# library calls, no declarations after a statement, no // comments.  These
+# switches make every violation visible; -pedantic is used instead of
+# -pedantic-errors so that a toolchain whose own headers emit noise still
+# builds.  Violations are warnings, not errors - treat them as such and keep
+# the build output clean (the CI builds must stay warning free).
+#
+# override is required here: a plain += is discarded whenever CFLAGS is given
+# on the command line (the CI calls make CFLAGS="..." for every cross build),
+# which would silently drop these checks.  Note that += keeps whatever the
+# caller passed, it merely appends - so the CI still gets -static and friends.
+# Once a variable carries the override flag every later assignment to it must
+# use override too, or it is ignored; keep that in mind before adding any new
+# CFLAGS line.
+override CFLAGS += -std=c89
+override CFLAGS += -pedantic
+override CFLAGS += -Wdeclaration-after-statement
 
 PROG = p910nd
 CONFIG = aux/p910nd.conf
