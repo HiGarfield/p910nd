@@ -1436,6 +1436,7 @@ void server(int lpnumber)
 		socklen_t clientlen;
 		char host[INET6_ADDRSTRLEN];
 		pid_t pid;
+		int i;
 
 		/* R10: the signal handler only raised a flag, exit cleanly here */
 		if (got_term) {
@@ -1526,10 +1527,18 @@ void server(int lpnumber)
 			_exit(0);
 		}
 		(void)close(fd);
-		/* T5: track the child so the SIGCHLD handler can reap it and the
-		 * shutdown path can signal it. */
-		if (inflight_children < MAX_CHILDREN)
-			child_pids[inflight_children] = pid;
+		/* T5/U7: record the child in a FIXED, free slot so the SIGCHLD
+		 * handler can always match its pid and decrement inflight_children.
+		 * Using the count as the array index previously let a reused slot
+		 * overwrite a still-live pid (once an earlier slot had been cleared
+		 * by a child that exited), leaking the count and, once it reached
+		 * MAX_CHILDREN, permanently refusing every new connection. */
+		for (i = 0; i < MAX_CHILDREN; i++) {
+			if (child_pids[i] == 0) {
+				child_pids[i] = pid;
+				break;
+			}
+		}
 		inflight_children++;
 	}
 	(void)close(netfd);
