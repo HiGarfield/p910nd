@@ -171,10 +171,14 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
 #ifndef		IDLE_TIMEOUT
 #define		IDLE_TIMEOUT	30
 #endif
-/* B3: upper bound on how long a transient printer open failure is retried. */
-#define		OPEN_PRINTER_MAX_WAIT	30
-/* B3: longest single sleep between two open attempts (exponential backoff). */
-#define		OPEN_PRINTER_MAX_SLEEP	10
+/* The printer may be switched off when the daemon starts (or between two
+ * jobs), in which case the device node may not even exist yet, so opening it
+ * is retried until it appears: waiting for the printer is better than losing
+ * the job.  Interval between attempts in seconds (SIGTERM still interrupts
+ * the wait).  Override with -DOPEN_PRINTER_RETRY_INTERVAL=n. */
+#ifndef		OPEN_PRINTER_RETRY_INTERVAL
+#define		OPEN_PRINTER_RETRY_INTERVAL	10
+#endif
 
 /* R1/T4/U1/U2: a printer that accepts no data for this long (while we still
  * have bytes to send) is considered stalled.  This is now a *recoverable*
@@ -412,14 +416,9 @@ static void sleep_us(long usec)
 		;
 }
 
-/* D2: errno of the last open attempt, saved because dolog() (vsyslog) may
- * overwrite errno before the caller gets a chance to look at it (B3). */
-static int open_printer_errno = 0;
-
 int open_printer(int lpnumber)
 {
 	int lp;
-	int e;
 	/* C7: static storage, the global device used to point into this frame. */
 	static char lpname[sizeof(PRINTERFILE)];
 
@@ -433,62 +432,37 @@ int open_printer(int lpnumber)
 	/* R1: never open the device blocking.  A blocking write() to a printer
 	 * that is out of paper, off line or simply full hangs forever, and
 	 * neither SO_SNDTIMEO nor the idle timeout can rescue the process
-	 * because it never gets back to select(). */
-	if ((lp = open(device, bidir ? (O_RDWR|O_NONBLOCK) : (O_WRONLY|O_NONBLOCK))) == -1) {
-		/* D2: save errno, dolog() may clobber it, and log one message only. */
-		e = errno;
-		open_printer_errno = e;
-		if (e == EBUSY)
-			dolog(LOGOPTS, "%s: %s, will try opening later\n", device, strerror(e));
-		else
-			dolog(LOGOPTS, "%s: %s\n", device, strerror(e));
-	} else
-		open_printer_errno = 0;
+	 * because it never gets back to poll(). */
+	lp = open(device, bidir ? (O_RDWR|O_NONBLOCK) : (O_WRONLY|O_NONBLOCK));
 	return (lp);
 }
 
-/* B3: a busy printer is worth retrying, a missing device node or a
- * permission problem will never fix itself by waiting. */
-static int printer_open_is_temporary(int e)
-{
-	return (e == EBUSY || e == EAGAIN || e == EINTR ||
-		e == ENOMEM || e == ENFILE || e == EMFILE);
-}
-
-/* B3: bounded exponential backoff instead of "while (...) sleep(10);" which
- * pinned the daemon (or the inetd instance) forever and stopped accepting.
- * U6: also honour SIGTERM during the backoff instead of sleeping blind; U10a:
- * log the real device name and errno on permanent failure. */
+/* Keep retrying until the printer is available.  At service start the
+ * printer is often still switched off - the device node may not exist at all
+ * - and an off-line printer reports errors that no fixed timeout can fix, so
+ * every failure is retried indefinitely; the job waits instead of being
+ * dropped.  U6: SIGTERM still stops the wait promptly.  U10a: log the real
+ * device name and errno on every attempt so the cause is visible in syslog. */
 static int open_printer_retry(int lpnumber)
 {
 	int lp;
-	int waited = 0;
-	int sleepfor = 1;
+	int left;
 
 	for (;;) {
 		if (got_term)			/* U6: stop promptly on shutdown */
 			return -1;
 		if ((lp = open_printer(lpnumber)) >= 0)
 			return lp;
-		if (!printer_open_is_temporary(open_printer_errno) ||
-		    waited >= OPEN_PRINTER_MAX_WAIT) {
-			/* U10a: name the device and the real errno so the cause
-			 * (missing node, permission, busy) is visible in syslog. */
-			dolog(LOGOPTS,
-			      "cannot open printer %s after %d seconds: %s, job abandoned\n",
-			      device ? device : "(unknown)", waited,
-			      strerror(open_printer_errno));
-			return -1;
-		}
-		/* U6: wake early on termination rather than sleeping the full slice. */
+		/* D2: save errno before dolog() (vsyslog) can clobber it. */
 		{
-			int left = sleepfor;
-			while (left-- > 0 && !got_term)
-				(void)sleep(1);
+			int e = errno;
+			dolog(LOGOPTS, "cannot open printer %s: %s, will keep retrying\n",
+			      device ? device : "(unknown)", strerror(e));
 		}
-		waited += sleepfor;
-		if (sleepfor < OPEN_PRINTER_MAX_SLEEP)
-			sleepfor *= 2;
+		/* Sleep in one-second slices so SIGTERM is noticed promptly. */
+		left = OPEN_PRINTER_RETRY_INTERVAL;
+		while (left-- > 0 && !got_term)
+			(void)sleep(1);
 	}
 }
 
