@@ -278,6 +278,13 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
 #ifndef		NETWORK_STALL_TIMEOUT
 #define		NETWORK_STALL_TIMEOUT	120
 #endif
+/* V1 test knob: delay (us) after reading from the printer in bi-directional
+ * mode, so the return stream cannot dominate.  The default keeps the reply
+ * polite; the test build lowers it so a stuck return buffer engages the
+ * NETWORK_STALL_TIMEOUT guard quickly.  Override with -DPRINTER_READ_PACE_US=n. */
+#ifndef		PRINTER_READ_PACE_US
+#define		PRINTER_READ_PACE_US	100000
+#endif
 
 /* Circular buffer used for each direction. */
 typedef struct {
@@ -1011,12 +1018,14 @@ int copy_stream(int fd, int lp)
 		int timer = 0;
 		int moved;
 		int printer_replied = 0;	/* U4: printer has produced output this job */
+		struct timeval last_pn_progress;	/* V1: printer->network progress */
 		Buffer_t printerToNetworkBuffer;
 		initBuffer(&printerToNetworkBuffer, lp, fd, printer_is_regular(lp));
 		fd_set readfds;
 		fd_set writefds;
 		gettimeofday(&last_activity, 0);
 		gettimeofday(&last_print, 0);
+		gettimeofday(&last_pn_progress, 0);
 		/* Finish when network sent EOF. */
 		/* The printer to network stream may however not be finished: the
 		 * answer to a status query arrives after the client half closed,
@@ -1071,10 +1080,11 @@ int copy_stream(int fd, int lp)
 					moved = 1;
 					dolog(LOG_DEBUG,"%d.%d: read %d bytes from printer\n", (int)now.tv_sec, (int)now.tv_usec, result);
 					gettimeofday(&last_activity, 0);
+					gettimeofday(&last_pn_progress, 0);	/* V1 */
 					printer_replied = 1;	/* U4: printer has produced output */
 					gettimeofday(&then, 0);
-					// wait 100 msec before reading again.
-					then.tv_usec += 100000;
+					// wait PRINTER_READ_PACE_US before reading again.
+					then.tv_usec += PRINTER_READ_PACE_US;
 					if (then.tv_usec > 1000000) {
 						then.tv_usec -= 1000000;
 						then.tv_sec++;
@@ -1120,6 +1130,7 @@ int copy_stream(int fd, int lp)
 						moved = 1;
 						dolog(LOG_DEBUG,"%d.%d: wrote %d bytes to network\n", (int)now.tv_sec, (int)now.tv_usec, result);
 						gettimeofday(&last_activity, 0);
+						gettimeofday(&last_pn_progress, 0);	/* V1 */
 					}
 				}
 			}
@@ -1181,6 +1192,23 @@ int copy_stream(int fd, int lp)
 			}
 			/* R6: never poll with zero delay, an idle iteration always
 			 * costs at least this pause. */
+			/* V1: bounded, direction-independent no-progress guard for the
+			 * printer->network stream.  A bi-directional job where the client
+			 * half-closed and then never reads the return data (or the peer
+			 * vanished) used to spin forever: every other exit in this loop
+			 * requires both buffers to be empty, but the 8KB return buffer
+			 * stays full because the socket will not accept it.  If data sits
+			 * in that buffer yet neither reaches the client nor is read from
+			 * the printer for NETWORK_STALL_TIMEOUT seconds, end the job and
+			 * release the lock/connection.  Healthy transfers keep resetting
+			 * last_pn_progress, so they are never cut off. */
+			if (printerToNetworkBuffer.bytes > 0 &&
+			    (now.tv_sec - last_pn_progress.tv_sec) >= NETWORK_STALL_TIMEOUT) {
+				dolog(LOG_NOTICE,
+				      "return path stalled for %d seconds, ending job\n",
+				      (int)NETWORK_STALL_TIMEOUT);
+				break;
+			}
 			if (got_term)	/* U6: stop promptly on shutdown */
 				break;
 			if (!moved)
