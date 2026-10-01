@@ -172,13 +172,25 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
 #ifndef		IDLE_TIMEOUT
 #define		IDLE_TIMEOUT	30
 #endif
-/* The printer may be switched off when the daemon starts (or between two
- * jobs), in which case the device node may not even exist yet, so opening it
- * is retried until it appears: waiting for the printer is better than losing
- * the job.  Interval between attempts in seconds (SIGTERM still interrupts
- * the wait).  Override with -DOPEN_PRINTER_RETRY_INTERVAL=n. */
+/* Opening the printer is retried because the printer may be switched off when
+ * the daemon starts, or switched off between two jobs, so the device node may
+ * not exist yet; waiting for the printer is better than losing the job.
+ * The wait differs by the kind of failure (see printer_open_is_permanent()):
+ * a temporary failure is retried forever, a permanent one only until
+ * OPEN_PRINTER_PERMANENT_WAIT seconds have passed since the client connected,
+ * so the user gets that long to switch the printer on but a job whose printer
+ * is simply missing is not held (and does not hold the queue) indefinitely.
+ * The budget is counted from the connection, not from each attempt, so a job
+ * that already queued longer than the budget fails as soon as it sees a
+ * permanent error instead of adding another full wait.
+ * Interval between attempts in seconds; SIGTERM interrupts the wait.
+ * Override with -DOPEN_PRINTER_RETRY_INTERVAL=n /
+ * -DOPEN_PRINTER_PERMANENT_WAIT=n. */
 #ifndef		OPEN_PRINTER_RETRY_INTERVAL
 #define		OPEN_PRINTER_RETRY_INTERVAL	10
+#endif
+#ifndef		OPEN_PRINTER_PERMANENT_WAIT
+#define		OPEN_PRINTER_PERMANENT_WAIT	30
 #endif
 
 /* R1/T4/U1/U2: a printer that accepts no data for this long (while we still
@@ -437,16 +449,32 @@ int open_printer(int lpnumber)
 	return (lp);
 }
 
-/* Keep retrying until the printer is available.  At service start the
- * printer is often still switched off - the device node may not exist at all
- * - and an off-line printer reports errors that no fixed timeout can fix, so
- * every failure is retried indefinitely; the job waits instead of being
- * dropped.  U6: SIGTERM still stops the wait promptly.  U10a: log the real
- * device name and errno on every attempt so the cause is visible in syslog. */
-static int open_printer_retry(int lpnumber)
+/* Classify an open() failure.  A *temporary* failure clears by itself and is
+ * worth waiting for without any limit: the device is busy (EBUSY, e.g. another
+ * writer), the node exists but its backing device is not ready yet (ENXIO -
+ * no reader on a FIFO, a USB backend in the middle of a power cycle), the call
+ * was interrupted (EINTR), or the system is momentarily out of resources
+ * (ENOMEM/ENFILE/EMFILE).  A *permanent* failure will not fix itself by
+ * waiting: the device node is gone (ENOENT), the backend is detached
+ * (ENODEV), access is denied (EACCES/EPERM) or the device reported an I/O
+ * error (EIO).  Those are abandoned after OPEN_PRINTER_PERMANENT_WAIT. */
+static int printer_open_is_permanent(int e)
+{
+	return !(e == EBUSY || e == EAGAIN || e == EWOULDBLOCK || e == EINTR ||
+		 e == ENOMEM || e == ENFILE || e == EMFILE || e == ENXIO);
+}
+
+/* Wait for the printer to become available.  Temporary failures are retried
+ * indefinitely; permanent ones until OPEN_PRINTER_PERMANENT_WAIT seconds have
+ * elapsed since the client connected (the caller passes that instant in), so
+ * the user gets a bounded chance to switch the printer on and a missing
+ * printer cannot hold the job - and the job queue behind it - forever.
+ * U6: SIGTERM still stops the wait promptly.  U10a: the real device name and
+ * errno are logged on every attempt so the cause is visible in syslog. */
+static int open_printer_retry(int lpnumber, time_t connected_at)
 {
 	int lp;
-	int left;
+	long left;
 
 	for (;;) {
 		if (got_term)			/* U6: stop promptly on shutdown */
@@ -456,11 +484,28 @@ static int open_printer_retry(int lpnumber)
 		/* D2: save errno before dolog() (vsyslog) can clobber it. */
 		{
 			int e = errno;
+			long budget = OPEN_PRINTER_PERMANENT_WAIT;
+
+			left = OPEN_PRINTER_RETRY_INTERVAL;
+			if (printer_open_is_permanent(e)) {
+				time_t now = time(0);
+				long waited = (long)(now - connected_at);
+
+				if (waited >= budget) {
+					dolog(LOGOPTS,
+					      "cannot open printer %s: %s after %ld seconds, job abandoned\n",
+					      device ? device : "(unknown)",
+					      strerror(e), waited);
+					return -1;
+				}
+				/* Do not overshoot the budget: wake up in time for it. */
+				if (left > budget - waited)
+					left = budget - waited;
+			}
 			dolog(LOGOPTS, "cannot open printer %s: %s, will keep retrying\n",
 			      device ? device : "(unknown)", strerror(e));
 		}
 		/* Sleep in one-second slices so SIGTERM is noticed promptly. */
-		left = OPEN_PRINTER_RETRY_INTERVAL;
 		while (left-- > 0 && !got_term)
 			(void)sleep(1);
 	}
@@ -1522,6 +1567,11 @@ int copy_stream(int fd, int lp)
 static void handle_connection(int fd, int lpnumber)
 {
 	int lp;
+	/* The budget for a permanent open failure counts from the moment the
+	 * client connected, lock queueing included, so a job that has already
+	 * been waiting longer than the budget fails at once instead of adding
+	 * another full wait.  Taken here, right after accept() forked us. */
+	time_t connected_at = time(0);
 	struct sockaddr_storage client;
 	socklen_t clientlen = sizeof(client);
 	char host[INET6_ADDRSTRLEN];
@@ -1539,12 +1589,12 @@ static void handle_connection(int fd, int lpnumber)
 		close_connection(fd, 1);
 		return;
 	}
-	/* Make sure lp device is open... */
-	/* B3: bounded backoff instead of sleeping forever on a missing device.
-	 * The reason (device name + errno) is already logged by
-	 * open_printer_retry().  Device missing is a failure: RST to the client
-	 * (V3) so the job is not silently dropped. */
-	if ((lp = open_printer_retry(lpnumber)) < 0) {
+	/* Make sure lp device is open...  open_printer_retry() decides how long
+	 * to wait: unlimited for a temporary failure, OPEN_PRINTER_PERMANENT_WAIT
+	 * from the client connection for a permanent one.  It logs the reason
+	 * (device name + errno).  Giving up is a failure: RST to the client (V3)
+	 * so the job is not silently dropped. */
+	if ((lp = open_printer_retry(lpnumber, connected_at)) < 0) {
 		close_connection(fd, 1);
 		return;
 	}
