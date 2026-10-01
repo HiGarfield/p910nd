@@ -1028,6 +1028,11 @@ static void wait_printer_idle(int lp)
 					busy = 1;
 			}
 		}
+#else
+		/* No LPGETSTATUS here (FreeBSD, musl, ...): the device cannot be
+		 * queried, so only the bounded wait below is possible and lp has
+		 * nothing to be used for. */
+		(void)lp;
 #endif
 		if (queryable && busy) {
 			sleep_us(100000);
