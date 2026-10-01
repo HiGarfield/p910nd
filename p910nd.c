@@ -1041,6 +1041,7 @@ int copy_stream(int fd, int lp)
 		int timer = 0;
 		int moved;
 		int printer_replied = 0;	/* U4: printer has produced output this job */
+		int stall_extended = 0;	/* V4: give a slow-but-alive printer a 2nd window */
 		struct timeval last_pn_progress;	/* V1: printer->network progress */
 		Buffer_t printerToNetworkBuffer;
 		initBuffer(&printerToNetworkBuffer, lp, fd, printer_is_regular(lp));
@@ -1163,12 +1164,29 @@ int copy_stream(int fd, int lp)
 			 * full buffer).  Stop, but do NOT mark failure here: the final flush
 			 * gets one last chance and we judge by bytes delivered, so a printer
 			 * that recovers within the window is never reported dead. */
-			if (networkToPrinterBuffer.bytes == 0)
-				gettimeofday(&last_print, 0);
-			else if (now.tv_sec - last_print.tv_sec >= PRINTER_STALL_TIMEOUT) {
-				dolog(LOG_NOTICE,"printer accepted no data for %d seconds, stopping job\n", (int)PRINTER_STALL_TIMEOUT);
-				break;
-			}
+			 if (networkToPrinterBuffer.bytes == 0)
+			 gettimeofday(&last_print, 0);
+			 else {
+			 /* V4: do not destroy a slow-but-alive printer.  A device that is
+			 * merely slow (heating, large buffer, walking the paper) may not
+			 * accept a byte for longer than PRINTER_STALL_TIMEOUT between
+			 * consumptions.  On the first stall window give it a second,
+			 * equal window before declaring it dead - any byte written in
+			 * either window resets the clock. */
+			 long stalled = now.tv_sec - last_print.tv_sec;
+			 if (stalled >= PRINTER_STALL_TIMEOUT) {
+			 if (!stall_extended) {
+			 stall_extended = 1;
+			 gettimeofday(&last_print, 0);
+			 dolog(LOG_NOTICE,
+			 "printer accepted no data for %ld seconds, extending wait\n",
+			 (long)PRINTER_STALL_TIMEOUT);
+			 } else {
+			 dolog(LOG_NOTICE,"printer accepted no data for %d seconds, stopping job\n", (int)PRINTER_STALL_TIMEOUT * 2);
+			 break;
+			 }
+			 }
+			 }
 			/* U3/U9: idle only counts when both buffers are empty AND the client
 			 * has not yet half-closed - once it has, we are waiting for the
 			 * printer's reply and the reply-window block below decides.  This
@@ -1277,6 +1295,7 @@ int copy_stream(int fd, int lp)
 		fd_set writefds;
 		int maxfd = lp > fd ? lp : fd;
 		int moved;
+		int stall_extended = 0;	/* V4: give a slow-but-alive printer a 2nd window */
 		gettimeofday(&last_activity, 0);
 		gettimeofday(&last_print, 0);
 		/* Unidirectional: simply read from network, and write to printer,
@@ -1326,9 +1345,26 @@ int copy_stream(int fd, int lp)
 			 * so a printer that recovers within the window is not reported dead. */
 			if (networkToPrinterBuffer.bytes == 0)
 				gettimeofday(&last_print, 0);
-			else if (now.tv_sec - last_print.tv_sec >= PRINTER_STALL_TIMEOUT) {
-				dolog(LOG_NOTICE,"printer accepted no data for %d seconds, stopping job\n", (int)PRINTER_STALL_TIMEOUT);
-				break;
+			else {
+				/* V4: do not destroy a slow-but-alive printer.  A device that is
+				 * merely slow (heating, large buffer, walking the paper) may not
+				 * accept a byte for longer than PRINTER_STALL_TIMEOUT between
+				 * consumptions.  On the first stall window give it a second,
+				 * equal window before declaring it dead - any byte written in
+				 * either window resets the clock. */
+				long stalled = now.tv_sec - last_print.tv_sec;
+				if (stalled >= PRINTER_STALL_TIMEOUT) {
+					if (!stall_extended) {
+						stall_extended = 1;
+						gettimeofday(&last_print, 0);
+						dolog(LOG_NOTICE,
+						      "printer accepted no data for %ld seconds, extending wait\n",
+						      (long)PRINTER_STALL_TIMEOUT);
+					} else {
+						dolog(LOG_NOTICE,"printer accepted no data for %d seconds, stopping job\n", (int)PRINTER_STALL_TIMEOUT * 2);
+						break;
+					}
+				}
 			}
 			/* R3/R9/T2: only count idle time with an empty buffer, and never
 			 * after the client half closed and we are draining.  A client
