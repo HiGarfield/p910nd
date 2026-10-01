@@ -1545,9 +1545,12 @@ void server(int lpnumber)
 	reap_children_and_exit(terminating ? 0 : 1);
 }
 
-/* T10b: a daemon that exits must not leave printing children as orphans.
+/* T10b/U6: a daemon that exits must not leave printing children as orphans.
  * init would adopt them and the init script may unmount the device mid-job.
- * Signal every tracked child and wait a bounded time for them to finish. */
+ * Signal every tracked child and wait a BOUNDED time for them to finish; the
+ * SIGCHLD handler reaps them and decrements inflight_children, so we only poll
+ * that counter (calling waitpid here too would race the handler and could miss
+ * a decrement).  Anything still alive after the timeout is SIGKILLed. */
 static void reap_children_and_exit(int status)
 {
 	int i;
@@ -1561,16 +1564,30 @@ static void reap_children_and_exit(int status)
 		dolog(LOG_NOTICE, "terminating, waiting for %d in-flight job(s)\n",
 		      (int)inflight_children);
 		gettimeofday(&start, 0);
+		/* U6: poll the counter (reaped asynchronously by the SIGCHLD
+		 * handler), bounded so we never block forever. */
 		while (inflight_children > 0) {
-			(void)waitpid(-1, 0, 0);
+			sleep_us(200000);
 			gettimeofday(&now, 0);
 			if (now.tv_sec - start.tv_sec >= 5)
 				break;
 		}
-		if (inflight_children > 0)
+		if (inflight_children > 0) {
 			dolog(LOG_NOTICE,
-			      "%d job(s) still running, leaving them to finish\n",
+			      "%d job(s) still running after timeout, sending SIGKILL\n",
 			      (int)inflight_children);
+			for (i = 0; i < MAX_CHILDREN; i++) {
+				if (child_pids[i] != 0)
+					(void)kill(child_pids[i], SIGKILL);
+			}
+			gettimeofday(&start, 0);
+			while (inflight_children > 0) {
+				sleep_us(100000);
+				gettimeofday(&now, 0);
+				if (now.tv_sec - start.tv_sec >= 5)
+					break;
+			}
+		}
 	}
 	free_lock();
 	remove_pidfile();	/* D9 */
