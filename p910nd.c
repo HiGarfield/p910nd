@@ -1590,9 +1590,23 @@ void server(int lpnumber)
 		 * never closes or a printer that has to be retried must not keep
 		 * the daemon from accepting the next connection; the printer
 		 * itself stays exclusive through the job lock. */
+		sigset_t chld_mask, chld_omask;
+		sigemptyset(&chld_mask);
+		sigaddset(&chld_mask, SIGCHLD);
+		/* U7: block SIGCHLD across fork + record + count.  A child that
+		 * exits between fork() and the slot assignment would otherwise be
+		 * reaped by the handler before its pid is stored in child_pids, so
+		 * it could not be matched, the in-flight count would never be
+		 * decremented, and after MAX_CHILDREN such fast children the daemon
+		 * would refuse every new connection (still measured with
+		 * -DMAX_CHILDREN=3).  Restoring the mask only after the pid is
+		 * recorded lets the pending SIGCHLD deliver into a handler that can
+		 * now match it. */
+		sigprocmask(SIG_BLOCK, &chld_mask, &chld_omask);
 		pid = fork();
 		if (pid < 0) {
 			dolog(LOGOPTS, "fork: %s\n", strerror(errno));
+			sigprocmask(SIG_SETMASK, &chld_omask, NULL);
 			(void)close(fd);
 			continue;
 		}
@@ -1622,6 +1636,8 @@ void server(int lpnumber)
 			}
 		}
 		inflight_children++;
+		/* Now safe: the handler will find the pid just recorded. */
+		sigprocmask(SIG_SETMASK, &chld_omask, NULL);
 	}
 	(void)close(netfd);
 	reap_children_and_exit(terminating ? 0 : 1);
