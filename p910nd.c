@@ -267,7 +267,7 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
 #define		DRAIN_TIMEOUT		10
 #endif
 #ifndef		DRAIN_MAX_BYTES
-#define		DRAIN_MAX_BYTES	(1024 * 1024)
+#define		DRAIN_MAX_BYTES	((size_t)1024 * 1024)
 #endif
 /* V5: socket read/write timeouts, decoupled from the business IDLE_TIMEOUT.
  * Kept short so a write() that the peer is not reading returns EAGAIN at once
@@ -339,6 +339,10 @@ typedef struct {
 	char buffer[BUFFER_SIZE];	/* Buffered data goes here. */
 } Buffer_t;
 
+/* D15: the fallback name is a writable array, not a string literal.  main()
+ * rewrites the port digit inside progname so ps shows the port, and writing
+ * into a literal would be undefined behaviour. */
+static char default_progname[] = "p910nd";
 static char *progname;
 static char version[] = "Version 1.1";
 static char copyright[] = "Copyright (c) 2008-2014 Ken Yap and others, GPLv2";
@@ -369,7 +373,7 @@ static int child_pids_slots = 0;
 
 
 /* Helper function: convert a struct sockaddr address (IPv4 and IPv6) to a string */
-char *get_ip_str(const struct sockaddr *sa, char *s, size_t maxlen)
+static char *get_ip_str(const struct sockaddr *sa, char *s, size_t maxlen)
 {
 	if (s == 0 || maxlen == 0)
 		return s;
@@ -392,15 +396,17 @@ char *get_ip_str(const struct sockaddr *sa, char *s, size_t maxlen)
 	return s;
 }
 
-unsigned short get_port(const struct sockaddr *sa)
+static unsigned short get_port(const struct sockaddr *sa)
 {
 	unsigned short port;
 	switch(sa->sa_family) {
 		case AF_INET:
-			port = ntohs(((struct sockaddr_in *)sa)->sin_port);
+			/* D11: the cast keeps the const of the caller's address,
+			 * casting to a non-const pointer here would silently drop it. */
+			port = ntohs(((const struct sockaddr_in *)sa)->sin_port);
 			break;
 		case AF_INET6:
-			port = ntohs(((struct sockaddr_in6 *)sa)->sin6_port);
+			port = ntohs(((const struct sockaddr_in6 *)sa)->sin6_port);
 			break;
 		default:
 			return 0;
@@ -408,19 +414,22 @@ unsigned short get_port(const struct sockaddr *sa)
 	return port;
 }
 
-void usage(void)
+static void usage(void)
 {
 	fprintf(stderr, "%s %s %s\n", progname, version, copyright);
 	fprintf(stderr, "Usage: %s [-f device] [-i bindaddr] [-bvd] [0|1|2]\n", progname);
 	exit(1);
 }
 
-void show_version(void)
+static void show_version(void)
 {
 	fprintf(stdout, "%s %s\n", progname, version);
 }
 
-void dolog(int level, char* msg, ...)
+/* The format string is never modified: taking it as const char * keeps every
+ * call site from passing a (const) string literal as a char * (which the
+ * compiler only accepts because C89 types literals as char[]). */
+static void dolog(int level, const char *msg, ...)
 {
 	va_list argp;
 	va_start(argp, msg);
@@ -428,7 +437,7 @@ void dolog(int level, char* msg, ...)
 		vfprintf(stdout, msg, argp);
 	else if (level != LOG_DEBUG)
 		vsyslog(level, msg, argp);
-	va_end(argp);	
+	va_end(argp);
 }
 
 /* Sleep for a fraction of a second, retrying when a signal interrupts it. */
@@ -442,13 +451,14 @@ static void sleep_us(long usec)
 		;
 }
 
-int open_printer(int lpnumber)
+static int open_printer(int lpnumber)
 {
 	int lp;
 	/* C7: static storage, the global device used to point into this frame. */
 	static char lpname[sizeof(PRINTERFILE)];
 
 #ifdef	TESTING
+	(void)lpnumber;		/* the test build always uses /dev/tty */
 	(void)snprintf(lpname, sizeof(lpname), "/dev/tty");
 #else
 	(void)snprintf(lpname, sizeof(lpname), PRINTERFILE, lpnumber);
@@ -487,21 +497,21 @@ static int printer_open_is_permanent(int e)
  * errno are logged on every attempt so the cause is visible in syslog. */
 static int open_printer_retry(int lpnumber, time_t connected_at)
 {
-	int lp;
-	long left;
-
 	for (;;) {
+		int lp;
+		long left = OPEN_PRINTER_RETRY_INTERVAL;
+
 		if (got_term)			/* U6: stop promptly on shutdown */
 			return -1;
-		if ((lp = open_printer(lpnumber)) >= 0)
+		lp = open_printer(lpnumber);
+		if (lp >= 0)
 			return lp;
 		/* D2: save errno before dolog() (vsyslog) can clobber it. */
 		{
 			int e = errno;
-			long budget = OPEN_PRINTER_PERMANENT_WAIT;
 
-			left = OPEN_PRINTER_RETRY_INTERVAL;
 			if (printer_open_is_permanent(e)) {
+				long budget = OPEN_PRINTER_PERMANENT_WAIT;
 				time_t now = time(0);
 				long waited = (long)(now - connected_at);
 
@@ -530,7 +540,7 @@ static int open_printer_retry(int lpnumber, time_t connected_at)
  * a print job is worse than letting it queue.  F_SETLKW blocks in the kernel,
  * so waiting costs no CPU; EINTR is retried because SIGCHLD is delivered
  * whenever another job child exits.  got_term keeps shutdown prompt. */
-static int take_lock(int lockfd, off_t start)
+static int take_lock(int fd, off_t start)
 {
 	struct flock lplock;
 
@@ -541,7 +551,7 @@ static int take_lock(int lockfd, off_t start)
 	lplock.l_len = 1;
 	lplock.l_pid = getpid();
 	for (;;) {
-		if (fcntl(lockfd, F_SETLKW, &lplock) == 0)
+		if (fcntl(fd, F_SETLKW, &lplock) == 0)
 			return (1);
 		if (errno == EINTR) {
 			if (got_term)
@@ -553,10 +563,11 @@ static int take_lock(int lockfd, off_t start)
 	}
 }
 
-int get_lock(int lpnumber)
+static int get_lock(int lpnumber)
 {
 	(void)snprintf(lockname, sizeof(lockname), LOCKFILE, lpnumber);
-	if ((lockfd = open(lockname, O_CREAT | O_RDWR, 0666)) < 0) {
+	lockfd = open(lockname, O_CREAT | O_RDWR, 0666);
+	if (lockfd < 0) {
 		dolog(LOGOPTS, "%s: %s\n", lockname, strerror(errno));	/* D1 */
 		return (0);
 	}
@@ -597,7 +608,7 @@ static void unlock_printer_job(void)
 	lock_held = 0;
 }
 
-void free_lock(void)
+static void free_lock(void)
 {
 	/* T6: the lock file is intentionally NOT unlinked.  Unlinking it while
 	 * another instance holds a lock on the same inode would let a later
@@ -706,13 +717,22 @@ static int record_child(pid_t pid)
 }
 
 /* A1/D9: ignoring SIGPIPE keeps a vanished client from killing the daemon,
- * the write simply fails with EPIPE which is handled as "peer is gone". */
+ * the write simply fails with EPIPE which is handled as "peer is gone".
+ * D12: sigaction() is used for every disposition, including SIG_IGN.
+ * signal() is not used at all: POSIX allows SIG_IGN to be defined as a plain
+ * integer constant (it is on some libcs), and the semantics of signal()
+ * differ between implementations (System V resets the disposition to
+ * SIG_DFL after delivery, BSD does not). */
 static void setup_signals(void)
 {
 	struct sigaction sa;
 
-	(void)signal(SIGPIPE, SIG_IGN);
-	(void)signal(SIGHUP, SIG_IGN);	/* R10: don't die when the terminal goes */
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = SIG_IGN;
+	(void)sigemptyset(&sa.sa_mask);
+	sa.sa_flags = 0;
+	(void)sigaction(SIGPIPE, &sa, 0);
+	(void)sigaction(SIGHUP, &sa, 0);	/* R10: don't die when the terminal goes */
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_handler = terminate_handler;
 	(void)sigemptyset(&sa.sa_mask);
@@ -778,7 +798,10 @@ static void set_socket_options(int fd)
 }
 
 /* A4: rlim_max may be RLIM_INFINITY, which made the close loop in server()
- * endless; rlim_cur is what the process can actually have open. */
+ * endless; rlim_cur is what the process can actually have open.
+ * Only the daemonizing path needs it, so it is not built in TESTING mode
+ * (an unused static function would be a warning there). */
+#ifndef	TESTING
 static long fd_limit(void)
 {
 	struct rlimit rl;
@@ -787,7 +810,7 @@ static long fd_limit(void)
 	if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY)
 		n = (long)rl.rlim_cur;
 	else {
-		n = (long)sysconf(_SC_OPEN_MAX);
+		n = sysconf(_SC_OPEN_MAX);
 		if (n < 0)
 			n = 256;	/* last resort */
 	}
@@ -797,9 +820,10 @@ static long fd_limit(void)
 		n = 4096;
 	return n;
 }
+#endif
 
 /* Initializes the buffer, at the start. */
-void initBuffer(Buffer_t * b, int infd, int outfd, int detectEof)
+static void initBuffer(Buffer_t * b, int infd, int outfd, int detectEof)
 {
 	b->detectEof = detectEof;
 	b->infd = infd;
@@ -838,7 +862,7 @@ static short buffer_write_events(const Buffer_t * b)
 }
 
 /* Reads data into a buffer from its input file. */
-ssize_t readBuffer(Buffer_t * b)
+static ssize_t readBuffer(Buffer_t * b)
 {
 	size_t avail;
 	ssize_t result = 0;
@@ -908,7 +932,7 @@ ssize_t readBuffer(Buffer_t * b)
 }
 
 /* Writes data from a buffer to the output file or discard if no output file is set. */
-ssize_t writeBuffer(Buffer_t * b)
+static ssize_t writeBuffer(Buffer_t * b)
 {
 	size_t avail;
 	ssize_t result = 0;
@@ -1025,47 +1049,38 @@ static int flush_buffer(Buffer_t * b, int timeout_secs)
  * stays portable to musl/OpenWrt (LPGETSTATUS only exists on Linux). */
 static void wait_printer_idle(int lp)
 {
-	struct timeval start, now;
+#ifdef	LPGETSTATUS
+	struct timeval start;
+	struct timeval now;
 
+	/* Only the real parallel port supports this; for any other device
+	 * ioctl() fails and we fall through to the bounded wait below. */
 	gettimeofday(&start, 0);
 	for (;;) {
-		int busy = 0;
-		int queryable = 0;
+		int st = 0;
 
-#ifdef	LPGETSTATUS
-		{
-			int st = 0;
-			/* Only the real parallel port supports this; for any other
-			 * device ioctl() fails and we fall through to the bounded
-			 * wait below. */
-			if (ioctl(lp, LPGETSTATUS, &st) == 0) {
-				queryable = 1;
-				if (st & LP_BUSY)
-					busy = 1;
-			}
-		}
-#else
-		/* No LPGETSTATUS here (FreeBSD, musl, ...): the device cannot be
-		 * queried, so only the bounded wait below is possible and lp has
-		 * nothing to be used for. */
-		(void)lp;
-#endif
-		if (queryable && busy) {
-			sleep_us(100000);
-			gettimeofday(&now, 0);
-			if (now.tv_sec - start.tv_sec >= PRINTER_DRAIN_TIMEOUT)
-				break;
-			if (got_term)	/* U6: terminate promptly */
-				break;
-			continue;
-		}
-		/* Non-queryable device, or the port reported idle: give the driver
-		 * a short, bounded chance to push the last bytes out, then stop.
-		 * This replaces the old always-immediate select() return that left
-		 * the tail of the job unprotected (U8a). */
-		sleep_us(200000);
-		break;
+		if (ioctl(lp, LPGETSTATUS, &st) != 0)
+			break;		/* not queryable, cannot do better */
+		if (!(st & LP_BUSY))
+			break;		/* the port reports idle */
+		sleep_us(100000);
+		gettimeofday(&now, 0);
+		if (now.tv_sec - start.tv_sec >= PRINTER_DRAIN_TIMEOUT)
+			break;
+		if (got_term)	/* U6: terminate promptly */
+			break;
 	}
+#else
+	/* No LPGETSTATUS here (FreeBSD, musl, ...): the device cannot be
+	 * queried, so only the bounded wait below is possible and lp has
+	 * nothing to be used for. */
+	(void)lp;
+#endif
+	/* Non-queryable device, unqueryable port or a port that reported idle:
+	 * give the driver a short, bounded chance to push the last bytes out,
+	 * then stop.  This replaces the old always-immediate select() return
+	 * that left the tail of the job unprotected (U8a). */
+	sleep_us(200000);
 	dolog(LOG_DEBUG, "device drained (or timed out), closing\n");
 }
 
@@ -1133,7 +1148,7 @@ static int printer_is_regular(int lp)
 
 /* Copy network data from file descriptor fd (network) to lp (printer) until EOS */
 /* If bidir, also copy data from printer (lp) to network (fd). */
-int copy_stream(int fd, int lp)
+static int copy_stream(int fd, int lp)
 {
 	int result;
 	Buffer_t networkToPrinterBuffer;
@@ -1150,7 +1165,6 @@ int copy_stream(int fd, int lp)
 		struct timeval last_activity;
 		struct timeval last_print;
 		int timer = 0;
-		int moved;
 		int printer_replied = 0;	/* U4: printer has produced output this job */
 		int stall_extended = 0;	/* V4: give a slow-but-alive printer a 2nd window */
 		int lock_released = 0;	/* V7: byte-1 lock freed once print dir done */
@@ -1167,7 +1181,7 @@ int copy_stream(int fd, int lp)
 		 * answer to a status query arrives after the client half closed,
 		 * so the loop below waits for it. */
 		while (!(networkToPrinterBuffer.err & WRITE_ERR) && !(printerToNetworkBuffer.err & WRITE_ERR)) {
-			moved = 0;
+			int moved = 0;
 			/* C2: a read error only ends the job once the buffer is drained. */
 			if ((networkToPrinterBuffer.err & READ_ERR) && networkToPrinterBuffer.bytes == 0)
 				break;
@@ -1259,7 +1273,6 @@ int copy_stream(int fd, int lp)
 					 * the job keeps going to the printer. */
 					printerToNetworkBuffer.outfd = -1;
 					printerToNetworkBuffer.err = 0;
-					result = 0;
 					dolog(LOG_INFO,"network write error, discarding further printer data\n");	/* D10 */
 				}
 				else if (result > 0) {
@@ -1279,38 +1292,38 @@ int copy_stream(int fd, int lp)
 			 * full buffer).  Stop, but do NOT mark failure here: the final flush
 			 * gets one last chance and we judge by bytes delivered, so a printer
 			 * that recovers within the window is never reported dead. */
-			 if (networkToPrinterBuffer.bytes == 0)
-			 gettimeofday(&last_print, 0);
-			 		 else {
-			 /* V2: PRINTER_STALL_TIMEOUT == 0 means "wait forever for the printer"
-			 * (e.g. paper added days later) - never abandon on stall.  The network
-			 * side is still bounded by NETWORK_STALL_TIMEOUT (V1), so this cannot
-			 * hang the whole daemon the way an unbounded stall used to. */
-			 if (PRINTER_STALL_TIMEOUT > 0) {
-			 /* V4: do not destroy a slow-but-alive printer.  A device that is
-			 * merely slow (heating, large buffer, walking the paper) may not
-			 * accept a byte for longer than PRINTER_STALL_TIMEOUT between
-			 * consumptions.  On the first stall window give it a second,
-			 * equal window before declaring it dead - any byte written in
-			 * either window resets the clock. */
-			 long stalled = now.tv_sec - last_print.tv_sec;
-			 if (stalled >= PRINTER_STALL_TIMEOUT) {
-			 if (!stall_extended) {
-			 stall_extended = 1;
-			 gettimeofday(&last_print, 0);
-			 dolog(LOG_NOTICE,
-			 "printer accepted no data for %ld seconds, extending wait\n",
-			 (long)PRINTER_STALL_TIMEOUT);
-			 } else {
-			 dolog(LOG_ERR,
-			 "printer stalled for %d seconds, %d bytes undelivered, abandoning job (unrecoverable)\n",
-			 (int)PRINTER_STALL_TIMEOUT * 2,
-			 networkToPrinterBuffer.bytes);
-			 break;
-			 }
-			 }
-			 }
-			 }
+			if (networkToPrinterBuffer.bytes == 0)
+				gettimeofday(&last_print, 0);
+			else {
+				/* V2: PRINTER_STALL_TIMEOUT == 0 means "wait forever for the printer"
+				 * (e.g. paper added days later) - never abandon on stall.  The network
+				 * side is still bounded by NETWORK_STALL_TIMEOUT (V1), so this cannot
+				 * hang the whole daemon the way an unbounded stall used to. */
+				if (PRINTER_STALL_TIMEOUT > 0) {
+					/* V4: do not destroy a slow-but-alive printer.  A device that is
+					 * merely slow (heating, large buffer, walking the paper) may not
+					 * accept a byte for longer than PRINTER_STALL_TIMEOUT between
+					 * consumptions.  On the first stall window give it a second,
+					 * equal window before declaring it dead - any byte written in
+					 * either window resets the clock. */
+					long stalled = now.tv_sec - last_print.tv_sec;
+					if (stalled >= PRINTER_STALL_TIMEOUT) {
+						if (!stall_extended) {
+							stall_extended = 1;
+							gettimeofday(&last_print, 0);
+							dolog(LOG_NOTICE,
+							      "printer accepted no data for %ld seconds, extending wait\n",
+							      (long)PRINTER_STALL_TIMEOUT);
+						} else {
+							dolog(LOG_ERR,
+							      "printer stalled for %d seconds, %d bytes undelivered, abandoning job (unrecoverable)\n",
+							      (int)PRINTER_STALL_TIMEOUT * 2,
+							      networkToPrinterBuffer.bytes);
+							break;
+						}
+					}
+				}
+			}
 			/* V7: once the print direction is fully delivered (the client has
 			 * half-closed and the network->printer buffer is empty) release the
 			 * byte-1 job lock so a real print job is not blocked behind this
@@ -1413,18 +1426,18 @@ int copy_stream(int fd, int lp)
 			if (!print_ok) {
 				dolog(LOG_ERR,
 				      "Job incomplete: %lu/%lu bytes sent to printer, %lu/%lu bytes sent to network\n",
-				      (unsigned long)networkToPrinterBuffer.totalout,
-				      (unsigned long)networkToPrinterBuffer.totalin,
-				      (unsigned long)printerToNetworkBuffer.totalout,
-				      (unsigned long)printerToNetworkBuffer.totalin);
+				      networkToPrinterBuffer.totalout,
+				      networkToPrinterBuffer.totalin,
+				      printerToNetworkBuffer.totalout,
+				      printerToNetworkBuffer.totalin);
 				return (-1);
 			}
 			dolog(LOG_NOTICE,
 			      "Finished job: %lu/%lu bytes sent to printer, %lu/%lu bytes sent to network\n",
-			      (unsigned long)networkToPrinterBuffer.totalout,
-			      (unsigned long)networkToPrinterBuffer.totalin,
-			      (unsigned long)printerToNetworkBuffer.totalout,
-			      (unsigned long)printerToNetworkBuffer.totalin);
+			      networkToPrinterBuffer.totalout,
+			      networkToPrinterBuffer.totalin,
+			      printerToNetworkBuffer.totalout,
+			      printerToNetworkBuffer.totalin);
 			if (printerToNetworkBuffer.outfd == -1)
 				dolog(LOG_INFO, "client disconnected before reply, print completed\n");
 			return (0);
@@ -1434,7 +1447,6 @@ int copy_stream(int fd, int lp)
 		struct timeval last_activity;
 		struct timeval last_print;
 		struct pollfd pfd[2];
-		int moved;
 		int stall_extended = 0;	/* V4: give a slow-but-alive printer a 2nd window */
 		int lock_released = 0;	/* V7: byte-1 lock freed once print dir done */
 		gettimeofday(&last_activity, 0);
@@ -1444,7 +1456,7 @@ int copy_stream(int fd, int lp)
 		 * silent client stop the daemon for everybody (B1).  poll() also
 		 * means a descriptor beyond the old FD_SETSIZE limit is fine. */
 		while (!(networkToPrinterBuffer.err & WRITE_ERR)) {
-			moved = 0;
+			int moved = 0;
 			/* C2: a read error only ends the job once the buffer is drained. */
 			if ((networkToPrinterBuffer.err & READ_ERR) && networkToPrinterBuffer.bytes == 0)
 				break;
@@ -1489,7 +1501,7 @@ int copy_stream(int fd, int lp)
 			 * so a printer that recovers within the window is not reported dead. */
 			if (networkToPrinterBuffer.bytes == 0)
 				gettimeofday(&last_print, 0);
-					else {
+			else {
 				/* V2: PRINTER_STALL_TIMEOUT == 0 means "wait forever for the printer"
 				 * (e.g. paper added days later) - never abandon on stall.  The
 				 * network side is still bounded by NETWORK_STALL_TIMEOUT (V1). */
@@ -1535,7 +1547,7 @@ int copy_stream(int fd, int lp)
 			 * only after SILENT_TIMEOUT of no progress, so a pause in the
 			 * middle of a job is not mistaken for a dead client. */
 			if (!networkToPrinterBuffer.eof_read && !networkToPrinterBuffer.eof_sent &&
-		    networkToPrinterBuffer.bytes == 0) {
+			    networkToPrinterBuffer.bytes == 0) {
 				long limit = (networkToPrinterBuffer.saw_data == 0) ? IDLE_TIMEOUT : SILENT_TIMEOUT;
 				if (now.tv_sec - last_activity.tv_sec >= limit) {
 					/* U3/U10c: stop waiting on the (possibly just slow)
@@ -1546,8 +1558,8 @@ int copy_stream(int fd, int lp)
 						dolog(LOG_NOTICE,
 						      "no data for %ld seconds, stopping (sent %lu/%lu to printer)\n",
 						      limit,
-						      (unsigned long)networkToPrinterBuffer.totalout,
-						      (unsigned long)networkToPrinterBuffer.totalin);
+						      networkToPrinterBuffer.totalout,
+						      networkToPrinterBuffer.totalin);
 					else
 						dolog(LOG_NOTICE,
 						      "no data transferred for %ld seconds, stop copy stream\n", limit);
@@ -1582,13 +1594,13 @@ int copy_stream(int fd, int lp)
 			               !(networkToPrinterBuffer.err & WRITE_ERR);
 			if (!print_ok) {
 				dolog(LOG_ERR, "Job incomplete: %lu/%lu bytes sent to printer\n",
-				      (unsigned long)networkToPrinterBuffer.totalout,
-				      (unsigned long)networkToPrinterBuffer.totalin);
+				      networkToPrinterBuffer.totalout,
+				      networkToPrinterBuffer.totalin);
 				return (-1);
 			}
 			dolog(LOG_NOTICE, "Finished job: %lu/%lu bytes sent to printer\n",
-			      (unsigned long)networkToPrinterBuffer.totalout,
-			      (unsigned long)networkToPrinterBuffer.totalin);
+			      networkToPrinterBuffer.totalout,
+			      networkToPrinterBuffer.totalin);
 			return (0);
 		}
 	}
@@ -1628,7 +1640,8 @@ static void handle_connection(int fd, int lpnumber)
 	 * from the client connection for a permanent one.  It logs the reason
 	 * (device name + errno).  Giving up is a failure: RST to the client (V3)
 	 * so the job is not silently dropped. */
-	if ((lp = open_printer_retry(lpnumber, connected_at)) < 0) {
+	lp = open_printer_retry(lpnumber, connected_at);
+	if (lp < 0) {
 		close_connection(fd, 1);
 		return;
 	}
@@ -1650,7 +1663,7 @@ static void handle_connection(int fd, int lpnumber)
 	}
 }
 
-void one_job(int lpnumber)
+static void one_job(int lpnumber)
 {
 	struct sockaddr_storage client;
 	socklen_t clientlen = sizeof(client);
@@ -1679,23 +1692,24 @@ void one_job(int lpnumber)
 /* T10b: declared early because server() calls it on shutdown. */
 static void reap_children_and_exit(int status);
 
-void server(int lpnumber)
+static void server(int lpnumber)
 {
 #ifdef	USE_GETPROTOBYNAME
-	struct protoent *proto;
+	const struct protoent *proto;
 #endif
 	int netfd = -1, fd, one = 1;
 	int rc;
 	int terminating = 0;
 	struct addrinfo hints, *res, *ressave;
 	char service[16];	/* D7: sizeof(BASEPORT+...) was sizeof(int)+1 */
-	FILE *f;
 	const int bufsiz = 65536;
 
 #ifndef	TESTING
 	if (!log_to_stdout)
 	{
 		long maxfd;
+		FILE *f;
+
 		switch (fork()) {
 		case -1:
 			dolog(LOGOPTS, "fork: %s\n", strerror(errno));
@@ -1731,7 +1745,8 @@ void server(int lpnumber)
 		if (fd > 2)
 			(void)close(fd);
 		(void)snprintf(pidfilename, sizeof(pidfilename), PIDFILE, lpnumber);
-		if ((f = fopen(pidfilename, "w")) == NULL) {
+		f = fopen(pidfilename, "w");
+		if (f == NULL) {
 			dolog(LOGOPTS, "%s: %s\n", pidfilename, strerror(errno));
 			exit(1);
 		}
@@ -1753,7 +1768,8 @@ void server(int lpnumber)
 	hints.ai_flags = AI_PASSIVE;
 	hints.ai_socktype = SOCK_STREAM;
 	(void)snprintf(service, sizeof(service), "%hu", (unsigned short)(BASEPORT + lpnumber - '0'));
-	if ((rc = getaddrinfo(bindaddr, service, &hints, &res)) != 0) {
+	rc = getaddrinfo(bindaddr, service, &hints, &res);
+	if (rc != 0) {
 		/* D1: getaddrinfo() does not set errno, use gai_strerror() */
 		dolog(LOGOPTS, "getaddrinfo %s port %s: %s\n",
 		      bindaddr ? bindaddr : "*", service, gai_strerror(rc));
@@ -1762,19 +1778,21 @@ void server(int lpnumber)
 	ressave = res;
 	while (res) {
 #ifdef	USE_GETPROTOBYNAME
-		if ((proto = getprotobyname("tcp6")) == NULL) {
-			if ((proto = getprotobyname("tcp")) == NULL) {
+		proto = getprotobyname("tcp6");
+		if (proto == NULL) {
+			proto = getprotobyname("tcp");
+			if (proto == NULL) {
 				dolog(LOGOPTS, "Cannot find protocol for TCP!\n");
 				exit(1);
 			}
 		}
-		if ((netfd = socket(res->ai_family, res->ai_socktype, proto->p_proto)) < 0)
+		netfd = socket(res->ai_family, res->ai_socktype, proto->p_proto);
 #else
-		if ((netfd = socket(res->ai_family, res->ai_socktype, IPPROTO_IP)) < 0)
+		netfd = socket(res->ai_family, res->ai_socktype, IPPROTO_IP);
 #endif
-		{
+		if (netfd < 0) {
+			/* D13: nothing to close, socket() failed and returned -1. */
 			dolog(LOGOPTS, "socket: %s\n", strerror(errno));
-			close(netfd);
 			res = res->ai_next;
 			continue;
 		}
@@ -1825,6 +1843,9 @@ void server(int lpnumber)
 		 * reap a child before its pid is stored. */
 		sigset_t chld_mask, chld_omask;
 
+		/* D3: get_ip_str() always terminates the buffer, but the log lines
+		 * below pass it to %s, so start from a defined empty string. */
+		host[0] = '\0';
 		/* R10: the signal handler only raised a flag, exit cleanly here */
 		if (got_term) {
 			dolog(LOG_NOTICE, "terminating on signal\n");
@@ -1891,6 +1912,13 @@ void server(int lpnumber)
 		sigemptyset(&chld_mask);
 		sigaddset(&chld_mask, SIGCHLD);
 		sigprocmask(SIG_BLOCK, &chld_mask, &chld_omask);
+		/* D16: with -d stdout is block buffered whenever it is a pipe or a
+		 * file, so the log lines written above are still in the buffer when
+		 * we fork.  The child would flush that inherited copy and print
+		 * every line a second time, so flush first: the child then only
+		 * flushes what it wrote itself. */
+		if (log_to_stdout)
+			(void)fflush(NULL);
 		pid = fork();
 		if (pid < 0) {
 			dolog(LOGOPTS, "fork: %s\n", strerror(errno));
@@ -1932,7 +1960,6 @@ void server(int lpnumber)
  * a decrement).  Anything still alive after the timeout is SIGKILLed. */
 static void reap_children_and_exit(int status)
 {
-	int i;
 	struct timeval start, now;
 
 	/* V8: a routine service restart (SIGTERM) must not throw away a job that is
@@ -1954,6 +1981,7 @@ static void reap_children_and_exit(int status)
 	}
 	/* Force-terminate anything still running after the grace period. */
 	if (inflight_children > 0) {
+		int i;
 		dolog(LOG_NOTICE,
 		      "%d job(s) still running after grace period, sending SIGTERM\n",
 		      (int)inflight_children);
@@ -1990,7 +2018,7 @@ static void reap_children_and_exit(int status)
 	exit(status);
 }
 
-int is_standalone(void)
+static int is_standalone(void)
 {
 	struct sockaddr_storage bind_addr;
 	socklen_t ba_len;
@@ -2012,19 +2040,23 @@ int is_standalone(void)
 
 int main(int argc, char *argv[])
 {
-	int c, lpnumber;
-	char *p;
+	int lpnumber = '0';
+	char *p = 0;
 
 	if (argc <= 0)		/* in case not provided in (x)inetd config */
-		progname = "p910nd";
+		progname = default_progname;
 	else {
 		progname = argv[0];
-		if ((p = strrchr(progname, '/')) != 0)
+		p = strrchr(progname, '/');
+		if (p != 0)
 			progname = p + 1;
 	}
-	lpnumber = '0';
 	setup_signals();	/* A1/D9: before any socket or printer work */
-	while ((c = getopt(argc, argv, "bdi:f:v")) != EOF) {
+	for (;;) {
+		int c = getopt(argc, argv, "bdi:f:v");
+
+		if (c == EOF)
+			break;
 		switch (c) {
 		case 'b':
 			bidir = 1;
@@ -2050,12 +2082,15 @@ int main(int argc, char *argv[])
 	argc -= optind;
 	argv += optind;
 	if (argc > 0) {
-		if (isdigit(argv[0][0]))
-			lpnumber = argv[0][0];
+		/* D14: isdigit() is only defined for EOF or an unsigned char
+		 * value, passing a plain (possibly negative) char is undefined. */
+		if (isdigit((unsigned char)argv[0][0]))
+			lpnumber = (int)(unsigned char)argv[0][0];
 	}
 	/* change the n in argv[0] to match the port so ps will show that */
-	if ((p = strstr(progname, "p910n")) != NULL)
-		p[4] = lpnumber;
+	p = strstr(progname, "p910n");
+	if (p != NULL)
+		p[4] = (char)lpnumber;
 
 	/* We used to pass (LOG_PERROR|LOG_PID|LOG_LPR|LOG_ERR) to syslog, but
 	 * syslog ignored the LOG_PID and LOG_PERROR option.  I.e. the intention
