@@ -135,6 +135,11 @@
 #include	<netinet/tcp.h>	/* B2: TCP_NODELAY and keepalive tuning */
 #include	<arpa/inet.h>
 
+#ifdef	__linux__
+#include	<linux/lp.h>	/* U8a: LPGETSTATUS to poll the parallel port */
+#endif
+#include	<sys/ioctl.h>	/* U8a: ioctl() for LPGETSTATUS */
+
 #ifdef	USE_LIBWRAP
 #include	"tcpd.h"
 int allow_severity, deny_severity;
@@ -804,37 +809,53 @@ static void flush_buffer(Buffer_t * b, int timeout_secs)
 	}
 }
 
-/* R5: the 0.97 change log says the device stream may only be closed when the
- * printer is no longer busy, otherwise the driver may drop the last write().
- * Wait until the device can take data again, with a hard limit. */
+/* R5/U8a: the 0.97 change log says the device stream may only be closed when
+ * the printer is no longer busy, otherwise the driver may drop the last write().
+ * A character device (and usblp) reports "writable" from select() almost always,
+ * so select() is useless for them and the old code returned immediately, leaving
+ * the tail of the job unprotected.  When the kernel exposes the parallel-port
+ * status we poll it and wait while the printer is busy; otherwise we give the
+ * driver a single short, interruptible slice to flush.  #ifdef-guarded so it
+ * stays portable to musl/OpenWrt (LPGETSTATUS only exists on Linux). */
 static void wait_printer_idle(int lp)
 {
-	struct timeval start;
-	struct timeval now;
-	int loops = PRINTER_DRAIN_TIMEOUT * 10;
+	struct timeval start, now;
 
 	gettimeofday(&start, 0);
-	while (loops-- > 0) {
-		fd_set writefds;
-		struct timeval tv;
+	for (;;) {
+		int busy = 0;
+		int queryable = 0;
 
-		FD_ZERO(&writefds);
-		FD_SET(lp, &writefds);
-		tv.tv_sec = 0;
-		tv.tv_usec = 100000;
-		if (select(lp + 1, 0, &writefds, 0, &tv) < 0) {
-			if (errno == EINTR)	/* A3 */
-				continue;
-			return;
+#ifdef	LPGETSTATUS
+		{
+			int st = 0;
+			/* Only the real parallel port supports this; for any other
+			 * device ioctl() fails and we fall through to the bounded
+			 * wait below. */
+			if (ioctl(lp, LPGETSTATUS, &st) == 0) {
+				queryable = 1;
+				if (st & LP_BUSY)
+					busy = 1;
+			}
 		}
-		if (FD_ISSET(lp, &writefds))
-			return;		/* room in the device: no longer busy */
-		gettimeofday(&now, 0);
-		if (now.tv_sec - start.tv_sec >= PRINTER_DRAIN_TIMEOUT)
-			break;
+#endif
+		if (queryable && busy) {
+			sleep_us(100000);
+			gettimeofday(&now, 0);
+			if (now.tv_sec - start.tv_sec >= PRINTER_DRAIN_TIMEOUT)
+				break;
+			if (got_term)	/* U6: terminate promptly */
+				break;
+			continue;
+		}
+		/* Non-queryable device, or the port reported idle: give the driver
+		 * a short, bounded chance to push the last bytes out, then stop.
+		 * This replaces the old always-immediate select() return that left
+		 * the tail of the job unprotected (U8a). */
+		sleep_us(200000);
+		break;
 	}
-	dolog(LOG_NOTICE, "printer still busy after %d seconds, closing anyway\n",
-	      (int)PRINTER_DRAIN_TIMEOUT);
+	dolog(LOG_DEBUG, "device drained (or timed out), closing\n");
 }
 
 /* R4: closing a socket that still has unread data makes the kernel send RST,
