@@ -137,6 +137,7 @@
 #include	<netinet/in.h>
 #include	<netinet/tcp.h>	/* B2: TCP_NODELAY and keepalive tuning */
 #include	<arpa/inet.h>
+#include	<poll.h>	/* T8: poll() has no FD_SETSIZE limit */
 
 #ifdef	__linux__
 #include	<linux/lp.h>	/* U8a: LPGETSTATUS to poll the parallel port */
@@ -259,7 +260,7 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
 #endif
 /* V5: socket read/write timeouts, decoupled from the business IDLE_TIMEOUT.
  * Kept short so a write() that the peer is not reading returns EAGAIN at once
- * instead of blocking for IDLE_TIMEOUT seconds; the central select() in
+ * instead of blocking for IDLE_TIMEOUT seconds; the central poll() in
  * copy_stream() retries the move.  Override with -DSOCKET_RCVTIMEO=n /
  * -DSOCKET_SNDTIMEO=n. */
 #ifndef		SOCKET_RCVTIMEO
@@ -677,7 +678,7 @@ static void set_socket_options(int fd)
 	/* V5: socket timeouts are independent of the business IDLE_TIMEOUT.  A
 	 * short send timeout alone would still let write() block for that long;
 	 * the socket is made non-blocking below so an unwritable peer yields
-	 * EAGAIN immediately and the loop retries via select(). */
+	 * EAGAIN immediately and the loop retries via poll(). */
 	tv.tv_sec = SOCKET_RCVTIMEO;
 	tv.tv_usec = 0;
 	(void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
@@ -755,17 +756,25 @@ void initBuffer(Buffer_t * b, int infd, int outfd, int detectEof)
 	b->err = 0;
 }
 
-/* Sets the readfds and writefds (used by select) based on current buffer state. */
-void prepBuffer(Buffer_t * b, fd_set * readfds, fd_set * writefds)
+/* poll() events a buffer is interested in, the equivalent of the old
+ * prepBuffer() select() masks.  poll() has no FD_SETSIZE limit, so a
+ * descriptor with a number that no longer fits an fd_set (which happens on a
+ * long-running daemon or after a big job) is served like any other. */
+static short buffer_read_events(const Buffer_t * b)
 {
-	if (b->outfd>=0 && (!(b->err & WRITE_ERR)) && (b->bytes != 0 || (b->eof_read && !b->eof_sent))) {
-		FD_SET(b->outfd, writefds);
-	}
 	/* reading after a read error would spin on the same failing fd (C2) */
-	if (b->infd>=0 && !b->eof_read && !(b->err & READ_ERR) &&
-	    (size_t)b->bytes < sizeof(b->buffer)) {
-		FD_SET(b->infd, readfds);
-	}
+	if (b->infd >= 0 && !b->eof_read && !(b->err & READ_ERR) &&
+	    (size_t)b->bytes < sizeof(b->buffer))
+		return POLLIN;
+	return 0;
+}
+
+static short buffer_write_events(const Buffer_t * b)
+{
+	if (b->outfd >= 0 && (!(b->err & WRITE_ERR)) &&
+	    (b->bytes != 0 || (b->eof_read && !b->eof_sent)))
+		return POLLOUT;
+	return 0;
 }
 
 /* Reads data into a buffer from its input file. */
@@ -805,7 +814,7 @@ ssize_t readBuffer(Buffer_t * b)
 		} else if (result < 0) {
 			int e = errno;
 			/* A3/C4: interrupted by a signal or nothing available right
-			 * now are not errors, the caller waits on select() again. */
+			 * now are not errors, the caller waits on poll() again. */
 			if (e == EINTR || e == EAGAIN || e == EWOULDBLOCK)
 				result = 0;
 			else if (e == ECONNRESET || e == ENOTCONN) {
@@ -916,19 +925,17 @@ static int flush_buffer(Buffer_t * b, int timeout_secs)
 		if (b->err & WRITE_ERR)
 			break;
 		if (b->outfd >= 0) {
-			fd_set writefds;
-			struct timeval tv;
+			struct pollfd pfd;
 
-			FD_ZERO(&writefds);
-			FD_SET(b->outfd, &writefds);
-			tv.tv_sec = 0;
-			tv.tv_usec = 100000;
-			if (select(b->outfd + 1, 0, &writefds, 0, &tv) < 0) {
+			pfd.fd = b->outfd;
+			pfd.events = POLLOUT;
+			pfd.revents = 0;
+			if (poll(&pfd, 1, 100) < 0) {
 				if (errno == EINTR)	/* A3 */
 					continue;
 				break;
 			}
-			if (!FD_ISSET(b->outfd, &writefds))
+			if (!(pfd.revents & (POLLOUT | POLLERR)))
 				sleep_us(NO_PROGRESS_USLEEP);
 		}
 		gettimeofday(&now, 0);
@@ -1065,12 +1072,8 @@ int copy_stream(int fd, int lp)
 	int result;
 	Buffer_t networkToPrinterBuffer;
 
-	/* T8: select() with an fd >= FD_SETSIZE writes past the end of the
-	 * fd_set, which is undefined behaviour (random corruption / crash).
-	 * A long-running daemon can reach high descriptor numbers, so refuse
-	 * the job instead of risking it. */
-	if (fd < 0 || lp < 0 || fd >= FD_SETSIZE || lp >= FD_SETSIZE) {
-		dolog(LOG_ERR, "T8: descriptor(s) %d/%d out of select() range, refusing job\n", fd, lp);
+	if (fd < 0 || lp < 0) {
+		dolog(LOG_ERR, "refusing job on invalid descriptor(s) %d/%d\n", fd, lp);
 		return (-1);
 	}
 	initBuffer(&networkToPrinterBuffer, fd, lp, 1);
@@ -1078,7 +1081,6 @@ int copy_stream(int fd, int lp)
 	if (bidir) {
 		struct timeval now;
 		struct timeval then;
-		struct timeval timeout;
 		struct timeval last_activity;
 		struct timeval last_print;
 		int timer = 0;
@@ -1088,9 +1090,8 @@ int copy_stream(int fd, int lp)
 		int lock_released = 0;	/* V7: byte-1 lock freed once print dir done */
 		struct timeval last_pn_progress;	/* V1: printer->network progress */
 		Buffer_t printerToNetworkBuffer;
+		struct pollfd pfd[2];
 		initBuffer(&printerToNetworkBuffer, lp, fd, printer_is_regular(lp));
-		fd_set readfds;
-		fd_set writefds;
 		gettimeofday(&last_activity, 0);
 		gettimeofday(&last_print, 0);
 		gettimeofday(&last_pn_progress, 0);
@@ -1099,15 +1100,20 @@ int copy_stream(int fd, int lp)
 		 * answer to a status query arrives after the client half closed,
 		 * so the loop below waits for it. */
 		while (!(networkToPrinterBuffer.err & WRITE_ERR) && !(printerToNetworkBuffer.err & WRITE_ERR)) {
-			int maxfd = lp > fd ? lp : fd;
 			moved = 0;
 			/* C2: a read error only ends the job once the buffer is drained. */
 			if ((networkToPrinterBuffer.err & READ_ERR) && networkToPrinterBuffer.bytes == 0)
 				break;
-			FD_ZERO(&readfds);
-			FD_ZERO(&writefds);
-			prepBuffer(&networkToPrinterBuffer, &readfds, &writefds);
-			prepBuffer(&printerToNetworkBuffer, &readfds, &writefds);
+			/* T8: poll(), not select(), so descriptors beyond the old
+			 * FD_SETSIZE limit are handled like any other. */
+			pfd[0].fd = fd;
+			pfd[0].events = (short)(buffer_read_events(&networkToPrinterBuffer) |
+						buffer_write_events(&printerToNetworkBuffer));
+			pfd[0].revents = 0;
+			pfd[1].fd = lp;
+			pfd[1].events = (short)(buffer_read_events(&printerToNetworkBuffer) |
+						buffer_write_events(&networkToPrinterBuffer));
+			pfd[1].revents = 0;
 
 			if (timer) {
 				/* Delay after reading from the printer, so the */
@@ -1117,22 +1123,20 @@ int copy_stream(int fd, int lp)
 				if ((now.tv_sec > then.tv_sec) || (now.tv_sec == then.tv_sec && now.tv_usec > then.tv_usec))
 					timer = 0;
 				else
-					FD_CLR(lp, &readfds);
+					pfd[1].events &= ~POLLIN;
 			}
 			gettimeofday(&now, 0);
-			timeout.tv_sec = 0;
-			timeout.tv_usec = 100000;
-			result = select(maxfd + 1, &readfds, &writefds, 0, &timeout);
+			result = poll(pfd, 2, 100);
 			if (result < 0) {
 				if (errno == EINTR) {	/* A3 */
 					if (got_term)	/* U6: terminate promptly */
 						break;
 					continue;
 				}
-				dolog(LOGOPTS, "select: %s\n", strerror(errno));
+				dolog(LOGOPTS, "poll: %s\n", strerror(errno));
 				break;
 			}
-			if (FD_ISSET(fd, &readfds)) {
+			if (pfd[0].revents & (POLLIN | POLLHUP | POLLERR)) {
 				/* Read network data. */
 				result = (int)readBuffer(&networkToPrinterBuffer);
 				if (result > 0) {
@@ -1141,7 +1145,7 @@ int copy_stream(int fd, int lp)
 					gettimeofday(&last_activity, 0);
 				}
 			}
-			if (FD_ISSET(lp, &readfds)) {
+			if (pfd[1].revents & (POLLIN | POLLHUP | POLLERR)) {
 				/* Read printer data, but pace it more slowly. */
 				result = (int)readBuffer(&printerToNetworkBuffer);
 				if (result > 0) {
@@ -1168,7 +1172,7 @@ int copy_stream(int fd, int lp)
 					      device ? device : "(unknown)");
 				}
 			}
-			if (FD_ISSET(lp, &writefds)) {
+			if (pfd[1].revents & (POLLOUT | POLLERR)) {
 				/* Write data to printer. */
 				result = (int)writeBuffer(&networkToPrinterBuffer);
 				if (result > 0) {
@@ -1178,7 +1182,8 @@ int copy_stream(int fd, int lp)
 					gettimeofday(&last_print, 0);
 				}
 			}
-			if (FD_ISSET(fd, &writefds) || printerToNetworkBuffer.outfd == -1) {
+			if ((pfd[0].revents & (POLLOUT | POLLERR)) ||
+			    printerToNetworkBuffer.outfd == -1) {
 				/* Write data to network. */
 				result = (int)writeBuffer(&printerToNetworkBuffer);
 				/* If socket write error, discard further data from printer */
@@ -1351,41 +1356,41 @@ int copy_stream(int fd, int lp)
 		}
 	} else {
 		struct timeval now;
-		struct timeval timeout;
 		struct timeval last_activity;
 		struct timeval last_print;
-		fd_set readfds;
-		fd_set writefds;
-		int maxfd = lp > fd ? lp : fd;
+		struct pollfd pfd[2];
 		int moved;
 		int stall_extended = 0;	/* V4: give a slow-but-alive printer a 2nd window */
 		int lock_released = 0;	/* V7: byte-1 lock freed once print dir done */
 		gettimeofday(&last_activity, 0);
 		gettimeofday(&last_print, 0);
 		/* Unidirectional: simply read from network, and write to printer,
-		 * but driven by select() with a timeout, a blocking read() let one
-		 * silent client stop the daemon for everybody (B1). */
+		 * but driven by poll() with a timeout, a blocking read() let one
+		 * silent client stop the daemon for everybody (B1).  poll() also
+		 * means a descriptor beyond the old FD_SETSIZE limit is fine. */
 		while (!(networkToPrinterBuffer.err & WRITE_ERR)) {
 			moved = 0;
 			/* C2: a read error only ends the job once the buffer is drained. */
 			if ((networkToPrinterBuffer.err & READ_ERR) && networkToPrinterBuffer.bytes == 0)
 				break;
-			FD_ZERO(&readfds);
-			FD_ZERO(&writefds);
-			prepBuffer(&networkToPrinterBuffer, &readfds, &writefds);
-			timeout.tv_sec = 1;	/* wake up regularly to check idle time */
-			timeout.tv_usec = 0;
-			result = select(maxfd + 1, &readfds, &writefds, 0, &timeout);
+			pfd[0].fd = fd;
+			pfd[0].events = buffer_read_events(&networkToPrinterBuffer);
+			pfd[0].revents = 0;
+			pfd[1].fd = lp;
+			pfd[1].events = buffer_write_events(&networkToPrinterBuffer);
+			pfd[1].revents = 0;
+			/* 1s: wake up regularly to check idle time */
+			result = poll(pfd, 2, 1000);
 			if (result < 0) {
 				if (errno == EINTR) {	/* A3 */
 					if (got_term)	/* U6: terminate promptly */
 						break;
 					continue;
 				}
-				dolog(LOGOPTS, "select: %s\n", strerror(errno));
+				dolog(LOGOPTS, "poll: %s\n", strerror(errno));
 				break;
 			}
-			if (FD_ISSET(fd, &readfds)) {
+			if (pfd[0].revents & (POLLIN | POLLHUP | POLLERR)) {
 				result = (int)readBuffer(&networkToPrinterBuffer);
 				if (result > 0) {
 					moved = 1;
@@ -1393,7 +1398,7 @@ int copy_stream(int fd, int lp)
 					gettimeofday(&last_activity, 0);
 				}
 			}
-			if (FD_ISSET(lp, &writefds)) {
+			if (pfd[1].revents & (POLLOUT | POLLERR)) {
 				result = (int)writeBuffer(&networkToPrinterBuffer);
 				if (result > 0) {
 					moved = 1;
@@ -1784,13 +1789,10 @@ void server(int lpnumber)
 		}
 #endif
 		dolog(LOG_NOTICE, "Connection from %s port %hu accepted\n", get_ip_str((struct sockaddr *)&client, host, sizeof(host)), get_port((struct sockaddr *)&client));
-		/* T8: an fd at or past FD_SETSIZE would overflow the fd_set that
-		 * copy_stream() builds for select(), so reject it here. */
-		if (fd >= FD_SETSIZE) {
-			dolog(LOG_ERR, "T8: descriptor %d out of select() range, refusing connection\n", fd);
-			(void)close(fd);
-			continue;
-		}
+		/* T8: descriptors at or past FD_SETSIZE used to be refused here
+		 * because select() cannot represent them.  copy_stream() uses
+		 * poll() now, so a high descriptor number is served like any
+		 * other and the connection is never rejected for it. */
 		/*write(fd, "Printing", 8); */
 
 		/* R7/R8/R9: one job per child.  A slow printer, a client that
