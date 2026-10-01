@@ -259,6 +259,25 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
 #ifndef		DRAIN_MAX_BYTES
 #define		DRAIN_MAX_BYTES	(1024 * 1024)
 #endif
+/* V5: socket read/write timeouts, decoupled from the business IDLE_TIMEOUT.
+ * Kept short so a write() that the peer is not reading returns EAGAIN at once
+ * instead of blocking for IDLE_TIMEOUT seconds; the central select() in
+ * copy_stream() retries the move.  Override with -DSOCKET_RCVTIMEO=n /
+ * -DSOCKET_SNDTIMEO=n. */
+#ifndef		SOCKET_RCVTIMEO
+#define		SOCKET_RCVTIMEO	5
+#endif
+#ifndef		SOCKET_SNDTIMEO
+#define		SOCKET_SNDTIMEO	5
+#endif
+/* V1: independent, bounded "no progress" limit for the printer->network
+ * direction.  If data is pending for the client but neither reaches the client
+ * nor is read from the printer for this long, the job ends (the peer is gone or
+ * not draining the reply) instead of spinning forever.  Override with
+ * -DNETWORK_STALL_TIMEOUT=n.  Must be > 0. */
+#ifndef		NETWORK_STALL_TIMEOUT
+#define		NETWORK_STALL_TIMEOUT	120
+#endif
 
 /* Circular buffer used for each direction. */
 typedef struct {
@@ -605,11 +624,25 @@ static void set_socket_options(int fd)
 	int one = 1;
 	struct timeval tv;
 
-	tv.tv_sec = IDLE_TIMEOUT;
+	/* V5: socket timeouts are independent of the business IDLE_TIMEOUT.  A
+	 * short send timeout alone would still let write() block for that long;
+	 * the socket is made non-blocking below so an unwritable peer yields
+	 * EAGAIN immediately and the loop retries via select(). */
+	tv.tv_sec = SOCKET_RCVTIMEO;
 	tv.tv_usec = 0;
 	(void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	tv.tv_sec = SOCKET_SNDTIMEO;
 	(void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 	(void)setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
+#ifdef	O_NONBLOCK
+	/* V5: a non-blocking socket means a stalled peer cannot pin the loop in a
+	 * 30s blocking write(); EAGAIN is handled as "try again later". */
+	{
+		int fl = fcntl(fd, F_GETFL, 0);
+		if (fl >= 0)
+			(void)fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+	}
+#endif
 #ifdef	TCP_NODELAY
 	/* status queries want their answer immediately */
 	(void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
