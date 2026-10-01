@@ -232,12 +232,17 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
 #ifndef		NO_PROGRESS_USLEEP
 #define		NO_PROGRESS_USLEEP	20000
 #endif
-/* R4: bounds for draining a socket so close() sends FIN instead of RST. */
+/* R4/U8b: bounds for draining a socket so close() sends FIN instead of RST.
+ * Both a time cap and a byte cap are applied.  Both defaults were enlarged
+ * (3s->10s, 256KiB->1MiB) because a large in-flight job can have far more than
+ * 256KiB still buffered in the kernel, so the old limits cut the connection
+ * with RST and lost that data (U8b).  Override with -DDRAIN_TIMEOUT=n /
+ * -DDRAIN_MAX_BYTES=n. */
 #ifndef		DRAIN_TIMEOUT
-#define		DRAIN_TIMEOUT		3
+#define		DRAIN_TIMEOUT		10
 #endif
 #ifndef		DRAIN_MAX_BYTES
-#define		DRAIN_MAX_BYTES	(256 * 1024)
+#define		DRAIN_MAX_BYTES	(1024 * 1024)
 #endif
 
 /* Circular buffer used for each direction. */
@@ -858,16 +863,20 @@ static void wait_printer_idle(int lp)
 	dolog(LOG_DEBUG, "device drained (or timed out), closing\n");
 }
 
-/* R4: closing a socket that still has unread data makes the kernel send RST,
- * the client then sees ECONNRESET instead of a clean end of job and any
- * status data still in flight is lost.  Send FIN first, then read what is
- * left, bounded in time and volume. */
+/* R4/U8b: closing a socket that still has unread data makes the kernel send
+ * RST, the client then sees ECONNRESET instead of a clean end of job and any
+ * status data still in flight is lost.  Send FIN first (this is the only
+ * "stop sending" signal AppSocket offers; there is no application-layer
+ * pause), then read what is left, bounded by BOTH a time cap and a byte cap.
+ * The caps were enlarged because a large in-flight job can have far more than
+ * 256KiB still sitting in the kernel receive buffer, so the old limits cut
+ * the connection with RST and lost that data. */
 static void close_connection(int fd)
 {
 	struct timeval start;
 	struct timeval now;
 	struct timeval tv;
-	char drain[4096];
+	char drain[65536];
 	size_t total = 0;
 	ssize_t n;
 
@@ -886,6 +895,10 @@ static void close_connection(int fd)
 			break;
 		total += (size_t)n;
 	}
+	if (total >= DRAIN_MAX_BYTES)
+		dolog(LOG_NOTICE,
+		      "close: %zu bytes still unread after draining, sending RST\n",
+		      total);
 	(void)close(fd);
 }
 
