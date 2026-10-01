@@ -110,6 +110,9 @@
  *	but if you port it to other distributions or platforms,
  *	I'd be happy to receive your patches.
  */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 
 #include	<unistd.h>
 #include	<stdlib.h>
