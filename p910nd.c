@@ -228,6 +228,13 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
 #ifndef		MAX_CHILDREN
 #define		MAX_CHILDREN		12
 #endif
+/* V8: on SIGTERM the daemon stops accepting and gives in-flight jobs this many
+ * seconds to finish on their own before they are forcibly terminated.  A normal
+ * job draining the printer exits well within this window; only jobs stuck on a
+ * dead printer outlive it.  Override with -DSHUTDOWN_GRACE=n. */
+#ifndef		SHUTDOWN_GRACE
+#define		SHUTDOWN_GRACE		30
+#endif
 /* R9/T2/U3: a client that connected but never sent a byte is released after
  * IDLE_TIMEOUT (a probe).  A client that has actually streamed data is a real
  * job that may legitimately pause (CUPS building pages, a slow link, a client
@@ -1721,6 +1728,13 @@ void server(int lpnumber)
 		if (got_term) {
 			dolog(LOG_NOTICE, "terminating on signal\n");
 			terminating = 1;
+			/* V8: close the listening socket now so new connection attempts
+			 * are refused immediately (ECONNREFUSED) instead of queuing
+			 * behind a daemon that has already stopped serving. */
+			if (netfd >= 0) {
+				(void)close(netfd);
+				netfd = -1;
+			}
 			break;
 		}
 
@@ -1836,7 +1850,8 @@ void server(int lpnumber)
 		/* Now safe: the handler will find the pid just recorded. */
 		sigprocmask(SIG_SETMASK, &chld_omask, NULL);
 	}
-	(void)close(netfd);
+	if (netfd >= 0)
+		(void)close(netfd);
 	reap_children_and_exit(terminating ? 0 : 1);
 }
 
@@ -1851,16 +1866,33 @@ static void reap_children_and_exit(int status)
 	int i;
 	struct timeval start, now;
 
-	for (i = 0; i < MAX_CHILDREN; i++) {
-		if (child_pids[i] != 0)
-			(void)kill(child_pids[i], SIGTERM);
-	}
+	/* V8: a routine service restart (SIGTERM) must not throw away a job that is
+	 * mid-print.  First, simply wait up to SHUTDOWN_GRACE seconds for the
+	 * in-flight children to finish on their own - a healthy job keeps draining
+	 * the printer and exits.  Only the jobs still running after that (stuck on a
+	 * dead printer, out of paper for good, etc.) are then forcibly terminated. */
 	if (inflight_children > 0) {
-		dolog(LOG_NOTICE, "terminating, waiting for %d in-flight job(s)\n",
-		      (int)inflight_children);
+		dolog(LOG_NOTICE,
+		      "terminating, waiting up to %d seconds for %d in-flight job(s) to finish\n",
+		      (int)SHUTDOWN_GRACE, (int)inflight_children);
 		gettimeofday(&start, 0);
-		/* U6: poll the counter (reaped asynchronously by the SIGCHLD
-		 * handler), bounded so we never block forever. */
+		while (inflight_children > 0) {
+			sleep_us(200000);
+			gettimeofday(&now, 0);
+			if (now.tv_sec - start.tv_sec >= SHUTDOWN_GRACE)
+				break;
+		}
+	}
+	/* Force-terminate anything still running after the grace period. */
+	if (inflight_children > 0) {
+		dolog(LOG_NOTICE,
+		      "%d job(s) still running after grace period, sending SIGTERM\n",
+		      (int)inflight_children);
+		for (i = 0; i < MAX_CHILDREN; i++) {
+			if (child_pids[i] != 0)
+				(void)kill(child_pids[i], SIGTERM);
+		}
+		gettimeofday(&start, 0);
 		while (inflight_children > 0) {
 			sleep_us(200000);
 			gettimeofday(&now, 0);
@@ -1869,7 +1901,7 @@ static void reap_children_and_exit(int status)
 		}
 		if (inflight_children > 0) {
 			dolog(LOG_NOTICE,
-			      "%d job(s) still running after timeout, sending SIGKILL\n",
+			      "%d job(s) still running after SIGTERM, sending SIGKILL\n",
 			      (int)inflight_children);
 			for (i = 0; i < MAX_CHILDREN; i++) {
 				if (child_pids[i] != 0)
