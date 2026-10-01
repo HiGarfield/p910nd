@@ -48,12 +48,17 @@ no progress, so a legitimate mid-job pause (a slow client, a large job sent in
 pieces, a client that sends a header then waits) is not mistaken for a dead client
 and truncated.  A printer that accepts no data is given a recoverable
 \fBPRINTER_STALL_TIMEOUT\fR (default 120s) to recover from being out of paper or
-off line before the job is abandoned and reported as failed.  At most
-\fBMAX_CHILDREN\fR jobs (default 12, \fB-DMAX_CHILDREN=n\fR)
-run at once; beyond that new connections are refused.  The printer device is only
-retried for transient errors, with
-a bounded backoff; if it cannot be opened the connection is closed and
-the daemon keeps listening.
+off line before the job is abandoned and reported as failed.
+Every client is served: there is no limit on the number of concurrent jobs.
+Jobs for one printer are serialised by a lock and simply queue for their turn,
+so a busy printer delays a job instead of rejecting it.  The printer device is
+opened with retries for as long as it takes (\fBOPEN_PRINTER_RETRY_INTERVAL\fR
+seconds between attempts, default 10, change with
+\fB-DOPEN_PRINTER_RETRY_INTERVAL=n\fR), because the printer is often still
+switched off when the service starts; a job waits for the device instead of
+being dropped, and SIGTERM stops the wait.  Descriptors of any number are
+supported (the I/O loop uses \fBpoll\fR(2), not \fBselect\fR(2)), so a
+long-running daemon never refuses a connection for its descriptor number.
 .SH INSTALLATION
 .I p910nd
 can be run as a standalone daemon or from (x)inetd.
