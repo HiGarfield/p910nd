@@ -1139,7 +1139,6 @@ int copy_stream(int fd, int lp)
 					moved = 1;
 					dolog(LOG_DEBUG,"%d.%d: read %d bytes from printer\n", (int)now.tv_sec, (int)now.tv_usec, result);
 					gettimeofday(&last_activity, 0);
-					gettimeofday(&last_pn_progress, 0);	/* V1 */
 					printer_replied = 1;	/* U4: printer has produced output */
 					gettimeofday(&then, 0);
 					// wait PRINTER_READ_PACE_US before reading again.
