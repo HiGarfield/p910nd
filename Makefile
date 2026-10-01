@@ -17,14 +17,16 @@ STRIP = $(CROSS)strip
 CFLAGS += -O2  -Wall -Wextra
 
 PROG = p910nd
-CONFIG = p910nd.conf
-INITSCRIPT = p910nd.init
+CONFIG = aux/p910nd.conf
+INITSCRIPT = aux/p910nd.init
 MANPAGE = p910nd.8
 INSTALL = install
 BINDIR = /usr/sbin
 CONFIGDIR = /etc/sysconfig
 SCRIPTDIR = /etc/init.d
 MANDIR = /usr/share/man/man8
+
+all: $(PROG)
 
 $(PROG):	p910nd.c
 	$(CC) -o $@ $^ $(CFLAGS) $(DEFINES) $(LIBS)
@@ -40,6 +42,6 @@ install: $(PROG) $(CONFIG) $(INITSCRIPT) $(MANPAGE)
 	$(INSTALL) $(INITSCRIPT) $(DESTDIR)$(SCRIPTDIR)/$(PROG)
 	$(INSTALL) -m 644 $(MANPAGE) $(DESTDIR)$(MANDIR)
 
-.PHONY: clean
+.PHONY: all install strip clean
 clean:
 	rm -f *.o $(PROG)
