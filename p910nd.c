@@ -285,6 +285,15 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
 #ifndef		PRINTER_READ_PACE_US
 #define		PRINTER_READ_PACE_US	100000
 #endif
+/* V3: on a FAILED job (printer busy / device missing / stall / discarded data)
+ * close the client socket with SO_LINGER{onoff=1,linger=0} so the kernel sends
+ * RST and the client (CUPS) gets ECONNRESET instead of a clean FIN.  AppSocket
+ * (9100) has no application-layer acknowledgement, so a clean FIN makes CUPS
+ * believe the job printed and never retry, silently losing the job.  Set
+ * -DFAIL_WITH_RST=0 to keep the old clean-FIN behaviour. */
+#ifndef		FAIL_WITH_RST
+#define		FAIL_WITH_RST	1
+#endif
 
 /* Circular buffer used for each direction. */
 typedef struct {
@@ -952,7 +961,7 @@ static void wait_printer_idle(int lp)
  * The caps were enlarged because a large in-flight job can have far more than
  * 256KiB still sitting in the kernel receive buffer, so the old limits cut
  * the connection with RST and lost that data. */
-static void close_connection(int fd)
+static void close_connection(int fd, int failure)
 {
 	struct timeval start;
 	struct timeval now;
@@ -960,6 +969,20 @@ static void close_connection(int fd)
 	char drain[65536];
 	size_t total = 0;
 	ssize_t n;
+
+	/* V3: a failed job must be visible to the client.  A clean FIN would let
+	 * CUPS think the job printed and never retry, silently losing it.  Send
+	 * RST instead so the client sees ECONNRESET. */
+	if (failure) {
+#if FAIL_WITH_RST
+		struct linger l;
+		l.l_onoff = 1;
+		l.l_linger = 0;
+		(void)setsockopt(fd, SOL_SOCKET, SO_LINGER, &l, sizeof(l));
+#endif
+		(void)close(fd);
+		return;
+	}
 
 	tv.tv_sec = 1;
 	tv.tv_usec = 0;
@@ -1385,33 +1408,37 @@ static void handle_connection(int fd, int lpnumber)
 		get_ip_str((struct sockaddr *)&client, host, sizeof(host));
 	if (!lock_printer_job()) {
 		/* T6/T10c: the printer was busy; log the rejection with the client
-		 * address.  We keep the clean FIN (R4) rather than an abrupt RST:
-		 * AppSocket has no application-layer acknowledgement, so a RST would
-		 * only risk discarding in-flight data while the client still believes
-		 * the job succeeded.  The LOG_ERR at least makes the rejection
-		 * visible; see the Third-round notes in README for the trade-off. */
+		 * address.  This is a failure, so the client gets RST (V3) and knows
+		 * to retry, rather than a clean FIN that would look like success. */
 		dolog(LOG_ERR, "printer %c busy, job rejected from %s\n", lpnumber, host);
-		close_connection(fd);
+		close_connection(fd, 1);
 		return;
 	}
 	/* Make sure lp device is open... */
 	/* B3: bounded backoff instead of sleeping forever on a missing device.
 	 * The reason (device name + errno) is already logged by
-	 * open_printer_retry(). */
+	 * open_printer_retry().  Device missing is a failure: RST to the client
+	 * (V3) so the job is not silently dropped. */
 	if ((lp = open_printer_retry(lpnumber)) < 0) {
-		close_connection(fd);
+		close_connection(fd, 1);
 		return;
 	}
 	/* D1: errno has no meaning here */
-	if (copy_stream(fd, lp) < 0)
-		dolog(LOGOPTS, "copy_stream failed\n");
-	else
-		/* R5: give the device a bounded chance to take the last write
-		 * before the stream is closed, otherwise the tail of the job can
-		 * be lost.  A failed job (stalled printer) is closed right away. */
-		wait_printer_idle(lp);
-	(void)close(lp);
-	close_connection(fd);	/* R4: FIN, not RST */
+	{
+		int r = copy_stream(fd, lp);
+		if (r < 0)
+			dolog(LOGOPTS, "copy_stream failed\n");
+		else
+			/* R5: give the device a bounded chance to take the last write
+			 * before the stream is closed, otherwise the tail of the job
+			 * can be lost. */
+			wait_printer_idle(lp);
+		(void)close(lp);
+		/* V3: a failed job (printer busy, device missing, stall, discarded
+		 * data) closes with RST so the client sees ECONNRESET and can retry;
+		 * a successful job closes with a clean FIN (R4). */
+		close_connection(fd, r < 0 ? 1 : 0);
+	}
 }
 
 void one_job(int lpnumber)
