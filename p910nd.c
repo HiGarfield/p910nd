@@ -228,14 +228,15 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
 #ifndef		MAX_CHILDREN
 #define		MAX_CHILDREN		12
 #endif
-/* R9/T2: a client that connected but never sent a byte is released after
- * IDLE_TIMEOUT.  A client that has actually streamed data is a real job
- * that may legitimately pause (CUPS building pages, slow link, congestion),
- * so it is only abandoned after SILENT_TIMEOUT of no progress, which must be
- * long enough not to truncate such jobs.  Default raised from 10s to 30s
- * (override with -DSILENT_TIMEOUT=n). */
+/* R9/T2/U3: a client that connected but never sent a byte is released after
+ * IDLE_TIMEOUT (a probe).  A client that has actually streamed data is a real
+ * job that may legitimately pause (CUPS building pages, a slow link, a client
+ * that sends a PJL header then waits, a large job sent in pieces), so it is only
+ * abandoned after SILENT_TIMEOUT of no progress - which must be long enough not
+ * to truncate such jobs.  Default raised from 10s to 120s (U3) so a 35s client
+ * pause is not mistaken for a dead client (override -DSILENT_TIMEOUT=n). */
 #ifndef		SILENT_TIMEOUT
-#define		SILENT_TIMEOUT		30
+#define		SILENT_TIMEOUT		120
 #endif
 /* R6: consecutive zero byte reads from the printer before its direction is
  * treated as finished, so an EOF device cannot spin the CPU. */
@@ -1089,11 +1090,12 @@ int copy_stream(int fd, int lp)
 				dolog(LOG_NOTICE,"printer accepted no data for %d seconds, stopping job\n", (int)PRINTER_STALL_TIMEOUT);
 				break;
 			}
-			/* R3/R9: idle only counts when both buffers are empty, and never
-			 * after the client has half closed - then we are just waiting
-			 * for the printer to drain. */
+			/* U3/U9: idle only counts when both buffers are empty AND the client
+			 * has not yet half-closed - once it has, we are waiting for the
+			 * printer's reply and the reply-window block below decides.  This
+			 * keeps the two directions' semantics consistent. */
 			if (networkToPrinterBuffer.bytes == 0 && printerToNetworkBuffer.bytes == 0 &&
-			    !networkToPrinterBuffer.eof_read &&
+			    !networkToPrinterBuffer.eof_read && !networkToPrinterBuffer.eof_sent &&
 			    now.tv_sec - last_activity.tv_sec >= IDLE_TIMEOUT) {
 				dolog(LOG_NOTICE,"no data transferred for %d seconds, stop copy stream\n", (int)IDLE_TIMEOUT);
 				break;
