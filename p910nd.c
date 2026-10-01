@@ -725,6 +725,15 @@ ssize_t readBuffer(Buffer_t * b)
 			 * now are not errors, the caller waits on select() again. */
 			if (e == EINTR || e == EAGAIN || e == EWOULDBLOCK)
 				result = 0;
+			else if (e == ECONNRESET || e == ENOTCONN) {
+				/* U5: the peer forcibly closed (RST) or vanished.  This is
+				 * end-of-stream, not data corruption, so mark EOF instead of
+				 * READ_ERR - otherwise a fully printed job would wrongly be
+				 * reported "Job incomplete" just because the client hung up. */
+				if (b->detectEof)
+					b->eof_read = 1;
+				result = 0;
+			}
 			else {
 				dolog(LOGOPTS, "read: %s\n", strerror(e));	/* D1: %m is a GNU extension */
 				b->err |= READ_ERR;
@@ -1005,8 +1014,11 @@ int copy_stream(int fd, int lp)
 			timeout.tv_usec = 100000;
 			result = select(maxfd + 1, &readfds, &writefds, 0, &timeout);
 			if (result < 0) {
-				if (errno == EINTR)	/* A3: interrupted by a signal */
+				if (errno == EINTR) {	/* A3 */
+					if (got_term)	/* U6: terminate promptly */
+						break;
 					continue;
+				}
 				dolog(LOGOPTS, "select: %s\n", strerror(errno));
 				break;
 			}
@@ -1136,6 +1148,8 @@ int copy_stream(int fd, int lp)
 			}
 			/* R6: never poll with zero delay, an idle iteration always
 			 * costs at least this pause. */
+			if (got_term)	/* U6: stop promptly on shutdown */
+				break;
 			if (!moved)
 				sleep_us(NO_PROGRESS_USLEEP);
 		}
@@ -1143,23 +1157,33 @@ int copy_stream(int fd, int lp)
 		flush_buffer(&networkToPrinterBuffer, PRINTER_FLUSH_TIMEOUT);
 		/* R4: and deliver the printer's answer as well */
 		flush_buffer(&printerToNetworkBuffer, PRINTER_FLUSH_TIMEOUT);
-		/* T4/C6: distinguish a clean finish from a truncated one. */
-		if (networkToPrinterBuffer.err || printerToNetworkBuffer.err)
-			dolog(LOG_ERR,
-			      "Job incomplete: %llu/%llu bytes sent to printer, %llu/%llu bytes sent to network\n",
-			      (unsigned long long)networkToPrinterBuffer.totalout,
-			      (unsigned long long)networkToPrinterBuffer.totalin,
-			      (unsigned long long)printerToNetworkBuffer.totalout,
-			      (unsigned long long)printerToNetworkBuffer.totalin);
-		else
+		/* U5/C6: a job succeeds iff the print direction delivered every byte.
+		 * A client that disconnected (EPIPE/ECONNRESET) only affects the
+		 * printer->network reply, which is discarded - it must NOT turn a
+		 * fully printed job into "Job incomplete" (that would make CUPS
+		 * re-print and duplicate the job). */
+		{
+			int print_ok = (networkToPrinterBuffer.totalout >= networkToPrinterBuffer.totalin) &&
+			               !(networkToPrinterBuffer.err & WRITE_ERR);
+			if (!print_ok) {
+				dolog(LOG_ERR,
+				      "Job incomplete: %llu/%llu bytes sent to printer, %llu/%llu bytes sent to network\n",
+				      (unsigned long long)networkToPrinterBuffer.totalout,
+				      (unsigned long long)networkToPrinterBuffer.totalin,
+				      (unsigned long long)printerToNetworkBuffer.totalout,
+				      (unsigned long long)printerToNetworkBuffer.totalin);
+				return (-1);
+			}
 			dolog(LOG_NOTICE,
 			      "Finished job: %llu/%llu bytes sent to printer, %llu/%llu bytes sent to network\n",
 			      (unsigned long long)networkToPrinterBuffer.totalout,
 			      (unsigned long long)networkToPrinterBuffer.totalin,
 			      (unsigned long long)printerToNetworkBuffer.totalout,
 			      (unsigned long long)printerToNetworkBuffer.totalin);
-		/* C6: an error in either direction has to be reported. */
-		return ((networkToPrinterBuffer.err || printerToNetworkBuffer.err) ? -1 : 0);
+			if (printerToNetworkBuffer.outfd == -1)
+				dolog(LOG_INFO, "client disconnected before reply, print completed\n");
+			return (0);
+		}
 	} else {
 		struct timeval now;
 		struct timeval timeout;
@@ -1186,8 +1210,11 @@ int copy_stream(int fd, int lp)
 			timeout.tv_usec = 0;
 			result = select(maxfd + 1, &readfds, &writefds, 0, &timeout);
 			if (result < 0) {
-				if (errno == EINTR)	/* A3 */
+				if (errno == EINTR) {	/* A3 */
+					if (got_term)	/* U6: terminate promptly */
+						break;
 					continue;
+				}
 				dolog(LOGOPTS, "select: %s\n", strerror(errno));
 				break;
 			}
@@ -1229,17 +1256,19 @@ int copy_stream(int fd, int lp)
 		    networkToPrinterBuffer.bytes == 0) {
 				long limit = (networkToPrinterBuffer.totalin == 0) ? IDLE_TIMEOUT : SILENT_TIMEOUT;
 				if (now.tv_sec - last_activity.tv_sec >= limit) {
-					if (networkToPrinterBuffer.totalout < networkToPrinterBuffer.totalin) {
-						dolog(LOG_ERR,
-						      "no data for %ld seconds, job incomplete: %llu/%llu bytes sent to printer\n",
+					/* U3/U10c: stop waiting on the (possibly just slow)
+					 * client, but do NOT mark the job failed here - the final
+					 * flush may still deliver what is buffered, and the
+					 * bytes-delivered check makes the real verdict. */
+					if (networkToPrinterBuffer.totalout < networkToPrinterBuffer.totalin)
+						dolog(LOG_NOTICE,
+						      "no data for %ld seconds, stopping (sent %llu/%llu to printer)\n",
 						      limit,
 						      (unsigned long long)networkToPrinterBuffer.totalout,
 						      (unsigned long long)networkToPrinterBuffer.totalin);
-						networkToPrinterBuffer.err |= WRITE_ERR;
-					} else {
+					else
 						dolog(LOG_NOTICE,
 						      "no data transferred for %ld seconds, stop copy stream\n", limit);
-					}
 					break;
 				}
 			}
@@ -1250,22 +1279,34 @@ int copy_stream(int fd, int lp)
 			if (networkToPrinterBuffer.eof_sent && networkToPrinterBuffer.bytes == 0)
 				break;
 			/* R6: never poll with zero delay */
+			if (got_term)	/* U6: stop promptly on shutdown */
+				break;
 			if (!moved)
 				sleep_us(NO_PROGRESS_USLEEP);
 		}
-		/* C2: don't throw away data received before the error. */
+		/* C2/U10c: flush first, THEN judge - a timeout that fired a moment
+		 * before the last bytes could be written must not be reported as a
+		 * permanent failure if the flush actually delivered them. */
 		flush_buffer(&networkToPrinterBuffer, PRINTER_FLUSH_TIMEOUT);
-		/* T4/C6: report a truncated job as a failure, not a success. */
-		if (networkToPrinterBuffer.err)
-			dolog(LOG_ERR, "Job incomplete: %llu/%llu bytes sent to printer\n",
-			      (unsigned long long)networkToPrinterBuffer.totalout,
-			      (unsigned long long)networkToPrinterBuffer.totalin);
-		else
+		/* U5/C6: success iff every byte reached the printer.  A stalled or
+		 * timed-out client that left data undelivered is reported as a
+		 * failure, never as a misleading "Finished job". */
+		{
+			int print_ok = (networkToPrinterBuffer.totalout >= networkToPrinterBuffer.totalin) &&
+			               !(networkToPrinterBuffer.err & WRITE_ERR);
+			if (!print_ok) {
+				dolog(LOG_ERR, "Job incomplete: %llu/%llu bytes sent to printer\n",
+				      (unsigned long long)networkToPrinterBuffer.totalout,
+				      (unsigned long long)networkToPrinterBuffer.totalin);
+				return (-1);
+			}
 			dolog(LOG_NOTICE, "Finished job: %llu/%llu bytes sent to printer\n",
 			      (unsigned long long)networkToPrinterBuffer.totalout,
 			      (unsigned long long)networkToPrinterBuffer.totalin);
+			return (0);
+		}
 	}
-	return (networkToPrinterBuffer.err?-1:0);
+	return (0);
 }
 
 /* R7/R8: everything that can block lives here.  In standalone mode this runs
