@@ -196,7 +196,16 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
  * The window is measured from the last real printer->network movement, so a
  * still-talking device is never cut off.  Override with -DPRINTER_REPLY_WINDOW. */
 #ifndef		PRINTER_REPLY_WINDOW
-#define		PRINTER_REPLY_WINDOW	10
+#define		PRINTER_REPLY_WINDOW	60
+#endif
+/* U4: after the client half-closed, if the printer has already sent a reply,
+ * release the connection PRINTER_REPLY_IDLE seconds after the last activity
+ * (keeps a normal bi-di job quick, preserving T1).  If the printer has sent
+ * nothing yet we wait the longer PRINTER_REPLY_WINDOW, because a printer that
+ * is out of paper / off line / busy may only answer a status query after the
+ * user clears the condition (tens of seconds to minutes).  Both overridable. */
+#ifndef		PRINTER_REPLY_IDLE
+#define		PRINTER_REPLY_IDLE	5
 #endif
 /* R2: how long get_lock() waits for the printer lock before giving up. */
 #ifndef		LOCK_WAIT
@@ -953,6 +962,7 @@ int copy_stream(int fd, int lp)
 		struct timeval last_print;
 		int timer = 0;
 		int moved;
+		int printer_replied = 0;	/* U4: printer has produced output this job */
 		Buffer_t printerToNetworkBuffer;
 		initBuffer(&printerToNetworkBuffer, lp, fd, printer_is_regular(lp));
 		fd_set readfds;
@@ -1010,6 +1020,7 @@ int copy_stream(int fd, int lp)
 					moved = 1;
 					dolog(LOG_DEBUG,"%d.%d: read %d bytes from printer\n", (int)now.tv_sec, (int)now.tv_usec, result);
 					gettimeofday(&last_activity, 0);
+					printer_replied = 1;	/* U4: printer has produced output */
 					gettimeofday(&then, 0);
 					// wait 100 msec before reading again.
 					then.tv_usec += 100000;
@@ -1025,7 +1036,8 @@ int copy_stream(int fd, int lp)
 					/* R6: the printer keeps answering with 0 bytes,
 					 * stop polling it or the loop burns all CPU. */
 					printerToNetworkBuffer.eof_read = 1;
-					dolog(LOG_INFO, "printer sent no data, stop reading from printer\n");
+					dolog(LOG_NOTICE, "printer %s sent no data, stop reading from printer\n",
+					      device ? device : "(unknown)");
 				}
 			}
 			if (FD_ISSET(lp, &writefds)) {
@@ -1095,10 +1107,22 @@ int copy_stream(int fd, int lp)
 					      "printer finished sending, bi-directional job complete\n");
 					break;
 				}
-				if (now.tv_sec - last_activity.tv_sec >= PRINTER_REPLY_WINDOW) {
-					dolog(LOG_NOTICE,
-					      "no printer reply for %d seconds, closing bi-directional job\n",
-					      (int)PRINTER_REPLY_WINDOW);
+				/* U4: a slow printer (out of paper, off line, busy) may
+				 * answer a status query only after the user clears the
+				 * condition - tens of seconds to minutes later.  Wait the
+				 * long window if nothing has been heard yet, but once the
+				 * printer has actually replied, release the connection
+				 * shortly afterwards (preserving T1's quick release for a
+				 * normal job).  Either way, forward any data that arrives. */
+				long w = printer_replied ? PRINTER_REPLY_IDLE : PRINTER_REPLY_WINDOW;
+				if (now.tv_sec - last_activity.tv_sec >= w) {
+					if (printer_replied)
+						dolog(LOG_INFO,
+						      "printer reply done, closing bi-directional job\n");
+					else
+						dolog(LOG_NOTICE,
+						      "no printer reply for %ld seconds, closing bi-directional job\n",
+						      w);
 					break;
 				}
 			}
