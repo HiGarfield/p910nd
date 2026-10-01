@@ -547,6 +547,24 @@ static int lock_printer_job(void)
 	return (take_lock(lockfd, 1, JOB_LOCK_WAIT, "printer is busy, job rejected"));
 }
 
+/* V7: release the byte-1 job lock while this connection is only waiting for the
+ * printer's reply.  A pure status query (or any job whose print direction has
+ * been fully delivered) must not block a real print job for the whole reply
+ * window.  The lock is on byte 1 of the same file lock_printer_job() took. */
+static void unlock_printer_job(void)
+{
+	struct flock lplock;
+	if (lockfd < 0)
+		return;
+	memset(&lplock, 0, sizeof(lplock));
+	lplock.l_type = F_UNLCK;
+	lplock.l_whence = SEEK_SET;
+	lplock.l_start = 1;
+	lplock.l_len = 1;
+	(void)fcntl(lockfd, F_SETLK, &lplock);
+	lock_held = 0;
+}
+
 void free_lock(void)
 {
 	/* T6: the lock file is intentionally NOT unlinked.  Unlinking it while
@@ -1051,6 +1069,7 @@ int copy_stream(int fd, int lp)
 		int moved;
 		int printer_replied = 0;	/* U4: printer has produced output this job */
 		int stall_extended = 0;	/* V4: give a slow-but-alive printer a 2nd window */
+		int lock_released = 0;	/* V7: byte-1 lock freed once print dir done */
 		struct timeval last_pn_progress;	/* V1: printer->network progress */
 		Buffer_t printerToNetworkBuffer;
 		initBuffer(&printerToNetworkBuffer, lp, fd, printer_is_regular(lp));
@@ -1205,6 +1224,17 @@ int copy_stream(int fd, int lp)
 			 }
 			 }
 			 }
+			/* V7: once the print direction is fully delivered (the client has
+			 * half-closed and the network->printer buffer is empty) release the
+			 * byte-1 job lock so a real print job is not blocked behind this
+			 * connection's reply wait.  The printer's reply is read-only for the
+			 * rest of this job, so the serial printer mutex is preserved for the
+			 * next writer.  Done once. */
+			if (!lock_released && networkToPrinterBuffer.eof_sent &&
+			    networkToPrinterBuffer.bytes == 0) {
+				unlock_printer_job();
+				lock_released = 1;
+			}
 			/* U3/U9: idle only counts when both buffers are empty AND the client
 			 * has not yet half-closed - once it has, we are waiting for the
 			 * printer's reply and the reply-window block below decides.  This
@@ -1314,6 +1344,7 @@ int copy_stream(int fd, int lp)
 		int maxfd = lp > fd ? lp : fd;
 		int moved;
 		int stall_extended = 0;	/* V4: give a slow-but-alive printer a 2nd window */
+		int lock_released = 0;	/* V7: byte-1 lock freed once print dir done */
 		gettimeofday(&last_activity, 0);
 		gettimeofday(&last_print, 0);
 		/* Unidirectional: simply read from network, and write to printer,
@@ -1392,6 +1423,16 @@ int copy_stream(int fd, int lp)
 					}
 				}
 				}
+			/* V7: once the print direction is fully delivered (the client has
+			 * half-closed and the network->printer buffer is empty) release the
+			 * byte-1 job lock so a real print job is not blocked behind a
+			 * connection that lingers (probe, slow reply window, etc.).  Done
+			 * once.  The serial printer mutex is preserved for the next writer. */
+			if (!lock_released && networkToPrinterBuffer.eof_sent &&
+			    networkToPrinterBuffer.bytes == 0) {
+				unlock_printer_job();
+				lock_released = 1;
+			}
 			/* R3/R9/T2: only count idle time with an empty buffer, and never
 			 * after the client half closed and we are draining.  A client
 			 * that never sent a byte is a probe and gets the short
@@ -1592,6 +1633,12 @@ void server(int lpnumber)
 		(void)fclose(f);
 		have_pidfile = 1;	/* D9: remember it for the exit handler */
 	}
+#endif
+	/* R7: always take the instance lock (byte 0) in the surviving process,
+	 * whether we daemonized, ran with -d in the foreground, or built with
+	 * -DTESTING.  Without it lockfd stays -1 and the per-job byte-1 lock that
+	 * serializes concurrent jobs to the same printer is a silent no-op (V7). */
+#ifdef	LOCKFILE_DIR
 	if (get_lock(lpnumber) == 0)
 		exit(1);
 #endif
