@@ -219,12 +219,6 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
 #ifndef		PRINTER_REPLY_IDLE
 #define		PRINTER_REPLY_IDLE	5
 #endif
-/* T5: cap on simultaneously forked job children.  Beyond this, new
- * connections are refused (backpressure) rather than forking a DoS army.
- * Override with -DMAX_CHILDREN=n. */
-#ifndef		MAX_CHILDREN
-#define		MAX_CHILDREN		12
-#endif
 /* V8: on SIGTERM the daemon stops accepting and gives in-flight jobs this many
  * seconds to finish on their own before they are forcibly terminated.  A normal
  * job draining the printer exits well within this window; only jobs stuck on a
@@ -336,10 +330,15 @@ static int lock_held = 0;
 /* R10: signal handlers only raise a flag, the main loop does the work. */
 static volatile sig_atomic_t got_term = 0;
 /* T5/T10a: number of forked job children still running.  The SIGCHLD handler
- * reaps and decrements it; server() reads it to apply backpressure.  Replaces
- * the dead got_sigchld variable. */
+ * reaps and decrements it; shutdown waits for it to reach zero. */
 static volatile sig_atomic_t inflight_children = 0;
-static pid_t child_pids[MAX_CHILDREN];
+/* T10b: pid of every running job child, so shutdown can terminate the ones
+ * that outlive the grace period.  There is deliberately no limit on how many
+ * clients may be served at once: refusing a connection because other jobs are
+ * in flight would silently drop print jobs, so the table grows on demand. */
+#define		CHILD_PIDS_INITIAL	64
+static pid_t *child_pids = 0;
+static int child_pids_slots = 0;
 
 
 /* Helper function: convert a struct sockaddr address (IPv4 and IPv6) to a string */
@@ -580,8 +579,8 @@ static void terminate_handler(int sig)
 }
 
 /* R7/T5/T10a: reap forked job children (otherwise they pile up as zombies)
- * and keep the in-flight count and pid table in sync so server() can apply
- * backpressure and reap on shutdown. */
+ * and keep the in-flight count and pid table in sync so shutdown can wait for
+ * the jobs that are still running. */
 static void sigchld_handler(int sig)
 {
 	int saved_errno = errno;
@@ -590,7 +589,7 @@ static void sigchld_handler(int sig)
 
 	(void)sig;
 	while ((pid = waitpid(-1, 0, WNOHANG)) > 0) {
-		for (i = 0; i < MAX_CHILDREN; i++) {
+		for (i = 0; i < child_pids_slots; i++) {
 			if (child_pids[i] == pid) {
 				child_pids[i] = 0;
 				if (inflight_children > 0)
@@ -600,6 +599,50 @@ static void sigchld_handler(int sig)
 		}
 	}
 	errno = saved_errno;
+}
+
+/* T10b: remember a job child so shutdown can wait for it and, if it outlives
+ * the grace period, signal it.  The table is grown on demand and never caps
+ * the number of accepted clients; a client is always served.
+ * The caller MUST block SIGCHLD around this call: growing the table replaces
+ * the array the handler scans, and that must not happen while it is walking
+ * it.  Returns 0 only when memory is exhausted (the child then simply cannot
+ * be tracked; it still runs to completion). */
+static int record_child(pid_t pid)
+{
+	int i;
+
+	for (i = 0; i < child_pids_slots; i++) {
+		if (child_pids[i] == 0) {
+			child_pids[i] = pid;
+			inflight_children++;
+			return (1);
+		}
+	}
+	if (child_pids_slots == 0) {
+		child_pids = (pid_t *)calloc(CHILD_PIDS_INITIAL, sizeof(pid_t));
+		if (child_pids == 0) {
+			dolog(LOG_ERR, "out of memory, cannot track job child %d\n", (int)pid);
+			return (0);
+		}
+		child_pids_slots = CHILD_PIDS_INITIAL;
+		i = 0;
+	} else {
+		int olds = child_pids_slots;
+		pid_t *grown = (pid_t *)realloc(child_pids,
+						(size_t)olds * 2 * sizeof(pid_t));
+		if (grown == 0) {
+			dolog(LOG_ERR, "out of memory, cannot track job child %d\n", (int)pid);
+			return (0);
+		}
+		child_pids = grown;
+		child_pids_slots = olds * 2;
+		memset(child_pids + olds, 0, (size_t)olds * sizeof(pid_t));
+		i = olds;
+	}
+	child_pids[i] = pid;
+	inflight_children++;
+	return (1);
 }
 
 /* A1/D9: ignoring SIGPIPE keeps a vanished client from killing the daemon,
@@ -1689,7 +1732,6 @@ void server(int lpnumber)
 		socklen_t clientlen;
 		char host[INET6_ADDRSTRLEN];
 		pid_t pid;
-		int i;
 
 		/* R10: the signal handler only raised a flag, exit cleanly here */
 		if (got_term) {
@@ -1751,35 +1793,23 @@ void server(int lpnumber)
 		}
 		/*write(fd, "Printing", 8); */
 
-		/* T5: bound the number of in-flight children.  Past the limit we
-		 * refuse the connection (backpressure) rather than forking a
-		 * denial-of-service army that all block on the printer lock. */
-		if (inflight_children >= MAX_CHILDREN) {
-			dolog(LOG_NOTICE,
-			      "too many in-flight jobs (%d), refusing connection from %s port %hu\n",
-			      (int)inflight_children,
-			      get_ip_str((struct sockaddr *)&client, host, sizeof(host)),
-			      get_port((struct sockaddr *)&client));
-			(void)close(fd);
-			continue;
-		}
-
 		/* R7/R8/R9: one job per child.  A slow printer, a client that
 		 * never closes or a printer that has to be retried must not keep
 		 * the daemon from accepting the next connection; the printer
-		 * itself stays exclusive through the job lock. */
+		 * itself stays exclusive through the job lock.  There is no cap on
+		 * the number of children: every client is served and simply queues
+		 * on the printer lock. */
 		sigset_t chld_mask, chld_omask;
 		sigemptyset(&chld_mask);
 		sigaddset(&chld_mask, SIGCHLD);
-		/* U7: block SIGCHLD across fork + record + count.  A child that
-		 * exits between fork() and the slot assignment would otherwise be
-		 * reaped by the handler before its pid is stored in child_pids, so
-		 * it could not be matched, the in-flight count would never be
-		 * decremented, and after MAX_CHILDREN such fast children the daemon
-		 * would refuse every new connection (still measured with
-		 * -DMAX_CHILDREN=3).  Restoring the mask only after the pid is
-		 * recorded lets the pending SIGCHLD deliver into a handler that can
-		 * now match it. */
+		/* U7: block SIGCHLD across fork + record.  A child that exits
+		 * between fork() and the slot assignment would otherwise be reaped
+		 * by the handler before its pid is stored in child_pids, so it
+		 * could not be matched and the in-flight count would never be
+		 * decremented.  Recording the pid with SIGCHLD blocked also makes
+		 * growing the pid table safe.  Restoring the mask only afterwards
+		 * lets the pending SIGCHLD deliver into a handler that can now
+		 * match the child. */
 		sigprocmask(SIG_BLOCK, &chld_mask, &chld_omask);
 		pid = fork();
 		if (pid < 0) {
@@ -1801,20 +1831,12 @@ void server(int lpnumber)
 			_exit(0);
 		}
 		(void)close(fd);
-		/* T5/U7: record the child in a FIXED, free slot so the SIGCHLD
-		 * handler can always match its pid and decrement inflight_children.
-		 * Using the count as the array index previously let a reused slot
-		 * overwrite a still-live pid (once an earlier slot had been cleared
-		 * by a child that exited), leaking the count and, once it reached
-		 * MAX_CHILDREN, permanently refusing every new connection. */
-		for (i = 0; i < MAX_CHILDREN; i++) {
-			if (child_pids[i] == 0) {
-				child_pids[i] = pid;
-				break;
-			}
-		}
-		inflight_children++;
-		/* Now safe: the handler will find the pid just recorded. */
+		/* U7: record the child in a free slot (growing the table if needed)
+		 * while SIGCHLD is still blocked, so the handler cannot reap it
+		 * before its pid is stored and the table cannot be relocated under
+		 * the handler.  A failed insertion only means the child cannot be
+		 * signalled at shutdown; it is still served normally. */
+		(void)record_child(pid);
 		sigprocmask(SIG_SETMASK, &chld_omask, NULL);
 	}
 	if (netfd >= 0)
@@ -1855,7 +1877,7 @@ static void reap_children_and_exit(int status)
 		dolog(LOG_NOTICE,
 		      "%d job(s) still running after grace period, sending SIGTERM\n",
 		      (int)inflight_children);
-		for (i = 0; i < MAX_CHILDREN; i++) {
+		for (i = 0; i < child_pids_slots; i++) {
 			if (child_pids[i] != 0)
 				(void)kill(child_pids[i], SIGTERM);
 		}
@@ -1870,7 +1892,7 @@ static void reap_children_and_exit(int status)
 			dolog(LOG_NOTICE,
 			      "%d job(s) still running after SIGTERM, sending SIGKILL\n",
 			      (int)inflight_children);
-			for (i = 0; i < MAX_CHILDREN; i++) {
+			for (i = 0; i < child_pids_slots; i++) {
 				if (child_pids[i] != 0)
 					(void)kill(child_pids[i], SIGKILL);
 			}
