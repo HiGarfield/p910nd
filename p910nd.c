@@ -406,7 +406,9 @@ static int printer_open_is_temporary(int e)
 }
 
 /* B3: bounded exponential backoff instead of "while (...) sleep(10);" which
- * pinned the daemon (or the inetd instance) forever and stopped accepting. */
+ * pinned the daemon (or the inetd instance) forever and stopped accepting.
+ * U6: also honour SIGTERM during the backoff instead of sleeping blind; U10a:
+ * log the real device name and errno on permanent failure. */
 static int open_printer_retry(int lpnumber)
 {
 	int lp;
@@ -414,11 +416,26 @@ static int open_printer_retry(int lpnumber)
 	int sleepfor = 1;
 
 	for (;;) {
+		if (got_term)			/* U6: stop promptly on shutdown */
+			return -1;
 		if ((lp = open_printer(lpnumber)) >= 0)
 			return lp;
-		if (!printer_open_is_temporary(open_printer_errno) || waited >= OPEN_PRINTER_MAX_WAIT)
+		if (!printer_open_is_temporary(open_printer_errno) ||
+		    waited >= OPEN_PRINTER_MAX_WAIT) {
+			/* U10a: name the device and the real errno so the cause
+			 * (missing node, permission, busy) is visible in syslog. */
+			dolog(LOGOPTS,
+			      "cannot open printer %s after %d seconds: %s, job abandoned\n",
+			      device ? device : "(unknown)", waited,
+			      strerror(open_printer_errno));
 			return -1;
-		(void)sleep((unsigned int)sleepfor);
+		}
+		/* U6: wake early on termination rather than sleeping the full slice. */
+		{
+			int left = sleepfor;
+			while (left-- > 0 && !got_term)
+				(void)sleep(1);
+		}
 		waited += sleepfor;
 		if (sleepfor < OPEN_PRINTER_MAX_SLEEP)
 			sleepfor *= 2;
@@ -1235,9 +1252,10 @@ static void handle_connection(int fd, int lpnumber)
 		return;
 	}
 	/* Make sure lp device is open... */
-	/* B3: bounded backoff instead of sleeping forever on a missing device */
+	/* B3: bounded backoff instead of sleeping forever on a missing device.
+	 * The reason (device name + errno) is already logged by
+	 * open_printer_retry(). */
 	if ((lp = open_printer_retry(lpnumber)) < 0) {
-		dolog(LOGOPTS, "cannot open printer, job abandoned\n");
 		close_connection(fd);
 		return;
 	}
