@@ -6,9 +6,9 @@ The repository at https://sourceforge.net/projects/p910nd/ is being phased out. 
 
 ## Version
 
-1.0
+1.1
 
-Note that this is the same version as the last released version from 2014. No features have been added, nor any bugs fixed from that version. Several distributions have packaged this software ready to use. If you are not a developer there is no advantage to cloning this repository. The move to Github is to facilitate any submission of bug fixes and contributions.
+Note that this is the same version as the last released version from 2014, plus the third and fourth round of bug-fix backports. No features have been added, nor any command line or data-stream behaviour changed. Several distributions have packaged this software ready to use. If you are not a developer there is no advantage to cloning this repository. The move to Github is to facilitate any submission of bug fixes and contributions.
 
 ## Bug fixes (0.99)
 
@@ -258,6 +258,145 @@ All changes are confined to `p910nd.c` (plus `aux/p910nd.init`). The command lin
 27. **D11 `aux/p910nd.init` called `startproc`**, a SUSE-only command, while the script defines `start_daemon`/`killproc`. Starting failed with "command not found" on Debian/Ubuntu. It now probes for `start_daemon`, falls back to `start-stop-daemon` or a plain invocation, and `stop` removes leftover pid files.
 
 Build note: `make` is warning free with `gcc -Wall -Wextra` (the previously unchecked `chdir()` and `dup()` return values are checked as well).
+
+## Fourth round fixes (1.1)
+
+All changes are confined to `p910nd.c` and the documentation. The command line,
+the `-b -d -f -i -v` / `[0-9]` semantics, the default device `/dev/lp%c`, the
+default port `9100+n`, the unidirectional / bidirectional data streams and the
+per-printer serial write mutex are unchanged. Every new threshold is a `#ifndef`
+macro with a default and is overridable with `-D`. No GNU extension is used and
+every platform-specific macro is `#ifdef`-guarded with a fallback, so it still
+builds on glibc servers and OpenWrt/musl routers.
+
+1. **U1/U2 printer out-of-paper / off-line / extremely slow was treated as a
+   permanent failure and the job was abandoned (data lost, unrecoverable).**
+   *Symptom (measured):* a FIFO standing in for a full / out-of-paper printer
+   was abandoned after 30 s with `printer accepted no data for 30 seconds` and
+   an 8 KiB loss even though the reader recovered 40-45 s in; an 8 KiB/40 s slow
+   printer (still making steady progress) was killed at the same 30 s mark.
+   *Root cause:* `copy_stream()` declared a stall whenever the network→printer
+   buffer held bytes and no byte had been written for `PRINTER_STALL_TIMEOUT`
+   (30 s), then set `WRITE_ERR` and gave up; it did not distinguish a recoverable
+   transient (EAGAIN, out of paper) from a permanent fault (ENODEV/EIO), and it
+   did not wait. *Fix:* `PRINTER_STALL_TIMEOUT` default 30→**120 s** and is now a
+   *recoverable* budget — `writeBuffer()` already retries on `EAGAIN`/`EWOULDBLOCK`
+   and fails at once on a permanent fault (`WRITE_ERR` exits the loop immediately),
+   so a transient lapse is simply waited out and resumes; the stall break no longer
+   sets `WRITE_ERR` (the final flush + bytes-delivered check decides). The
+   unidirectional loop now keeps running after the client half-closed so the same
+   recoverable wait applies to the print direction. *Verification:* FIFO with no
+   reader recovers within 40 s → job delivered in full; 8 KiB/40 s reader →
+   delivered in full; persistent no-read beyond 120 s → reported as failed (not
+   success) with sent/received totals.
+
+2. **U3 a slow client (real long job) was silently truncated but reported as a
+   success.** *Symptom (measured):* 4 KiB, 35 s silence, 4 KiB →
+   `no data transferred for 30 seconds` then `Finished job: 4096/4096`, the
+   second half lost and the client unaware. *Root cause:* `SILENT_TIMEOUT` (30 s)
+   was applied to any connection that had already received data. *Fix:*
+   `SILENT_TIMEOUT` default 30→**120 s**; a probe that never sent a byte still
+   uses `IDLE_TIMEOUT`, a real job is only abandoned after the long
+   `SILENT_TIMEOUT` of no progress, so a legitimate pause is no longer mistaken
+   for a dead client. *Verification:* 4 KiB / 35 s / 4 KiB delivered in full and
+   logged `Finished job: 8192/8192`; if it is truly abandoned with data
+   outstanding it is logged `Job incomplete`, never `Finished job`.
+
+3. **U4 bidirectional: a fault diagnosis reply (e.g. `OUT-OF-PAPER`) arriving
+   after the client half-closed was truncated at 10 s.** *Symptom (measured):*
+   `-b` client sends a status query and half-closes; the printer answers 20 s
+   later; the client got an empty `recv()` and `no printer reply for 10 seconds`.
+   *Root cause:* `PRINTER_REPLY_WINDOW` (10 s) closed the job regardless of whether
+   the printer had replied. *Fix:* `PRINTER_REPLY_WINDOW` default 10→**60 s** and a
+   new `PRINTER_REPLY_IDLE` (**5 s**). After the client half-closed, if the
+   printer has already sent data we close `PRINTER_REPLY_IDLE` after the last
+   activity (keeps a normal bi-di job quick, preserving T1); if it has sent
+   nothing we wait the longer `PRINTER_REPLY_WINDOW`, so a slow fault reply is
+   never truncated. Logs distinguish "printer reply done" from "no printer reply".
+   *Verification:* a PTY that answers 20 s after half-close delivers the string to
+   the client.
+
+4. **U5 client disconnect made a fully printed job report "Job incomplete".**
+   *Symptom (measured):* bi-directional, client sends 14 KiB then RSTs; 14000/14000
+   reached the printer, yet the log said `Job incomplete: 14000/14000 ...`.
+   *Root cause:* the verdict OR-ed both directions, so a failed printer→network
+   write (the client was already gone) condemned the completed print; and a client
+   RST on read set `READ_ERR`. *Fix:* `readBuffer()` treats `ECONNRESET`/`ENOTCONN`
+   as end-of-stream (EOF), not `READ_ERR`; the final verdict is based **only** on
+   the network→printer direction (`totalout >= totalin && !WRITE_ERR`). A client
+   gone before the reply is noted at `LOG_INFO` ("client disconnected before reply,
+   print completed") but is not a failure. *Verification:* 14 KiB + RST with full
+   delivery → `Finished job` (or the INFO note), never `Job incomplete`; CUPS will
+   not re-print.
+
+5. **U6 `SIGTERM` could not stop a printing child; stop hung and orphans kept
+   the lock.** *Symptom (measured):* daemon got `SIGTERM`, logged `waiting for 1
+   in-flight job(s)`, the child kept running ~30 s, then `still running, leaving
+   them to finish` and became an orphan holding the byte-1 lock. *Root cause:*
+   `reap_children_and_exit()` blocked in `waitpid(-1,0,0)` and the child's
+   `terminate_handler` only set a flag that `copy_stream()` never checked.
+   *Fix:* the child now checks `got_term` after a signalled `select()` and at the
+   end of each idle iteration and exits promptly; the parent signals every tracked
+   child with `SIGTERM`, then polls the in-flight counter (reaped asynchronously
+   by the `SIGCHLD` handler) **bounded by 5 s**, and `SIGKILL`s anything still
+   alive. The byte-1 job lock and instance lock are always released on exit.
+   *Verification:* `SIGTERM` during a print → daemon and child gone within a few
+   seconds, no orphan holding the lock, a fresh instance takes the lock at once.
+
+6. **U7 `child_pids` slot overwrite leaked the in-flight count → service
+   permanently refused connections.** *Symptom (measured):* with
+   `-DMAX_CHILDREN=3`, `too many in-flight jobs (3), refusing connection`
+   appeared while zero children were actually running. *Root cause:* the daemon
+   used `child_pids[inflight_children] = pid`, the count as the index; when an
+   earlier slot was cleared by an exiting child while a later slot still held a
+   live child, the next fork overwrote the live pid, so it never matched in the
+   `SIGCHLD` handler and `inflight_children` never decremented. *Fix:* the daemon
+   scans for the first free slot (`child_pids[i] == 0`), which always exists while
+   the backpressure check passes, so no live pid can be overwritten and the count
+   cannot leak. *Verification:* `-DMAX_CHILDREN=3`, 50+ short connections, no
+   spurious refusals, the service self-heals.
+
+7. **U8a `wait_printer_idle()` was a no-op for character devices.** *Root cause:*
+   it used `select()` on the printer fd, but `/dev/lpX` and `usblp` report writable
+   almost always, so it returned immediately and the R5 tail protection never
+   engaged. *Fix:* when the kernel exposes the parallel-port status
+   (`LPGETSTATUS`, guarded by `__linux__` / `#ifdef` so it stays portable to
+   musl/OpenWrt) it polls and waits while the printer is busy, bounded by
+   `PRINTER_DRAIN_TIMEOUT`; otherwise it sleeps one short, interruptible slice so
+   the driver can flush. *Verification:* a job to a slow character device no longer
+   drops the tail; the function compiles where `<linux/lp.h>` is absent.
+
+8. **U8b `close_connection()` drain limits (3 s / 256 KiB) were far smaller than
+   a large job.** *Root cause:* a large in-flight job can have far more than 256 KiB
+   still in the kernel receive buffer, so the caps were hit and `close()` sent RST
+   anyway, losing that data — exactly the R4 failure RST was meant to prevent.
+   *Fix:* drain with BOTH a time cap (`DRAIN_TIMEOUT` 3→**10 s**) and a byte cap
+   (`DRAIN_MAX_BYTES` 256 KiB→**1 MiB**), read in 64 KiB chunks, and log a NOTICE
+   when the byte cap is reached (RST will be sent). *Verification:* a 1 MB job
+   still arriving on close is fully drained, not RST-cut.
+
+9. **U9 the bidirectional branch lacked the unidirectional long-job protection, so
+   the two directions behaved inconsistently.** *Fix:* both directions now share
+   one rule set — a recoverable stall budget (U1/U2), an idle timeout suppressed
+   once the client has half-closed (we are then waiting on the printer, not a
+   silent client), and the same probe-vs-real-job idle split. The bi-directional
+   idle check gained the `!eof_sent` guard the unidirectional side already had.
+
+10. **U10 observability / mis-judgement.**
+    * U10a `open_printer_retry()` failed with a bare `cannot open printer, job
+      abandoned` naming neither device nor cause. It now logs the device name, the
+      `errno` string and how long it waited; the retry backoff also wakes early on
+      `SIGTERM`.
+    * U10b when the printer→network direction was permanently closed after 20
+      consecutive zero reads, the event was logged at `LOG_INFO` (dropped unless
+      `-d`) with no device name. It is now `LOG_NOTICE` and names the device.
+    * U10c the unidirectional `Job incomplete` decision ran *before* the final
+      `flush_buffer()`, so data the flush could have delivered was declared lost.
+      The decision now runs *after* the flush and compares `totalout` vs `totalin`;
+      a silent-timeout no longer pre-sets `WRITE_ERR`. Combined with U5 the verdict
+      is always "did the printer get every byte".
+
+Build note: `make` remains warning free with `gcc -Wall -Wextra`.
 
 ## Authors
 

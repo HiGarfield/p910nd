@@ -26,9 +26,13 @@ The \fB-b\fR option turns on bidirectional copying.  After the client half-close
 the connection is held only long enough for the printer's reply (status query
 answer) to drain; once both buffers are empty the job ends as soon as there has
 been no printer-to-network progress for \fBPRINTER_REPLY_WINDOW\fR seconds
-(default 10, change with \fB-DPRINTER_REPLY_WINDOW=n\fR).  The window is measured
-from the last real reply movement, so a still-talking device is never cut off and
-a silent device is released in seconds instead of the old fixed 120 second wait.
+(default 60, change with \fB-DPRINTER_REPLY_WINDOW=n\fR).  The window is measured
+from the last real reply movement, so a still-talking device is never cut off.
+If the printer has not answered a status query at all, the connection is held for
+the full window (default 60s) so a printer that is out of paper or off line can
+still report the fault after tens of seconds or minutes; once it has started to
+reply, the job closes \fBPRINTER_REPLY_IDLE\fR seconds (default 5) after the last
+activity, keeping a normal bi-directional job quick.
 .LP
 The \fB-v\fR option shows the version number and exits.
 .LP
@@ -39,9 +43,13 @@ A connection on which no data has moved in either direction for
 30 seconds (change with \fB-DIDLE_TIMEOUT=n\fR at build time) is closed,
 so a client that connects and never sends anything cannot block the
 daemon.  A connection that has already streamed data is abandoned only after
-\fBSILENT_TIMEOUT\fR seconds (default 30, change with \fB-DSILENT_TIMEOUT=n\fR) of
-no progress, so a legitimate mid-job pause is not mistaken for a dead client and
-truncated.  At most \fBMAX_CHILDREN\fR jobs (default 12, \fB-DMAX_CHILDREN=n\fR)
+\fBSILENT_TIMEOUT\fR seconds (default 120, change with \fB-DSILENT_TIMEOUT=n\fR) of
+no progress, so a legitimate mid-job pause (a slow client, a large job sent in
+pieces, a client that sends a header then waits) is not mistaken for a dead client
+and truncated.  A printer that accepts no data is given a recoverable
+\fBPRINTER_STALL_TIMEOUT\fR (default 120s) to recover from being out of paper or
+off line before the job is abandoned and reported as failed.  At most
+\fBMAX_CHILDREN\fR jobs (default 12, \fB-DMAX_CHILDREN=n\fR)
 run at once; beyond that new connections are refused.  The printer device is only
 retried for transient errors, with
 a bounded backoff; if it cannot be opened the connection is closed and
