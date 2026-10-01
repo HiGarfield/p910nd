@@ -52,11 +52,19 @@ off line before the job is abandoned and reported as failed.
 Every client is served: there is no limit on the number of concurrent jobs.
 Jobs for one printer are serialised by a lock and simply queue for their turn,
 so a busy printer delays a job instead of rejecting it.  The printer device is
-opened with retries for as long as it takes (\fBOPEN_PRINTER_RETRY_INTERVAL\fR
-seconds between attempts, default 10, change with
-\fB-DOPEN_PRINTER_RETRY_INTERVAL=n\fR), because the printer is often still
-switched off when the service starts; a job waits for the device instead of
-being dropped, and SIGTERM stops the wait.  Descriptors of any number are
+retried when it cannot be opened yet (\fBOPEN_PRINTER_RETRY_INTERVAL\fR seconds
+between attempts, default 10, change with
+\fB-DOPEN_PRINTER_RETRY_INTERVAL=n\fR): a temporary failure (device busy,
+device node present but its backend not ready, interrupted, out of resources)
+is retried for as long as it takes, so the printer being still switched off
+when the service starts does not lose the job.  A permanent failure (device
+node missing, backend detached, permission denied, I/O error) is abandoned
+once \fBOPEN_PRINTER_PERMANENT_WAIT\fR seconds (default 30, change with
+\fB-DOPEN_PRINTER_PERMANENT_WAIT=n\fR) have passed since the client connected,
+giving the user that long to switch the printer on while a job whose printer
+is simply absent does not hold the queue forever; the abandoned job is
+reported to the client as a failure.  SIGTERM stops either wait.  Descriptors
+of any number are
 supported (the I/O loop uses \fBpoll\fR(2), not \fBselect\fR(2)), so a
 long-running daemon never refuses a connection for its descriptor number.
 .SH INSTALLATION
