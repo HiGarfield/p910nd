@@ -38,6 +38,11 @@ The \fB-v\fR option shows the version number and exits.
 .LP
 The \fB-d\fR option causes the daemon to run in the foreground in
 standalone mode and prints log messages to stdout for debugging.
+Under \fB(x)inetd\fR, where the accepted socket occupies the standard input,
+output and error descriptors, log messages go to \fBsyslog\fR(3) instead:
+writing them to stdout would send them to the client as part of the print job.
+\fB-d\fR never changes whether the process is a daemon or a one-shot service;
+that is decided solely by whether it was handed a socket.
 .LP
 A connection on which no data has moved in either direction for
 30 seconds (change with \fB-DIDLE_TIMEOUT=n\fR at build time) is closed,
@@ -63,18 +68,45 @@ once \fBOPEN_PRINTER_PERMANENT_WAIT\fR seconds (default 30, change with
 \fB-DOPEN_PRINTER_PERMANENT_WAIT=n\fR) have passed since the client connected,
 giving the user that long to switch the printer on while a job whose printer
 is simply absent does not hold the queue forever; the abandoned job is
-reported to the client as a failure.  SIGTERM stops either wait.  Descriptors
-of any number are
-supported (the I/O loop uses \fBpoll\fR(2), not \fBselect\fR(2)), so a
-long-running daemon never refuses a connection for its descriptor number.
+reported to the client as a failure.  SIGTERM stops either wait.
+Descriptors of any number are supported (the I/O loop uses \fBpoll\fR(2), not
+\fBselect\fR(2)), so a long-running daemon never refuses a connection for its
+descriptor number.
+.LP
+Jobs for one printer are serialised by a byte range of the lock file, and a
+busy printer makes a job queue rather than refuse it.  That wait has no time
+limit by default: losing a print job is worse than making the next one wait.
+\fBLOCK_WAIT_TIMEOUT\fR (default 0, i.e. wait forever; change with
+\fB-DLOCK_WAIT_TIMEOUT=n\fR) bounds it.  When the bound expires the job is
+abandoned and the client is told the job failed, so it retries instead of
+hanging; pick a value comfortably longer than the slowest legitimate job.
+.LP
+Every timeout is measured with \fBclock_gettime\fR(2) and
+\fBCLOCK_MONOTONIC\fR where the platform provides it, so changing the system
+clock cannot make a job hang or abort.  Where it is unavailable the daemon
+falls back to \fBgettimeofday\fR(3); define \fB-DNO_CLOCK_GETTIME=1\fR to force
+that fallback.  On glibc older than 2.17 \fBclock_gettime\fR(2) lives in
+\fIlibrt\fR, so add \fB-lrt\fR to \fBLIBS\fR there.
+.LP
+The lock file is created with mode 0644 in a directory that the daemon creates
+if it is missing.  Point \fBLOCKFILE_DIR\fR somewhere else when
+\fI/var/lock/subsys\fR does not exist or is not writable; the directory is
+never unlinked, so a stale file is harmless.
 .SH INSTALLATION
 .I p910nd
 can be run as a standalone daemon or from (x)inetd.
 It will automatically detect if it is running under (x)inetd.
 .LP
 A sample SysVinit script,
-.IR p910nd.sh ,
-is provided for operation as a daemon.
+.IR p910nd.init ,
+is installed as
+.IR /etc/init.d/p910nd .
+It stops the daemon through the pid file the daemon writes, because the
+daemon renames its own process to
+.I p9100d
+so that
+.BR ps (1)
+shows the printer port, and the name-based lookup would no longer match.
 .I p910nd
 will change its name under ps to match the printer port, i.e.
 .I p9100d, p9101d
@@ -99,15 +131,22 @@ printer device to send jobs to it.
 If operating with CUPS, this is supported as the AppSocket
 protocol, also known as the JetDirect (probably TM) protocol.
 .LP
-If operating with classic Berkeley lpd, a sample client,
-.IR client.pl ,
-is provided.
-This should be installed as the ifilter (if=) in /etc/printcap.
-.I banner.pl
-should be installed as the ofilter (of=) in /etc/printcap.
-It may be necessary to create a dummy spool file for lpd (lp=).
-This file will be opened but not written to.
-The corresponding C versions are left as an exercise for the reader.
+With classic Berkeley lpd(8) no helper program is needed: lpd(8) prints with
+pr(1), and
+.sp
+.nf
+lp|\fBd\fB:\fP\fIhost\fP\fB:\fP9100\fB\fR
+.fi
+.sp
+sends the job to port 9100 of \fIhost\fR, which is what this daemon serves.
+An /etc/printcap entry therefore only needs
+.sp
+.nf
+lp=:\fBpr\fR=\fI/usr/bin/lp\fB:\fP9100\fB\fR
+.fi
+.sp
+on the machine running this daemon, plus a dummy spool file where lpd(8)
+insists on one; that file is opened but never written to.
 .LP
 When running under inetd, more than one instance could be started.
 To avoid problems with multiple instances attempting to access the
@@ -133,14 +172,105 @@ lock before exiting.
 .SH "SEE ALSO"
 printcap(5), hosts_access(5)
 .SH FILES
-/var/run/p9100d.pid, /var/lock/subsys/p9100d, /etc/hosts.allow, /etc/hosts.deny
-.LP
-The pid file is removed when the daemon exits normally or on
-SIGTERM/SIGINT.
+.TP
+/var/run/p9100d.pid
+Written when the daemon forks into the background, removed when it exits
+normally or on SIGTERM/SIGINT.  Not written with \fB-d\fR.
+.TP
+/var/lock/subsys/p9100d
+The lock file: byte 0 is the instance lock, byte 1 the per-job lock.  The
+directory is created if missing and the file is never unlinked, so a stale one
+is harmless.  Override the directory with \fB-DLOCKFILE_DIR=\"...\"\fR.
+.TP
+/etc/hosts.allow, /etc/hosts.deny
+Used only when built with \fBUSE_WRAP\fR.
+.SH "TUNING AT BUILD TIME"
+Every one of these is a \fB-D\fR macro; the default is what a normal
+installation wants.
+.TP
+.B IDLE_TIMEOUT
+(30) seconds a connection may carry no data in either direction before it is
+closed, counted only while both buffers are empty.
+.TP
+.B SILENT_TIMEOUT
+(120) seconds of no progress after a client has actually streamed data.  A
+mid-job pause is not a dead client.
+.TP
+.B PRINTER_STALL_TIMEOUT
+(120) seconds a printer may accept none of the pending data before the job is
+abandoned.  0 waits forever.
+.TP
+.B PRINTER_FLUSH_TIMEOUT
+(10) seconds allowed for the last buffered bytes to reach the printer after
+the job loop ended.
+.TP
+.B PRINTER_DRAIN_TIMEOUT
+(5) seconds to wait for the parallel port to report idle before the device is
+closed.
+.TP
+.B PRINTER_REPLY_WINDOW
+(60) seconds the client is held after it half-closed, waiting for a status
+reply that never arrived.
+.TP
+.B PRINTER_REPLY_IDLE
+(5) seconds of silence after the printer did reply before the connection is
+released.
+.TP
+.B PRINTER_EOF_ZERO_READS
+(20) consecutive zero-byte reads from the printer that mean end of data.  Only
+consulted once the print direction is finished.
+.TP
+.B PRINTER_READ_PACE_US
+(100000) microseconds to wait between two reads from the printer in
+bidirectional mode, so a chatty device cannot dominate.
+.TP
+.B NO_PROGRESS_USLEEP
+(20000) microseconds to pause after an iteration that moved nothing.
+.TP
+.B DRAIN_TIMEOUT
+(10) seconds of draining a socket before it is closed.
+.TP
+.B DRAIN_MAX_BYTES
+(1 MiB) of unread data to drain before the connection is cut.
+.TP
+.B SOCKET_RCVTIMEO, SOCKET_SNDTIMEO
+(5) seconds socket timeouts, independent of IDLE_TIMEOUT.
+.TP
+.B NETWORK_STALL_TIMEOUT
+(120) seconds the printer-to-network direction may make no progress before
+the job is ended.
+.TP
+.B OPEN_PRINTER_RETRY_INTERVAL
+(10) seconds between attempts to open a printer that is not ready.
+.TP
+.B OPEN_PRINTER_PERMANENT_WAIT
+(30) seconds a permanently failing printer is tolerated, counted from the
+moment the client connected.
+.TP
+.B LOCK_WAIT_TIMEOUT
+(0 = forever) seconds a job waits for the printer lock.
+.TP
+.B SHUTDOWN_GRACE
+(30) seconds in-flight jobs get to finish on SIGTERM before they are signalled
+and then killed.
+.TP
+.B FAIL_WITH_RST
+(1) close a failed job with RST so the client knows to retry.  0 restores the
+older clean-FIN behaviour.
+.TP
+.B NO_CLOCK_GETTIME
+unset; define it to measure every timeout with gettimeofday(3) instead of
+CLOCK_MONOTONIC.
+.TP
+.B PRINTERFILE
+(\"/dev/lp%c\") the device template the printer number is substituted into.
+Set it to point somewhere else when there is no lp device, e.g.
+\fB-DPRINTERFILE='\"/dev/usblp%c\"'\fR.  The \fB-f\fR option overrides it at
+run time.
 .SH COPYRIGHT
 .I p910nd
 is under the GNU Public License Version 2
 .SH AUTHOR
 Ken Yap https://github.com/kenyapcomau/p910nd
 .SH DATE
-Version 1.0
+Version 1.1

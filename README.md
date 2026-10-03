@@ -4,7 +4,11 @@ p910nd is a small printer daemon intended for diskless platforms that does not s
 
 ## Version
 
-0.97
+1.1
+
+The authoritative version string lives in `p910nd.c` (`static const char version[]`)
+and is what `p910nd -v` prints; this file, `p910nd.8` and `aux/p910nd.spec` are
+kept in step with it.
 
 ## Authors
 

@@ -199,11 +199,17 @@ else
 		failure "  [${_SMSG[${_RC_RV}]}] "
 	    fi
 	}
-	checkproc() { return status ${1+"$@"}; }
+	# PD-14: this called a command called "status" with no argument, which
+	# does not exist; status(1) from /etc/init.d/functions needs -p <pidfile>
+	# or -x <name>.  pidofproc answers the same question here.
+	checkproc() { return pidofproc ${1+"$@"} >/dev/null 2>&1; }
 	start_daemon() { return daemon ${1+"$@"}; }
     else
 	# emulate it
 	echo_rc() { echo "  [${_SMSG[${_RC_RV}]}] "; }
+	## PD-14: with no helper library there is no way to find out whether the
+	## daemon runs, so report "unknown" instead of pretending that it does.
+	checkproc() { rc_failed 4; return 4; }
     fi
     rc_reset() { _RC_RV=0; }
     rc_failed()
@@ -281,7 +287,39 @@ case "$1" in
 	## Stop daemon with killproc(8) and if this fails
 	## killproc sets the return value according to LSB.
 
-	killproc -TERM $P910ND_BIN
+	## PD-12: main() rewrites its own argv[0] so that ps shows the printer
+	## port (p9100d instead of p910nd), which is exactly the name killproc
+	## and pidofproc match on.  Prefer the pid file the daemon writes, and
+	## fall back to killproc only when there is none (-d never writes one).
+	P910ND_PIDFILE=
+	P910ND_PID=
+	for p910nd_pf in /var/run/p910[0-9]d.pid; do
+		test -f "$p910nd_pf" || continue
+		read p910nd_p <"$p910nd_pf" 2>/dev/null
+		case "$p910nd_p" in
+		''|*[!0-9]*)	continue ;;	# not a usable pid
+		esac
+		## A recycled pid must not be signalled, so check it is still
+		## ours before using it.
+		grep -q '^.*p910' "/proc/$p910nd_p/cmdline" 2>/dev/null || continue
+		P910ND_PIDFILE=$p910nd_pf
+		P910ND_PID=$p910nd_p
+		break
+	done
+	if test -n "$P910ND_PID"; then
+		kill -TERM "$P910ND_PID" 2>/dev/null
+		## Give the daemon its shutdown grace period before insisting.
+		p910nd_n=0
+		while test -d "/proc/$P910ND_PID" && test $p910nd_n -lt 40; do
+			sleep 1
+			p910nd_n=$((p910nd_n + 1))
+		done
+		kill -KILL "$P910ND_PID" 2>/dev/null
+		# shellcheck disable=SC2034
+		P910ND_OPTS="$P910ND_OPTS"
+	else
+		killproc -TERM $P910ND_BIN
+	fi
 
 	## Remove a leftover pid file, otherwise monitoring and the next
 	## start believe the daemon is still running.

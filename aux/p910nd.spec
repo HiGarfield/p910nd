@@ -1,11 +1,12 @@
 Summary: p910nd is a small daemon that copies any data received to the corresponding printer port.
 Name: p910nd
-Version: 0.96
+Version: 1.1
 Release: 1
 URL: http://etherboot.sourceforge.net/p910nd
 Vendor: Ken Yap
 License: GPL v2
-Source0: http://etherboot.sourceforge.net/p910nd/%{name}-%{version}.tar.gz
+# Upstream tarballs stop at 0.97; build from the git checkout instead.
+Source0: %{name}-%{version}.tar.gz
 BuildArchitectures: i386 x86_64
 BuildRoot: %{_tmppath}/%{name}-%{version}-build
 Group: Networking
@@ -50,6 +51,12 @@ rm -fr %{buildroot}
 %{_mandir}/man8/p910nd.8.gz
 
 %changelog
+* Fri Oct 03 2026 Higarfield <higarfield@gmail.com>
+- 1.1: Take the printer lock in every build (it was compiled out unless
+  LOCKFILE_DIR was defined), create the lock directory when missing, use
+  CLOCK_MONOTONIC for every timeout, report a failed job with RST on every
+  path, and act on a printer read error in bidirectional mode.
+
 * Fri Jan 04 2008 Ken Yap <greenpossum@users.sourceforge.net>
 - 0.92: First spec file
 * Mon Feb 09 2009 Ken Yap <greenpossum@users.sourceforge.net>
