@@ -1,0 +1,17 @@
+---
+# clang-format configuration for p910nd.c
+# Style: K&R-ish, tabs for indentation, braces attached to the keyword/decl.
+BasedOnStyle: LLVM
+Language: Cpp
+IndentWidth: 4
+TabWidth: 4
+UseTab: ForIndentation
+BreakBeforeBraces: Attach
+IndentPPDirectives: None
+ColumnLimit: 80
+SortIncludes: true
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: None
+PointerAlignment: Right
+SpaceAfterCStyleCast: false

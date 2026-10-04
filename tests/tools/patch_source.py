@@ -18,23 +18,27 @@ import argparse
 import sys
 
 # profile -> list of (needle, replacement, expected_hits, note)
-# The needles use real TAB characters; p910nd.c aligns its macros with tabs.
+# The needles mirror the exact macro spelling in p910nd.c.  p910nd.c is kept
+# clang-format clean, which normalises the separator in "#define NAME value" to a
+# single space, so the needles use one space (not the tab the file used before
+# formatting).  If a needle ever stops matching, apply_profile() refuses to
+# build rather than silently producing a mis-patched binary.
 PROFILES = {
     # Only move the listening port.  Everything else keeps shipping values.
     "ports": [
-        ("BASEPORT\t9100", "BASEPORT\t{port}", 1, "listen port moved off 9100+n"),
+        ("BASEPORT 9100", "BASEPORT {port}", 1, "listen port moved off 9100+n"),
     ],
     # Everything the "fast" profile needs to keep a case down to a few
     # seconds.  The ratios between the timeouts are preserved so the
     # qualitative behaviour under test is unchanged.
     "fast": [
-        ("BASEPORT\t9100", "BASEPORT\t{port}", 1, "listen port moved off 9100+n"),
-        ("IDLE_TIMEOUT\t30", "IDLE_TIMEOUT\t3", 1, "idle probe timeout 30s -> 3s"),
-        ("PRINTER_STALL_TIMEOUT\t120", "PRINTER_STALL_TIMEOUT\t6", 1, "printer stall 120s -> 6s"),
-        ("PRINTER_REPLY_WINDOW\t60", "PRINTER_REPLY_WINDOW\t6", 1, "printer reply window 60s -> 6s"),
-        ("SILENT_TIMEOUT\t\t120", "SILENT_TIMEOUT\t\t12", 1, "silent client timeout 120s -> 12s"),
-        ("PRINTER_READ_PACE_US\t100000", "PRINTER_READ_PACE_US\t10000", 1, "printer read pace 100ms -> 10ms"),
-        ("NO_PROGRESS_USLEEP\t20000", "NO_PROGRESS_USLEEP\t2000", 1, "idle loop pause 20ms -> 2ms"),
+        ("BASEPORT 9100", "BASEPORT {port}", 1, "listen port moved off 9100+n"),
+        ("IDLE_TIMEOUT 30", "IDLE_TIMEOUT 3", 1, "idle probe timeout 30s -> 3s"),
+        ("PRINTER_STALL_TIMEOUT 120", "PRINTER_STALL_TIMEOUT 6", 1, "printer stall 120s -> 6s"),
+        ("PRINTER_REPLY_WINDOW 60", "PRINTER_REPLY_WINDOW 6", 1, "printer reply window 60s -> 6s"),
+        ("SILENT_TIMEOUT 120", "SILENT_TIMEOUT 12", 1, "silent client timeout 120s -> 12s"),
+        ("PRINTER_READ_PACE_US 100000", "PRINTER_READ_PACE_US 10000", 1, "printer read pace 100ms -> 10ms"),
+        ("NO_PROGRESS_USLEEP 20000", "NO_PROGRESS_USLEEP 2000", 1, "idle loop pause 20ms -> 2ms"),
     ],
 }
 
