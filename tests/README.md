@@ -3,7 +3,7 @@
 `cases/` 里每个用例验证 `DEFECT_REPORT.md` 中的一条缺陷。**用例通过 = 该缺陷不复现**（修复后语义；修复前是反过来）。观测原始值写入 `build/tests/observations/<ID>.txt`，报告只引用不臆造。
 
 ```sh
-make test                          # 全部 17 个用例，约 187 秒
+make test                          # 全部 21 个用例，约 250 秒
 make test PD-01                    # 单条（ID 大小写皆可，可写 pd-01 或 t-pd-01）
 sh tests/cases/t-pd-05-*.sh        # 直接跑单个用例（变体会自动补建）
 sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必须失败
@@ -51,6 +51,10 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-14-doc-drift.sh` | 文档漂移 | 四份文件版本一致 + 旋钮全覆盖 + init 无幻影命令 |
 | `t-pd-15-version-const.sh` | 可写数组 | `version`/`copyright` 必须是 `const` |
 | `t-pd-16-makefile-deps.sh` | 构建与 CI | 沙箱构建证明头文件触发重编；CI 必须跑测试 |
+| `t-pd-17-instance-lock-failfast.sh` | 第二实例挂起 | 第二个实例必须立刻 exit(1) 并点名"already running"；前一个退出后新的能接管 |
+| `t-pd-18-printer-wait-bounded.sh` | 等打印机无上界 | FIFO 无读者（ENXIO）时作业必须在 OPEN_PRINTER_MAX_WAIT 内放弃；之后打印机仍可用（锁没有卡住） |
+| `t-pd-19-job-children-capped.sh` | 无界 fork | `MAX_JOB_CHILDREN=2` 时最多两个作业子进程且无人被拒；对照构建会 fork 六个 |
+| `t-pd-20-bidir-silent-timeout.sh` | 双向无 SILENT_TIMEOUT | `-b` 下客户端中途暂停 6s 必须被容忍（8192 字节全到）；不发数据的客户端仍按短超时释放 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 

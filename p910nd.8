@@ -54,9 +54,12 @@ pieces, a client that sends a header then waits) is not mistaken for a dead clie
 and truncated.  A printer that accepts no data is given a recoverable
 \fBPRINTER_STALL_TIMEOUT\fR (default 120s) to recover from being out of paper or
 off line before the job is abandoned and reported as failed.
-Every client is served: there is no limit on the number of concurrent jobs.
+Every client is served: no connection is refused because other jobs are running.
 Jobs for one printer are serialised by a lock and simply queue for their turn,
-so a busy printer delays a job instead of rejecting it.  The printer device is
+so a busy printer delays a job instead of rejecting it.  How many job children
+may exist at the same time is bounded by \fBMAX_JOB_CHILDREN\fR (default 64);
+clients beyond that wait in the listen backlog instead of being accepted, so
+they are delayed rather than dropped.  The printer device is
 retried when it cannot be opened yet (\fBOPEN_PRINTER_RETRY_INTERVAL\fR seconds
 between attempts, default 10, change with
 \fB-DOPEN_PRINTER_RETRY_INTERVAL=n\fR): a temporary failure (device busy,
@@ -65,10 +68,12 @@ is retried for as long as it takes, so the printer being still switched off
 when the service starts does not lose the job.  A permanent failure (device
 node missing, backend detached, permission denied, I/O error) is abandoned
 once \fBOPEN_PRINTER_PERMANENT_WAIT\fR seconds (default 30, change with
-\fB-DOPEN_PRINTER_PERMANENT_WAIT=n\fR) have passed since the client connected,
-giving the user that long to switch the printer on while a job whose printer
-is simply absent does not hold the queue forever; the abandoned job is
-reported to the client as a failure.  SIGTERM stops either wait.
+\fB-DOPEN_PRINTER_PERMANENT_WAIT=n\fR) have passed since the job got the
+printer, giving the user that long to switch the printer on; either kind of
+failure is abandoned once \fBOPEN_PRINTER_MAX_WAIT\fR seconds (default 300)
+have passed since the client connected, so a job whose printer never appears
+does not hold the queue forever.  An abandoned job is reported to the client as
+a failure.  SIGTERM stops either wait.
 Descriptors of any number are supported (the I/O loop uses \fBpoll\fR(2), not
 \fBselect\fR(2)), so a long-running daemon never refuses a connection for its
 descriptor number.
@@ -194,11 +199,24 @@ closed, counted only while both buffers are empty.
 .TP
 .B SILENT_TIMEOUT
 (120) seconds of no progress after a client has actually streamed data.  A
-mid-job pause is not a dead client.
+mid-job pause is not a dead client.  Applies in both directions: a
+bi-directional job gets the same grace as a unidirectional one.
+.TP
+.B JOB_MAX_DURATION
+(0 = no limit) seconds one job may run at all, counted from the moment the data
+copy starts.  Every other deadline measures
+.I no progress
+and some of them can be switched off, so this is the only knob that guarantees a
+job ends - and therefore the only one that guarantees the per-job printer lock
+is released again.
 .TP
 .B PRINTER_STALL_TIMEOUT
 (120) seconds a printer may accept none of the pending data before the job is
-abandoned.  0 waits forever.
+abandoned.  0 waits forever, which also means the job keeps the per-job printer
+lock until the printer recovers and every later job for that printer queues
+behind it; set \fBJOB_MAX_DURATION\fR if that wait needs a ceiling.  In
+unidirectional mode there is no printer-to-network stream, so
+\fBNETWORK_STALL_TIMEOUT\fR does not apply and 0 really is unbounded.
 .TP
 .B PRINTER_FLUSH_TIMEOUT
 (10) seconds allowed for the last buffered bytes to reach the printer after
@@ -244,11 +262,42 @@ the job is ended.
 (10) seconds between attempts to open a printer that is not ready.
 .TP
 .B OPEN_PRINTER_PERMANENT_WAIT
-(30) seconds a permanently failing printer is tolerated, counted from the
-moment the client connected.
+(30) seconds a permanently failing printer is tolerated, counted from the moment
+the job actually got the printer - not from the connection, so a job that queued
+behind another one still gets its full chance to see the printer switched on.
+.TP
+.B OPEN_PRINTER_MAX_WAIT
+(300) seconds a job may wait for the printer at all, whatever the kind of
+failure, counted from the moment the client connected.  0 removes the ceiling.
+The job holds the per-job printer lock for the whole wait, so this is what keeps
+a device that reports a temporary failure for ever from stopping every later job
+for that printer.
+.TP
+.B OPEN_PRINTER_RETRY_LOG_EVERY
+(60) seconds between two "will keep retrying" log lines.  The first failure is
+always reported and giving up is always reported at \fBLOG_ERR\fR; without this
+throttle a printer that stays off for hours writes one error line per job per
+retry interval and buries everything else.
 .TP
 .B LOCK_WAIT_TIMEOUT
 (0 = forever) seconds a job waits for the printer lock.
+.TP
+.B INSTANCE_LOCK_WAIT
+(0 = do not wait) seconds a
+.I second
+daemon instance waits for the instance lock before giving up and reporting
+"another p910nd is already running for this printer".  The instance lock answers
+a different question from the job lock, so it deliberately does not share the
+job lock's queue-forever default: queueing would leave behind a process that
+never listens and that takes the port over as soon as the first instance stops.
+Under \fB(x)inetd\fR the instance lock is what serialises concurrent one-shot
+processes, and there it always queues.
+.TP
+.B MAX_JOB_CHILDREN
+(64) job children that may exist at the same time, 0 for no limit.  Every client
+is still served: when the limit is reached further connections are left in the
+listen backlog rather than accepted, so they wait a little instead of being
+refused.
 .TP
 .B SHUTDOWN_GRACE
 (30) seconds in-flight jobs get to finish on SIGTERM before they are signalled

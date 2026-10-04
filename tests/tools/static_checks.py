@@ -57,7 +57,7 @@ def check_pd01(rep, repo):
         rep.add("PD-01", "get_lock-unguarded", DEFECT,
                 "get_lock() is still inside #ifdef LOCKFILE_DIR at line %d, so a "
                 "default build has no printer lock at all" % line)
-    elif re.search(r"\n\tif \(get_lock\(lpnumber\) == 0\)\n\t\texit\(1\);", text):
+    elif re.search(r"\n\tif \(get_lock\(lpnumber, 0\) == 0\)\n\t\texit\(1\);", text):
         rep.add("PD-01", "get_lock-unguarded", OK,
                 "server() takes the instance lock unconditionally")
     else:

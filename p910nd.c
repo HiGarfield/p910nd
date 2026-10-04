@@ -195,6 +195,25 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
 #ifndef		OPEN_PRINTER_PERMANENT_WAIT
 #define		OPEN_PRINTER_PERMANENT_WAIT	30
 #endif
+/* V-openmax: an absolute ceiling on the whole wait for the printer, whatever
+ * kind of failure it is.  A *temporary* failure is otherwise retried for as
+ * long as it takes, and a device can report one for ever: ENXIO from a USB
+ * backend that never comes back, EBUSY from a driver that keeps the node.
+ * That job holds the byte-1 job lock the whole time, so every later job for
+ * the same printer queues behind it and the printer stops being usable.
+ * Counted from the moment the client connected.  0 removes the ceiling
+ * (the pre-fix behaviour).  Seconds; -DOPEN_PRINTER_MAX_WAIT=n. */
+#ifndef		OPEN_PRINTER_MAX_WAIT
+#define		OPEN_PRINTER_MAX_WAIT	300
+#endif
+/* V-openlog: a printer that stays unavailable must not flood syslog, one
+ * LOG_ERR line per job per retry interval quickly buries everything else.
+ * The first failure is reported at LOG_ERR and then at most one line every
+ * this many seconds; giving up is always reported at LOG_ERR with the real
+ * errno.  Seconds; -DOPEN_PRINTER_RETRY_LOG_EVERY=n. */
+#ifndef		OPEN_PRINTER_RETRY_LOG_EVERY
+#define		OPEN_PRINTER_RETRY_LOG_EVERY	60
+#endif
 /* V-lockwait: how long a job waits for the printer lock.  0 (the default) keeps
  * the original behaviour: queue for as long as it takes, because losing a print
  * job is worse than making the next one wait.  A non-zero value bounds that
@@ -203,6 +222,20 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
  * retries instead of hanging.  Seconds; override with -DLOCK_WAIT_TIMEOUT=n. */
 #ifndef		LOCK_WAIT_TIMEOUT
 #define		LOCK_WAIT_TIMEOUT	0
+#endif
+/* V-instancelock: how long a *second daemon instance* waits for the byte-0
+ * lock.  Byte 0 answers "am I the only p910nd for this printer?", which is a
+ * different question from byte 1's "may I use the printer now?" and needs the
+ * opposite answer: a second instance must say so and exit, because queueing
+ * would leave behind a process that never listens (the daemonizing parent has
+ * already exited successfully) and that silently takes the port over the moment
+ * the first instance stops - a restart would appear to succeed and then leave
+ * the old, or a new but unexpected, daemon behind.
+ * 0 (the default) is one non-blocking attempt and then "already running";
+ * a positive value is the number of seconds to wait for a restart takeover.
+ * Seconds; -DINSTANCE_LOCK_WAIT=n. */
+#ifndef		INSTANCE_LOCK_WAIT
+#define		INSTANCE_LOCK_WAIT	0
 #endif
 
 /* R1/T4/U1/U2: a printer that accepts no data for this long (while we still
@@ -251,6 +284,17 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
 #ifndef		SHUTDOWN_GRACE
 #define		SHUTDOWN_GRACE		30
 #endif
+/* V-childcap: how many job children may be forked at the same time.  Every
+ * client has to be served, but "served" does not mean "forked at once": when
+ * the cap is reached the connection is simply left in the listen backlog
+ * instead of being accepted, so the client waits a little and is still served,
+ * while the number of processes is bounded.  Without a cap a printer that
+ * never becomes available forks one process per connection until the machine
+ * runs out of processes, descriptors or memory.
+ * 0 means no cap.  -DMAX_JOB_CHILDREN=n. */
+#ifndef		MAX_JOB_CHILDREN
+#define		MAX_JOB_CHILDREN	64
+#endif
 /* R9/T2/U3: a client that connected but never sent a byte is released after
  * IDLE_TIMEOUT (a probe).  A client that has actually streamed data is a real
  * job that may legitimately pause (CUPS building pages, a slow link, a client
@@ -260,6 +304,17 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr, char *c
  * pause is not mistaken for a dead client (override -DSILENT_TIMEOUT=n). */
 #ifndef		SILENT_TIMEOUT
 #define		SILENT_TIMEOUT		120
+#endif
+/* V-jobmax: an absolute ceiling on one job, measured from the moment
+ * copy_stream() starts.  Every other deadline in the loop is a *no progress*
+ * deadline and some of them can be switched off (-DPRINTER_STALL_TIMEOUT=0
+ * means "never abandon on stall"), so without this there is no configuration
+ * in which a job that is waiting for the printer is guaranteed to end.  Such a
+ * job holds the byte-1 job lock, so it also stops every later job.
+ * 0 (the default) keeps today's behaviour: no absolute ceiling.  Seconds;
+ * -DJOB_MAX_DURATION=n. */
+#ifndef		JOB_MAX_DURATION
+#define		JOB_MAX_DURATION	0
 #endif
 /* R6: consecutive zero byte reads from the printer before its direction is
  * treated as finished, so an EOF device cannot spin the CPU. */
@@ -564,50 +619,88 @@ static int printer_open_is_permanent(int e)
 		 e == ENOMEM || e == ENFILE || e == EMFILE || e == ENXIO);
 }
 
-/* Wait for the printer to become available.  Temporary failures are retried
- * indefinitely; permanent ones until OPEN_PRINTER_PERMANENT_WAIT seconds have
- * elapsed since the client connected (the caller passes that instant in), so
- * the user gets a bounded chance to switch the printer on and a missing
- * printer cannot hold the job - and the job queue behind it - forever.
+/* Wait for the printer to become available.  A temporary failure is retried
+ * for as long as it takes, a permanent one only until OPEN_PRINTER_PERMANENT_WAIT
+ * seconds have passed, so the user gets a bounded chance to switch the printer
+ * on and a printer that is simply missing does not hold the job forever.
+ *
+ * Both waits are additionally capped by OPEN_PRINTER_MAX_WAIT, counted from the
+ * moment the client connected: this job holds the byte-1 job lock the whole
+ * time, so an endless wait would also stop every later job for that printer
+ * (V-openmax).  A permanent failure is measured from the instant the job got
+ * the lock (locked_at), not from the connection: measuring from the connection
+ * gave a job that had queued behind another one no grace period at all, it
+ * failed the moment it was finally its turn (V-openbudget).
+ *
  * U6: SIGTERM still stops the wait promptly.  U10a: the real device name and
- * errno are logged on every attempt so the cause is visible in syslog.
- * V-time: the budget is measured with mono_now(), not time(), so a clock step
- * cannot extend or shorten how long a job is allowed to wait. */
-static int open_printer_retry(int lpnumber, const struct timeval *connected_at)
+ * errno are logged so the cause is visible in syslog.
+ * V-time: both budgets are measured with mono_now(), not time(), so a clock
+ * step cannot extend or shorten how long a job is allowed to wait. */
+static int open_printer_retry(int lpnumber, const struct timeval *connected_at,
+			      const struct timeval *locked_at)
 {
+	struct timeval last_logged;
+
+	/* Zero, so the very first failure is always reported: every real
+	 * timestamp is further than OPEN_PRINTER_RETRY_LOG_EVERY away from it. */
+	last_logged.tv_sec = 0;
+	last_logged.tv_usec = 0;
 	for (;;) {
 		int lp;
 		long left = OPEN_PRINTER_RETRY_INTERVAL;
+		struct timeval now;
+		long waited_total;
 
 		if (got_term)			/* U6: stop promptly on shutdown */
 			return -1;
+		(void)mono_now(&now);
+		waited_total = (long)(now.tv_sec - connected_at->tv_sec);
 		lp = open_printer(lpnumber);
 		if (lp >= 0)
 			return lp;
 		/* D2: save errno before dolog() (vsyslog) can clobber it. */
 		{
 			int e = errno;
+			const char *what = device ? device : "(unknown)";
 
+			if (OPEN_PRINTER_MAX_WAIT > 0 &&
+			    waited_total >= (long)OPEN_PRINTER_MAX_WAIT) {
+				dolog(LOGOPTS,
+				      "cannot open printer %s: %s after %ld seconds, job abandoned\n",
+				      what, strerror(e), waited_total);
+				return -1;
+			}
 			if (printer_open_is_permanent(e)) {
 				long budget = OPEN_PRINTER_PERMANENT_WAIT;
-				struct timeval now;
 				long waited;
 
-				(void)mono_now(&now);
-				waited = (long)(now.tv_sec - connected_at->tv_sec);
+				waited = (long)(now.tv_sec - locked_at->tv_sec);
 				if (waited >= budget) {
 					dolog(LOGOPTS,
 					      "cannot open printer %s: %s after %ld seconds, job abandoned\n",
-					      device ? device : "(unknown)",
-					      strerror(e), waited);
+					      what, strerror(e), waited);
 					return -1;
 				}
 				/* Do not overshoot the budget: wake up in time for it. */
 				if (left > budget - waited)
 					left = budget - waited;
 			}
-			dolog(LOGOPTS, "cannot open printer %s: %s, will keep retrying\n",
-			      device ? device : "(unknown)", strerror(e));
+			/* V-openlog: report the first failure and then at most
+			 * one line every OPEN_PRINTER_RETRY_LOG_EVERY seconds.
+			 * A printer that is off for hours used to write one
+			 * LOG_ERR per job per retry interval and bury every
+			 * other message; -d still sees every attempt. */
+			if (now.tv_sec - last_logged.tv_sec >=
+			    (long)OPEN_PRINTER_RETRY_LOG_EVERY) {
+				dolog(LOGOPTS,
+				      "cannot open printer %s: %s, will keep retrying\n",
+				      what, strerror(e));
+				(void)mono_now(&last_logged);
+			} else {
+				dolog(LOG_DEBUG,
+				      "cannot open printer %s: %s, will keep retrying\n",
+				      what, strerror(e));
+			}
 		}
 		/* Sleep in one-second slices so SIGTERM is noticed promptly. */
 		while (left-- > 0 && !got_term)
@@ -615,19 +708,33 @@ static int open_printer_retry(int lpnumber, const struct timeval *connected_at)
 	}
 }
 
-/* Queue for a record lock.  With LOCK_WAIT_TIMEOUT == 0 (the default) a busy
- * printer makes the job wait its turn for as long as it takes, never be
- * refused: dropping a print job is worse than letting it queue.  F_SETLKW
- * blocks in the kernel, so waiting costs no CPU; EINTR is retried because
- * SIGCHLD is delivered whenever another job child exits, and got_term keeps
- * shutdown prompt.
+/* Take a record lock on one byte of the lock file.
  *
- * V-lockwait: a non-zero LOCK_WAIT_TIMEOUT bounds that wait, because an
- * unbounded F_SETLKW lets one wedged job block every later job for that printer
- * forever (PD-08).  The bound is spent with F_SETLK polling so a timeout can be
- * reported to the client (V3) instead of hanging, and so SIGTERM is still
- * noticed while waiting. */
-static int take_lock(int fd, off_t start)
+ * The two bytes ask different questions and therefore need different waits:
+ *
+ *   byte 0, the instance lock taken by get_lock()
+ *       "am I the only p910nd for this printer?"  A second instance has to be
+ *       told so: queueing would leave a process that never listens behind,
+ *       because the daemonizing parent has already exited successfully.
+ *
+ *   byte 1, the job lock taken by lock_printer_job()
+ *       "may I use the printer now?"  A busy printer must make the job wait
+ *       its turn rather than refuse it: dropping a print job is worse than
+ *       letting it queue.
+ *
+ * wait_seconds < 0   queue in the kernel with F_SETLKW, no time limit
+ * wait_seconds == 0  one non-blocking F_SETLK attempt, then report and give up
+ * wait_seconds > 0   F_SETLK polling, give up after that many seconds
+ *
+ * F_SETLKW blocks in the kernel so waiting costs no CPU; EINTR is retried
+ * because SIGCHLD is delivered whenever another job child exits, and got_term
+ * keeps shutdown prompt.
+ *
+ * V-lockwait: a non-zero bound exists because an unbounded F_SETLKW lets one
+ * wedged job block every later job for that printer forever (PD-08).  The bound
+ * is spent with F_SETLK polling so a timeout can be reported to the client (V3)
+ * instead of hanging, and so SIGTERM is still noticed while waiting. */
+static int take_lock(int fd, off_t start, long wait_seconds)
 {
 	struct flock lplock;
 	long waited = 0;
@@ -639,7 +746,7 @@ static int take_lock(int fd, off_t start)
 	lplock.l_len = 1;
 	lplock.l_pid = getpid();
 	for (;;) {
-		if (LOCK_WAIT_TIMEOUT == 0) {
+		if (wait_seconds < 0) {
 			if (fcntl(fd, F_SETLKW, &lplock) == 0)
 				return (1);
 		} else {
@@ -651,17 +758,19 @@ static int take_lock(int fd, off_t start)
 				return (0);
 			continue;
 		}
-		/* V-lockwait: EACCES/EAGAIN means somebody else holds the range. */
-		if (LOCK_WAIT_TIMEOUT > 0 &&
-		    (errno == EACCES || errno == EAGAIN || errno == EWOULDBLOCK)) {
-			if (waited >= LOCK_WAIT_TIMEOUT) {
-				dolog(LOGOPTS,
-				      "lock: still busy after %ld seconds\n",
+		/* EACCES/EAGAIN means somebody else already holds the range. */
+		if (errno == EACCES || errno == EAGAIN || errno == EWOULDBLOCK) {
+			if (wait_seconds <= 0)
+				return (0);	/* the caller names its own reason */
+			if (got_term)
+				return (0);
+			if (waited >= wait_seconds) {
+				dolog(LOGOPTS, "lock: still busy after %ld seconds\n",
 				      waited);
 				return (0);
 			}
-			/* One second per iteration keeps this cheap; the poll() in
-			 * the caller would not run, so the granularity is the
+			/* One second per iteration keeps this cheap; the poll()
+			 * in the caller would not run, so the granularity is the
 			 * budget's own resolution. */
 			sleep_us(1000000);
 			waited++;
@@ -696,7 +805,11 @@ static int make_lock_dir(void)
 	return (1);
 }
 
-static int get_lock(int lpnumber)
+/* Take the byte-0 instance lock.  queue != 0 asks for the (x)inetd semantics,
+ * where this byte is what serialises concurrent one-shot processes and must
+ * therefore queue; queue == 0 asks for the standalone semantics, where a
+ * second daemon must be told that one is already running. */
+static int get_lock(int lpnumber, int queue)
 {
 	(void)snprintf(lockname, sizeof(lockname), LOCKFILE, lpnumber);
 	/* V-lockmode: 0644, not 0666.  The daemon itself does not set a umask on
@@ -713,9 +826,27 @@ static int get_lock(int lpnumber)
 		dolog(LOGOPTS, "%s: %s\n", lockname, strerror(errno));	/* D1 */
 		return (0);
 	}
-	/* Queue until the instance already running for this printer exits. */
-	if (take_lock(lockfd, 0) == 0)
+	/* Byte 0 answers "am I the only p910nd for this printer?".
+	 *
+	 *   standalone (server())   another daemon for this printer is already
+	 *                           running, so say so and let the caller exit
+	 *                           instead of queueing forever (V-instancelock)
+	 *   (x)inetd (one_job())    every connection is its own process and this
+	 *                           byte is the only thing that serialises them,
+	 *                           so it must queue exactly like the job lock:
+	 *                           refusing here would drop the job
+	 */
+	if (queue) {
+		if (take_lock(lockfd, 0, -1L) == 0)
+			return (0);
+		return (1);
+	}
+	if (take_lock(lockfd, 0, (long)INSTANCE_LOCK_WAIT) == 0) {
+		dolog(LOGOPTS,
+		      "another p910nd is already running for printer %c\n",
+		      lpnumber);
 		return (0);
+	}
 	return (1);
 }
 
@@ -723,12 +854,19 @@ static int get_lock(int lpnumber)
  * for its whole lifetime, every job child contends for byte 1 of the same
  * file, so jobs stay serialized although accepting no longer is.  Contention
  * queues: the job waits until the printer (or the device node for it) is
- * available instead of being rejected. */
+ * available instead of being rejected.
+ *
+ * LOCK_WAIT_TIMEOUT == 0 (the default) keeps that unbounded wait; a non-zero
+ * value bounds it (V-lockwait/PD-08) so one wedged job cannot block every
+ * later job forever. */
 static int lock_printer_job(void)
 {
+	long wait;
+
 	if (lockfd < 0)
 		return (1);
-	return (take_lock(lockfd, 1));
+	wait = (LOCK_WAIT_TIMEOUT == 0) ? -1L : (long)LOCK_WAIT_TIMEOUT;
+	return (take_lock(lockfd, 1, wait));
 }
 
 /* V7: release the byte-1 job lock while this connection is only waiting for the
@@ -1308,6 +1446,7 @@ static int copy_stream(int fd, int lp)
 		int stall_extended = 0;	/* V4: give a slow-but-alive printer a 2nd window */
 		int lock_released = 0;	/* V7: byte-1 lock freed once print dir done */
 		struct timeval last_pn_progress;	/* V1: printer->network progress */
+		struct timeval job_start;	/* V-jobmax: absolute ceiling on the job */
 		Buffer_t printerToNetworkBuffer;
 		struct pollfd pfd[2];
 		long w;		/* U4: reply window, set once it is needed */
@@ -1315,6 +1454,7 @@ static int copy_stream(int fd, int lp)
 		mono_now(&last_activity);
 		mono_now(&last_print);
 		mono_now(&last_pn_progress);
+		mono_now(&job_start);
 		/* Finish when network sent EOF. */
 		/* The printer to network stream may however not be finished: the
 		 * answer to a status query arrives after the client half closed,
@@ -1384,10 +1524,17 @@ static int copy_stream(int fd, int lp)
 					printer_replied = 1;	/* U4: printer has produced output */
 					mono_now(&then);
 					/* wait PRINTER_READ_PACE_US before reading again. */
-					then.tv_usec += PRINTER_READ_PACE_US;
-					/* PD-11: `>=`, not `>`.  When the sum is exactly 1000000
-					 * the strict comparison left tv_usec out of range (a legal
-					 * timeval is 0..999999) and never carried into tv_sec. */
+					/* Split the pace into whole seconds and the
+					 * remainder before adding: adding it whole
+					 * leaves tv_usec at up to twice the legal
+					 * range, and one subtraction then still
+					 * leaves an illegal value behind (a legal
+					 * timeval is 0..999999). */
+					then.tv_sec += (long)(PRINTER_READ_PACE_US / 1000000);
+					then.tv_usec += (long)(PRINTER_READ_PACE_US % 1000000);
+					/* PD-11: `>=`, not `>`.  When the sum is exactly
+					 * 1000000 the strict comparison left tv_usec out
+					 * of range and never carried into tv_sec. */
 					if (then.tv_usec >= 1000000) {
 						then.tv_usec -= 1000000;
 						then.tv_sec++;
@@ -1426,9 +1573,10 @@ static int copy_stream(int fd, int lp)
 					dolog(LOG_DEBUG,"%d.%d: wrote %d bytes to printer\n", (int)now.tv_sec, (int)now.tv_usec, result);
 					mono_now(&last_activity);
 					mono_now(&last_print);
-				}
-			}
-			if ((pfd[0].revents & (POLLOUT | POLLERR)) ||
+					stall_extended = 0;	/* V4: real progress, full budget again */
+					}
+					}
+					if ((pfd[0].revents & (POLLOUT | POLLERR)) ||
 			    printerToNetworkBuffer.outfd == -1) {
 				/* Write data to network. */
 				result = (int)writeBuffer(&printerToNetworkBuffer);
@@ -1457,20 +1605,25 @@ static int copy_stream(int fd, int lp)
 			 * full buffer).  Stop, but do NOT mark failure here: the final flush
 			 * gets one last chance and we judge by bytes delivered, so a printer
 			 * that recovers within the window is never reported dead. */
-			if (networkToPrinterBuffer.bytes == 0)
+			if (networkToPrinterBuffer.bytes == 0) {
 				mono_now(&last_print);
-			else {
-				/* V2: PRINTER_STALL_TIMEOUT == 0 means "wait forever for the printer"
-				 * (e.g. paper added days later) - never abandon on stall.  The network
-				 * side is still bounded by NETWORK_STALL_TIMEOUT (V1), so this cannot
-				 * hang the whole daemon the way an unbounded stall used to. */
+				/* V4: nothing is pending, so this is not a stall: give the
+				 * next one the full two windows again. */
+				stall_extended = 0;
+			} else {
 				if (PRINTER_STALL_TIMEOUT > 0) {
 					/* V4: do not destroy a slow-but-alive printer.  A device that is
 					 * merely slow (heating, large buffer, walking the paper) may not
 					 * accept a byte for longer than PRINTER_STALL_TIMEOUT between
 					 * consumptions.  On the first stall window give it a second,
 					 * equal window before declaring it dead - any byte written in
-					 * either window resets the clock. */
+					 * either window resets the clock, and so does the extension:
+					 * a printer that recovers and then stalls again later gets
+					 * the same two windows, not one.
+					 * V2: PRINTER_STALL_TIMEOUT == 0 means "never abandon on
+					 * stall" (paper added days later).  Nothing here bounds that
+					 * wait, so it also holds the byte-1 job lock for as long as
+					 * it lasts; use JOB_MAX_DURATION to put a ceiling on it. */
 					long stalled = now.tv_sec - last_print.tv_sec;
 					if (stalled >= PRINTER_STALL_TIMEOUT) {
 						if (!stall_extended) {
@@ -1480,9 +1633,14 @@ static int copy_stream(int fd, int lp)
 							      "printer accepted no data for %ld seconds, extending wait\n",
 							      (long)PRINTER_STALL_TIMEOUT);
 						} else {
+							/* Report what was actually measured, not
+							 * a fixed multiple: the second window is
+							 * one PRINTER_STALL_TIMEOUT long, and the
+							 * job may have been stalled for far less
+							 * (or more) than twice that. */
 							dolog(LOG_ERR,
-							      "printer stalled for %d seconds, %d bytes undelivered, abandoning job (unrecoverable)\n",
-							      (int)PRINTER_STALL_TIMEOUT * 2,
+							      "printer stalled for %ld seconds, %d bytes undelivered, abandoning job (unrecoverable)\n",
+							      stalled,
 							      networkToPrinterBuffer.bytes);
 							break;
 						}
@@ -1503,12 +1661,24 @@ static int copy_stream(int fd, int lp)
 			/* U3/U9: idle only counts when both buffers are empty AND the client
 			 * has not yet half-closed - once it has, we are waiting for the
 			 * printer's reply and the reply-window block below decides.  This
-			 * keeps the two directions' semantics consistent. */
+			 * keeps the two directions' semantics consistent.
+			 *
+			 * V-probe: the same probe/real-job distinction as the
+			 * unidirectional branch.  A client that has actually streamed data
+			 * may legitimately pause - CUPS building pages, a slow link, a
+			 * client that sends a PJL header and then waits - so it gets
+			 * SILENT_TIMEOUT; only a client that never sent anything is a
+			 * probe and gets the short IDLE_TIMEOUT.  Using IDLE_TIMEOUT for
+			 * both truncated real bidirectional jobs and made CUPS reprint
+			 * them. */
 			if (networkToPrinterBuffer.bytes == 0 && printerToNetworkBuffer.bytes == 0 &&
-			    !networkToPrinterBuffer.eof_read && !networkToPrinterBuffer.eof_sent &&
-			    now.tv_sec - last_activity.tv_sec >= IDLE_TIMEOUT) {
-				dolog(LOG_NOTICE,"no data transferred for %d seconds, stop copy stream\n", (int)IDLE_TIMEOUT);
-				break;
+			    !networkToPrinterBuffer.eof_read && !networkToPrinterBuffer.eof_sent) {
+				long limit = (networkToPrinterBuffer.saw_data == 0) ?
+					     (long)IDLE_TIMEOUT : (long)SILENT_TIMEOUT;
+				if (now.tv_sec - last_activity.tv_sec >= limit) {
+					dolog(LOG_NOTICE,"no data transferred for %ld seconds, stop copy stream\n", limit);
+					break;
+				}
 			}
 			/* R4/E7/T1: the job is out but the printer may still owe an
 			 * answer (status query).  For a regular file eof_read marks a
@@ -1563,6 +1733,20 @@ static int copy_stream(int fd, int lp)
 				      (int)NETWORK_STALL_TIMEOUT);
 				break;
 			}
+			/* V-jobmax: an absolute ceiling on one job.  Every other
+			 * deadline above is a no-progress deadline and some of them
+			 * can be switched off, so this is the only configuration in
+			 * which a job is guaranteed to end - and therefore the only
+			 * one in which the byte-1 job lock is guaranteed to be
+			 * released. */
+			if (JOB_MAX_DURATION > 0 &&
+			    now.tv_sec - job_start.tv_sec >= (long)JOB_MAX_DURATION) {
+				dolog(LOG_ERR,
+				      "job ran for %ld seconds, abandoning (limit %d)\n",
+				      now.tv_sec - job_start.tv_sec,
+				      (int)JOB_MAX_DURATION);
+				break;
+			}
 			if (got_term)	/* U6: stop promptly on shutdown */
 				break;
 			if (!moved)
@@ -1611,11 +1795,13 @@ static int copy_stream(int fd, int lp)
 		struct timeval now;
 		struct timeval last_activity;
 		struct timeval last_print;
+		struct timeval job_start;	/* V-jobmax: absolute ceiling on the job */
 		struct pollfd pfd[2];
 		int stall_extended = 0;	/* V4: give a slow-but-alive printer a 2nd window */
 		int lock_released = 0;	/* V7: byte-1 lock freed once print dir done */
 		mono_now(&last_activity);
 		mono_now(&last_print);
+		mono_now(&job_start);
 		/* Unidirectional: simply read from network, and write to printer,
 		 * but driven by poll() with a timeout, a blocking read() let one
 		 * silent client stop the daemon for everybody (B1).  poll() also
@@ -1657,26 +1843,36 @@ static int copy_stream(int fd, int lp)
 					dolog(LOG_DEBUG,"wrote %d bytes to printer\n",result);
 					mono_now(&last_activity);
 					mono_now(&last_print);
-				}
-			}
-			mono_now(&now);
-			/* R1/U1/U2: data pending but the device takes none of it for
-			 * PRINTER_STALL_TIMEOUT.  Stop, but do NOT mark failure here; the
-			 * final flush and the bytes-delivered judgement decide the verdict,
-			 * so a printer that recovers within the window is not reported dead. */
-			if (networkToPrinterBuffer.bytes == 0)
-				mono_now(&last_print);
-			else {
-				/* V2: PRINTER_STALL_TIMEOUT == 0 means "wait forever for the printer"
-				 * (e.g. paper added days later) - never abandon on stall.  The
-				 * network side is still bounded by NETWORK_STALL_TIMEOUT (V1). */
-				if (PRINTER_STALL_TIMEOUT > 0) {
+					stall_extended = 0;	/* V4: real progress, full budget again */
+					}
+					}
+					mono_now(&now);
+					/* R1/U1/U2: data pending but the device takes none of it for
+					* PRINTER_STALL_TIMEOUT.  Stop, but do NOT mark failure here; the
+					* final flush and the bytes-delivered judgement decide the verdict,
+					* so a printer that recovers within the window is not reported dead. */
+					if (networkToPrinterBuffer.bytes == 0) {
+					mono_now(&last_print);
+					/* V4: nothing pending, so this is not a stall: give the
+					* next one the full two windows again. */
+					stall_extended = 0;
+					} else {
+					/* V2: PRINTER_STALL_TIMEOUT == 0 means "wait forever for the
+					* printer" (e.g. paper added days later) - never abandon on
+					* stall.  Nothing bounds that wait in this direction: there is
+					* no NETWORK_STALL_TIMEOUT here because there is no
+					* printer->network stream, so the job - and the byte-1 job
+					* lock it holds - last until the printer recovers.  Use
+					* JOB_MAX_DURATION to put a ceiling on it. */
+					if (PRINTER_STALL_TIMEOUT > 0) {
 					/* V4: do not destroy a slow-but-alive printer.  A device that is
 					 * merely slow (heating, large buffer, walking the paper) may not
 					 * accept a byte for longer than PRINTER_STALL_TIMEOUT between
 					 * consumptions.  On the first stall window give it a second,
 					 * equal window before declaring it dead - any byte written in
-					 * either window resets the clock. */
+					 * either window resets the clock, and so does the extension,
+					 * so a printer that recovers and stalls again later gets the
+					 * same two windows and not just one. */
 					long stalled = now.tv_sec - last_print.tv_sec;
 					if (stalled >= PRINTER_STALL_TIMEOUT) {
 						if (!stall_extended) {
@@ -1686,15 +1882,17 @@ static int copy_stream(int fd, int lp)
 							      "printer accepted no data for %ld seconds, extending wait\n",
 							      (long)PRINTER_STALL_TIMEOUT);
 						} else {
+							/* Report what was actually measured, not a
+							 * fixed multiple of the timeout. */
 							dolog(LOG_ERR,
-							      "printer stalled for %d seconds, %d bytes undelivered, abandoning job (unrecoverable)\n",
-							      (int)PRINTER_STALL_TIMEOUT * 2,
+							      "printer stalled for %ld seconds, %d bytes undelivered, abandoning job (unrecoverable)\n",
+							      stalled,
 							      networkToPrinterBuffer.bytes);
 							break;
 						}
 					}
 				}
-				}
+			}
 			/* V7: once the print direction is fully delivered (the client has
 			 * half-closed and the network->printer buffer is empty) release the
 			 * byte-1 job lock so a real print job is not blocked behind a
@@ -1737,6 +1935,19 @@ static int copy_stream(int fd, int lp)
 			 * printer to take the last bytes. */
 			if (networkToPrinterBuffer.eof_sent && networkToPrinterBuffer.bytes == 0)
 				break;
+			/* V-jobmax: an absolute ceiling on one job, the only deadline that
+			 * cannot be switched off.  Without it a configuration such as
+			 * -DPRINTER_STALL_TIMEOUT=0 has nothing that ends a job waiting on
+			 * a printer that never recovers - and such a job holds the byte-1
+			 * job lock, so every later job for that printer waits too. */
+			if (JOB_MAX_DURATION > 0 &&
+			    now.tv_sec - job_start.tv_sec >= (long)JOB_MAX_DURATION) {
+				dolog(LOG_ERR,
+				      "job ran for %ld seconds, abandoning (limit %d)\n",
+				      now.tv_sec - job_start.tv_sec,
+				      (int)JOB_MAX_DURATION);
+				break;
+			}
 			/* R6: never poll with zero delay */
 			if (got_term)	/* U6: stop promptly on shutdown */
 				break;
@@ -1778,13 +1989,16 @@ static int copy_stream(int fd, int lp)
 static void handle_connection(int fd, int lpnumber)
 {
 	int lp;
-	/* The budget for a permanent open failure counts from the moment the
-	 * client connected, lock queueing included, so a job that has already
-	 * been waiting longer than the budget fails at once instead of adding
-	 * another full wait.  Taken here, right after accept() forked us.
-	 * V-time: taken through mono_now() so a clock step cannot change how
+	/* connected_at caps the whole wait for the printer (OPEN_PRINTER_MAX_WAIT)
+	 * and is taken here, right after accept() forked us, so queueing for the
+	 * job lock is part of it.  locked_at is taken once this job actually owns
+	 * the printer and is what the permanent-failure budget is measured from:
+	 * a job that queued behind another one still gets its full chance to see
+	 * the printer switched on (V-openbudget).
+	 * V-time: both taken through mono_now() so a clock step cannot change how
 	 * long a job may wait for its printer. */
 	struct timeval connected_at;
+	struct timeval locked_at;
 	struct sockaddr_storage client;
 	socklen_t clientlen = sizeof(client);
 	char host[INET6_ADDRSTRLEN];
@@ -1803,12 +2017,15 @@ static void handle_connection(int fd, int lpnumber)
 		close_connection(fd, 1);
 		return;
 	}
+	(void)mono_now(&locked_at);
 	/* Make sure lp device is open...  open_printer_retry() decides how long
-	 * to wait: unlimited for a temporary failure, OPEN_PRINTER_PERMANENT_WAIT
-	 * from the client connection for a permanent one.  It logs the reason
-	 * (device name + errno).  Giving up is a failure: RST to the client (V3)
-	 * so the job is not silently dropped. */
-	lp = open_printer_retry(lpnumber, &connected_at);
+	 * to wait: as long as it takes for a temporary failure,
+	 * OPEN_PRINTER_PERMANENT_WAIT from the moment this job got the printer for
+	 * a permanent one, and never longer than OPEN_PRINTER_MAX_WAIT from the
+	 * connection in either case.  It logs the reason (device name + errno).
+	 * Giving up is a failure: RST to the client (V3) so the job is not
+	 * silently dropped. */
+	lp = open_printer_retry(lpnumber, &connected_at, &locked_at);
 	if (lp < 0) {
 		close_connection(fd, 1);
 		return;
@@ -1845,7 +2062,9 @@ static void one_job(int lpnumber)
 		dolog(LOG_NOTICE, "Connection from %s port %hu\n",
 		      get_ip_str((struct sockaddr *)&client, host, sizeof(host)),
 		      get_port((struct sockaddr *)&client));
-	if (get_lock(lpnumber) == 0) {
+	/* queue = 1: under (x)inetd every connection is its own process, so this
+	 * byte is the only thing that serialises them and it must queue. */
+	if (get_lock(lpnumber, 1) == 0) {
 		/* T6/T10c: a silent return closed the connection with no trace.  Log
 		 * the failure with the client address so the operator can see why the
 		 * job was dropped.  V3: close with RST rather than a bare `return`,
@@ -1932,8 +2151,14 @@ static void server(int lpnumber)
 	 * serializes concurrent jobs to the same printer is a silent no-op (V7).
 	 * PD-01: this call used to sit inside `#ifdef LOCKFILE_DIR`, which no
 	 * build defines, so the shipping configuration had no mutual exclusion at
-	 * all.  The lock directory is created on demand by get_lock(). */
-	if (get_lock(lpnumber) == 0)
+	 * all.  The lock directory is created on demand by get_lock().
+	 *
+	 * queue = 0: a second instance must be told that one is already running
+	 * and exit, never queue.  Queueing would leave a process that never
+	 * listens behind, and it would take the port over the moment the first
+	 * instance stops - a restart would silently produce the wrong daemon
+	 * (V-instancelock). */
+	if (get_lock(lpnumber, 0) == 0)
 		exit(1);
 	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = PF_UNSPEC;
@@ -2044,6 +2269,21 @@ static void server(int lpnumber)
 			break;
 		}
 
+		/* V-childcap: every client has to be served, but not every client
+		 * has to be forked at once.  When the cap is reached the connection
+		 * is left in the listen backlog - the client waits a little and is
+		 * still served - instead of forking another child.  Without this a
+		 * printer that never becomes available would fork one process per
+		 * connection, each holding a descriptor and each blocked on the
+		 * printer, until the machine ran out of processes or memory. */
+		if (MAX_JOB_CHILDREN > 0 &&
+		    inflight_children >= (sig_atomic_t)MAX_JOB_CHILDREN) {
+			dolog(LOG_DEBUG, "%d job(s) in flight, deferring accept\n",
+			      (int)inflight_children);
+			(void)sleep(1);
+			continue;
+		}
+
 		/* D4: accept() truncates clientlen, it has to be reset every
 		 * time, otherwise a shorter address (IPv4 after IPv6) is cut off. */
 		memset(&client, 0, sizeof(client));
@@ -2090,9 +2330,10 @@ static void server(int lpnumber)
 		/* R7/R8/R9: one job per child.  A slow printer, a client that
 		 * never closes or a printer that has to be retried must not keep
 		 * the daemon from accepting the next connection; the printer
-		 * itself stays exclusive through the job lock.  There is no cap on
-		 * the number of children: every client is served and simply queues
-		 * on the printer lock. */
+		 * itself stays exclusive through the job lock.  Every client is
+		 * served - the number of children that exist at the same time is
+		 * bounded by MAX_JOB_CHILDREN (V-childcap), and clients beyond
+		 * that wait in the listen backlog instead of being refused. */
 		sigemptyset(&chld_mask);
 		sigaddset(&chld_mask, SIGCHLD);
 		sigprocmask(SIG_BLOCK, &chld_mask, &chld_omask);
@@ -2112,6 +2353,11 @@ static void server(int lpnumber)
 		}
 		if (pid == 0) {		/* child */
 			(void)close(netfd);
+			/* U7: SIGCHLD was blocked above only to protect
+			 * record_child() in the parent.  The job child has to run
+			 * with the mask it was started with, otherwise it spends
+			 * its whole life with SIGCHLD blocked. */
+			sigprocmask(SIG_SETMASK, &chld_omask, NULL);
 			/* The child owns neither the pid file nor the lock file, but
 			 * it keeps lockfd: POSIX locks are per process, so it can
 			 * take the job lock through the inherited descriptor and
@@ -2279,9 +2525,13 @@ int main(int argc, char *argv[])
 	 * syslog ignored the LOG_PID and LOG_PERROR option.  I.e. the intention
 	 * was to add both options but the effect was to have neither.
 	 * I disagree with the intention to add PERROR.  --Stef  */
-	/* D6: p is NULL when the program name does not contain "p910n" */
-	if (!log_to_stdout)
-		openlog(p != NULL ? p : progname, LOG_PID, LOG_LPR);
+	/* D6: p is NULL when the program name does not contain "p910n".
+	 * V-logfd: openlog() is needed whether or not -d was given.  dolog()
+	 * falls back to syslog whenever stdout is the client's own socket, which
+	 * under (x)inetd it is even with -d, so without this the ident and the
+	 * LOG_PID/LOG_LPR facility would be lost exactly in the configuration
+	 * where the log is the only place the operator can look. */
+	openlog(p != NULL ? p : progname, LOG_PID, LOG_LPR);
 	(void)atexit(cleanup_and_exit);	/* D9: remove the pid file on any exit */
 
 	/* V-logfd: -d only decides *where the log goes*, never whether this

@@ -559,6 +559,59 @@ LSP `findReferences get_lock` 佐证：默认预处理下 `get_lock()` **只有�
 - **锁文件不 unlink 的决定是对的**（T6），未改动。
 - **`printer_open_is_permanent()` 的分类与预算钳制逻辑**正确。
 
+---
+
+## 第二轮：a11690e..HEAD 引入的回归（审查日期 2026-10-04）
+
+第一轮修完之后，`a11690e` 到 `35bd188` 这 15 个提交又引入了新缺陷。按"是否由本区间直接引入"分两组，共 12 条。
+
+### A 组：本区间新引入
+
+| ID | 严重 | 一句话 | 引入提交 |
+| --- | --- | --- | --- |
+| A-1 | 严重 | 第二个实例 / `service restart` 永久挂起，并留下会抢端口的孤儿守护进程 | `a11690e` × `5589df2`(PD-01) |
+| A-2 | 严重 | 作业持 byte-1 锁无限等待打印机，整台打印机的队列被永久堵死 | `f0ba0f3` × `00a41bd` |
+| A-3 | 高 | 无界 fork：并发作业数不再有上限，可耗尽进程/fd/内存 | `d78a7a1` |
+| A-4 | 中 | `-d` 在 inetd 下改走 syslog 却从未 `openlog()`，ident 与 facility 丢失 | `5589df2`(PD-04) |
+| A-5 | 中 | 打开重试每次打一条 `LOG_ERR`，打印机长期缺失时刷爆 syslog | `f0ba0f3` |
+| A-6 | 低 | init 脚本 pid 校验过弱（`^.*p910`），多打印机只停第一个 | `5589df2`(PD-12) |
+| A-7 | 中 | 排长队后的作业拿到 0 秒"永久失败"预算 | `00a41bd` |
+
+### B 组：区间前已存在，本区间未修 / 只修一半 / 被加剧
+
+| ID | 严重 | 一句话 |
+| --- | --- | --- |
+| B-1 | 高 | 双向模式没有 `SILENT_TIMEOUT`，真实作业暂停 30s 就被截断（与 man page 矛盾） |
+| B-2 | 高 | 单向模式下 `PRINTER_STALL_TIMEOUT=0` 可永久挂起，V2 的"由 NETWORK_STALL_TIMEOUT 兜底"注释是假的 |
+| B-3 | 中 | `stall_extended` 永不复位，"可恢复预算"实际只宽限一次；放弃日志恒定谎报 240s |
+| B-4 | 中 | 作业子进程继承了被阻塞的 `SIGCHLD` 且从不恢复 |
+| B-5 | 低 | `PRINTER_READ_PACE_US >= 2000000` 时 `tv_usec` 归一化仍越界 |
+
+### 修复与验证
+
+| ID | 修改 | 用例 |
+| --- | --- | --- |
+| A-1 | `take_lock()` 增加 `wait_seconds` 参数；`get_lock(lpnumber, queue)` 把实例锁（快速失败）与作业锁（排队）分开；inetd 下实例锁即作业锁，仍排队 | `t-pd-17` |
+| A-2/A-7 | 新增 `OPEN_PRINTER_MAX_WAIT`（默认 300s）兜住全部等待；永久失败预算改从"作业拿到锁"起算 | `t-pd-18` |
+| A-3 | 新增 `MAX_JOB_CHILDREN`（默认 64），达到上限时**不 accept**（连接留在 backlog）而不是拒绝 | `t-pd-19` |
+| A-4 | `openlog()` 无条件调用 | 现有用例 |
+| A-5 | 新增 `OPEN_PRINTER_RETRY_LOG_EVERY`（默认 60s）节流重试日志 | `t-pd-18` 侧断言 |
+| A-6 | init 脚本按 argv[0] 精确匹配 `p910[0-9]d`，并遍历全部 pid 文件 | `t-pd-12` 侧断言 |
+| B-1 | 双向 idle 判定改为与单向一致的 `saw_data ? SILENT_TIMEOUT : IDLE_TIMEOUT` | `t-pd-20` |
+| B-2 | 新增 `JOB_MAX_DURATION`（默认 0）作为不可关闭的绝对上界；修正三处错误注释 | — |
+| B-3 | `stall_extended` 随进度复位；日志改打实测秒数 | — |
+| B-4 | 子进程 fork 后恢复信号掩码 | — |
+| B-5 | 归一化改为先拆秒与余量再一次进位 | `t-pd-11` |
+
+四条新用例都做了变异验证（把修复还原后必须变红）：
+
+```
+PD-17  A the second instance exits with a failure status (actual=124 expected=1)
+PD-18  A the client is told the job failed, not left hanging (actual=timeout expected=rst)
+PD-19  A no more than two job children exist at the same time (actual=7 >= 3)
+PD-20  A the whole job reaches the printer (actual=4096 expected=8192)
+```
+
 ## 回归规则
 
 任何后续改动都必须满足：

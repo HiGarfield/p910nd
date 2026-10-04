@@ -293,28 +293,49 @@ case "$1" in
 	## fall back to killproc only when there is none (-d never writes one).
 	P910ND_PIDFILE=
 	P910ND_PID=
+	P910ND_PIDS=
 	for p910nd_pf in /var/run/p910[0-9]d.pid; do
 		test -f "$p910nd_pf" || continue
 		read p910nd_p <"$p910nd_pf" 2>/dev/null
 		case "$p910nd_p" in
 		''|*[!0-9]*)	continue ;;	# not a usable pid
 		esac
-		## A recycled pid must not be signalled, so check it is still
-		## ours before using it.
-		grep -q '^.*p910' "/proc/$p910nd_p/cmdline" 2>/dev/null || continue
+		## A recycled pid must not be signalled, so check it is still ours
+		## before using it.  /proc/PID/cmdline is NUL separated and argv[0]
+		## is its first field; main() renames it to p910<port>d, so match
+		## that exactly.  A looser "contains p910" test would also match an
+		## unrelated process whose command line happens to mention p910 --
+		## an editor sitting on p910nd.c, for instance.
+		p910nd_argv0=$(tr '\0' '\n' <"/proc/$p910nd_p/cmdline" 2>/dev/null | sed -n 1p)
+		case "${p910nd_argv0##*/}" in
+		p910[0-9]d)	;;
+		*)	continue ;;
+		esac
 		P910ND_PIDFILE=$p910nd_pf
 		P910ND_PID=$p910nd_p
-		break
+		## Every pid file is collected, not just the first one: a host can
+		## run one daemon per printer and "stop" has to stop all of them.
+		P910ND_PIDS="$P910ND_PIDS $p910nd_p"
 	done
-	if test -n "$P910ND_PID"; then
-		kill -TERM "$P910ND_PID" 2>/dev/null
-		## Give the daemon its shutdown grace period before insisting.
+	if test -n "$P910ND_PIDS"; then
+		for p910nd_p in $P910ND_PIDS; do
+			P910ND_PID=$p910nd_p
+			kill -TERM "$P910ND_PID" 2>/dev/null
+		done
+		## Give the daemons their shutdown grace period before insisting.
 		p910nd_n=0
-		while test -d "/proc/$P910ND_PID" && test $p910nd_n -lt 40; do
+		while test $p910nd_n -lt 40; do
+			p910nd_left=
+			for p910nd_p in $P910ND_PIDS; do
+				test -d "/proc/$p910nd_p" && p910nd_left=1
+			done
+			test -n "$p910nd_left" || break
 			sleep 1
 			p910nd_n=$((p910nd_n + 1))
 		done
-		kill -KILL "$P910ND_PID" 2>/dev/null
+		for p910nd_p in $P910ND_PIDS; do
+			kill -KILL "$p910nd_p" 2>/dev/null
+		done
 		# shellcheck disable=SC2034
 		P910ND_OPTS="$P910ND_OPTS"
 	else
