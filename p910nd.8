@@ -74,9 +74,9 @@ failure is abandoned once \fBOPEN_PRINTER_MAX_WAIT\fR seconds (default 300)
 have passed since the client connected, so a job whose printer never appears
 does not hold the queue forever.  An abandoned job is reported to the client as
 a failure.  SIGTERM stops either wait.
-Descriptors of any number are supported (the I/O loop uses \fBpoll\fR(2), not
-\fBselect\fR(2)), so a long-running daemon never refuses a connection for its
-descriptor number.
+Descriptors of any number are supported (the I/O loop uses \fBpoll\fR(2), so
+the only ceiling is the process descriptor table), so a long-running daemon
+never refuses a connection for its descriptor number.
 .LP
 Jobs for one printer are serialised by a byte range of the lock file, and a
 busy printer makes a job queue rather than refuse it.  That wait has no time

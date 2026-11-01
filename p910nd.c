@@ -29,7 +29,7 @@
  *	Version 0.96
  *	Patches by Stefan Sichler.
  *	Fixed bi-directional mode to stay alive until connection is closed.
- *	Fixed timeout value in select() (controlling in/out balancing).
+ *	Fixed the I/O wait timeout (controlling in/out balancing).
  *	Fixed network-to-printer buffer reporting EOF although there was data
  *	left in the buffer.
  *	Added log-to-stdout option (-d).
@@ -37,7 +37,7 @@
  *	Version 0.95
  *	Patch by Mario Izquierdo
  *	Fix incomplete conversion to manipulate new ip_addr structure
- *	when LIBWRAP is selected
+ *	when LIBWRAP is enabled
  *
  *	Version 0.94
  *	Patch by Guenther Niess:
@@ -122,7 +122,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h> /* B2: TCP_NODELAY and keepalive tuning */
-#include <poll.h>        /* T8: poll() has no FD_SETSIZE limit */
+#include <poll.h>        /* T8: poll() has no descriptor-number limit */
 #include <signal.h>      /* A1/D9: SIGPIPE and clean shutdown */
 #include <stdarg.h>
 #include <stdio.h>
@@ -1109,10 +1109,26 @@ static void initBuffer(Buffer_t *b, int infd, int outfd, int detectEof) {
 	b->err = 0;
 }
 
-/* poll() events a buffer is interested in, the equivalent of the old
- * prepBuffer() select() masks.  poll() has no FD_SETSIZE limit, so a
- * descriptor with a number that no longer fits an fd_set (which happens on a
- * long-running daemon or after a big job) is served like any other. */
+/* Interests of a buffer for the next poll(): the events it wants to wait for,
+ * recomputed before every poll() so that a full buffer stops asking for
+ * POLLIN and an empty one stops asking for POLLOUT.  The ready states poll()
+ * reports back map onto the loop as follows, and every call site treats them
+ * alike:
+ *
+ *   POLLIN            readBuffer() is attempted
+ *   POLLOUT           writeBuffer() is attempted
+ *   POLLERR/POLLHUP   treated as ready in both directions and the real
+ *                     read()/write() decides: it either drains the bytes that
+ *                     did arrive or reports the error (C2)
+ *   POLLNVAL          not expected - negative descriptors are rejected on
+ *                     entry, and a descriptor is closed only after its
+ *                     direction is done; should it appear, the round makes no
+ *                     progress and the idle/stall deadlines end the job
+ *
+ * poll() has no descriptor-number ceiling: the highest descriptor is bounded
+ * only by RLIMIT_NOFILE, not by the width of a fixed bit set, so a number that
+ * grows during a long-running daemon (or after a big job) is served like any
+ * other. */
 static short buffer_read_events(const Buffer_t *b) {
 	/* reading after a read error would spin on the same failing fd (C2) */
 	if (b->infd >= 0 && !b->eof_read && !(b->err & READ_ERR) &&
@@ -1287,6 +1303,9 @@ static int flush_buffer(Buffer_t *b, int timeout_secs) {
 			pfd.fd = b->outfd;
 			pfd.events = POLLOUT;
 			pfd.revents = 0;
+			/* The timeout is in milliseconds: wake up after 100 ms
+			 * even if the device never becomes writable, so the
+			 * deadline below is still checked. */
 			if (poll(&pfd, 1, 100) < 0) {
 				if (errno == EINTR) /* A3 */
 					continue;
@@ -1317,13 +1336,13 @@ static int flush_buffer(Buffer_t *b, int timeout_secs) {
 
 /* R5/U8a: the 0.97 change log says the device stream may only be closed when
  * the printer is no longer busy, otherwise the driver may drop the last
- * write(). A character device (and usblp) reports "writable" from select()
- * almost always, so select() is useless for them and the old code returned
- * immediately, leaving the tail of the job unprotected.  When the kernel
- * exposes the parallel-port status we poll it and wait while the printer is
- * busy; otherwise we give the driver a single short, interruptible slice to
- * flush.  #ifdef-guarded so it stays portable to musl/OpenWrt (LPGETSTATUS only
- * exists on Linux). */
+ * write(). A character device (and usblp) reports POLLOUT almost always, so
+ * waiting for writability says nothing about the driver having drained its own
+ * buffer, and the old code closed immediately, leaving the tail of the job
+ * unprotected.  When the kernel exposes the parallel-port status we query it
+ * with LPGETSTATUS and wait while the printer is busy; otherwise we give the
+ * driver a single short, interruptible slice to flush.  #ifdef-guarded so it
+ * stays portable to musl/OpenWrt (LPGETSTATUS only exists on Linux). */
 static void wait_printer_idle(int lp) {
 #ifdef LPGETSTATUS
 	struct timeval start;
@@ -1354,8 +1373,8 @@ static void wait_printer_idle(int lp) {
 #endif
 	/* Non-queryable device, unqueryable port or a port that reported idle:
 	 * give the driver a short, bounded chance to push the last bytes out,
-	 * then stop.  This replaces the old always-immediate select() return
-	 * that left the tail of the job unprotected (U8a). */
+	 * then stop.  This replaces the old immediate close that left the tail
+	 * of the job unprotected (U8a). */
 	sleep_us(200000);
 	dolog(LOG_DEBUG, "device drained (or timed out), closing\n");
 }
@@ -1480,8 +1499,9 @@ static int copy_stream(int fd, int lp) {
 			if ((printerToNetworkBuffer.err & READ_ERR) &&
 			    printerToNetworkBuffer.bytes == 0)
 				break;
-			/* T8: poll(), not select(), so descriptors beyond the
-			 * old FD_SETSIZE limit are handled like any other. */
+			/* T8: the loop waits with poll(), which has no
+			 * descriptor-number ceiling, so a high descriptor is
+			 * handled like any other. */
 			pfd[0].fd = fd;
 			pfd[0].events =
 			    (short)(buffer_read_events(&networkToPrinterBuffer) |
@@ -1904,8 +1924,8 @@ static int copy_stream(int fd, int lp) {
 		/* Unidirectional: simply read from network, and write to
 		 * printer, but driven by poll() with a timeout, a blocking
 		 * read() let one silent client stop the daemon for everybody
-		 * (B1).  poll() also means a descriptor beyond the old
-		 * FD_SETSIZE limit is fine. */
+		 * (B1).  poll() also means a high descriptor number needs no
+		 * special case. */
 		while (!(networkToPrinterBuffer.err & WRITE_ERR)) {
 			int moved = 0;
 			/* C2: a read error only ends the job once the buffer is
@@ -2486,10 +2506,10 @@ static void server(int lpnumber) {
 		dolog(LOG_NOTICE, "Connection from %s port %hu accepted\n",
 		      get_ip_str((struct sockaddr *)&client, host, sizeof(host)),
 		      get_port((struct sockaddr *)&client));
-		/* T8: descriptors at or past FD_SETSIZE used to be refused here
-		 * because select() cannot represent them.  copy_stream() uses
-		 * poll() now, so a high descriptor number is served like any
-		 * other and the connection is never rejected for it. */
+		/* T8: a high descriptor number needs no special case here.
+		 * copy_stream() waits with poll(), which has no
+		 * descriptor-number ceiling, so the connection is never refused
+		 * for the number it happens to get. */
 		/*write(fd, "Printing", 8); */
 
 		/* R7/R8/R9: one job per child.  A slow printer, a client that

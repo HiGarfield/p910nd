@@ -55,10 +55,11 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-18-printer-wait-bounded.sh` | 等打印机无上界 | FIFO 无读者（ENXIO）时作业必须在 OPEN_PRINTER_MAX_WAIT 内放弃；之后打印机仍可用（锁没有卡住） |
 | `t-pd-19-job-children-capped.sh` | 无界 fork | `MAX_JOB_CHILDREN=2` 时最多两个作业子进程且无人被拒；对照构建会 fork 六个 |
 | `t-pd-20-bidir-silent-timeout.sh` | 双向无 SILENT_TIMEOUT | `-b` 下客户端中途暂停 6s 必须被容忍（8192 字节全到）；不发数据的客户端仍按短超时释放 |
+| `t-pd-21-poll-only.sh` | 等待接口可回退 | 代码/文档零遗留旧接口字样；三处 `poll()` 与 `<poll.h>` 必须在位，二进制符号级校验 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 
 ## 环境要求
 
 必需：`gcc`（或 `$CC_BIN`）、`python3`、`strace`、`setsid`、`timeout`、`make`。
-可选：`cppcheck`、`clang-tidy`（PD-00 会记录是否跳过）、`nm`（PD-07 用）。
+可选：`cppcheck`、`clang-tidy`（PD-00 会记录是否跳过）、`nm`（PD-07、PD-21 用）。

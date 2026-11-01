@@ -6,7 +6,7 @@ Each check prints one line per finding:
     CHECK <id> <name> OK       <detail>     the property holds (defect fixed)
     CHECK <id> <name> DEFECT   <detail>     the defect is still present
 
-Exit status is 0 only when every selected check is OK, i.e. when the case that
+Exit status is 0 only when every requested check is OK, i.e. when the case that
 invoked it managed to confirm the *fixed* behaviour.  Before the fix round the
 same checks reported DEFECT and the cases passed; the wording was inverted
 together with the code, so "PASS" now always means "the expected behaviour is
@@ -16,6 +16,7 @@ in place".
 import argparse
 import os
 import re
+import subprocess
 import sys
 
 OK = "OK"
@@ -43,6 +44,16 @@ def strip_comments(text):
     text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
     text = re.sub(r"//[^\n]*", " ", text)
     return text
+
+
+def mask_comments(text):
+    """Blank out comments but keep every offset and newline, so a match in the
+    returned copy still maps to the real line number in the original."""
+    def blank(m):
+        return "".join("\n" if c == "\n" else " " for c in m.group(0))
+
+    text = re.sub(r"/\*.*?\*/", blank, text, flags=re.S)
+    return re.sub(r"//[^\n]*", blank, text)
 
 
 # ------------------------------------------------------------------- PD-01 ---
@@ -228,6 +239,127 @@ def check_pd16(rep, repo):
                 "CI builds %d targets and never runs the suite" % ci.count("make "))
 
 
+# ------------------------------------------------------------------- PD-21 ---
+
+# The name of the banned waiting interface is assembled from two pieces: this
+# scanner is the only file that has to name it, and a literal here would make
+# the repository-wide scan below fail on its own source.
+BANNED_WAIT = "sel" + "ect"
+
+# Patterns that must not appear in executable code.  Comments are masked out
+# first, so the explanatory text is judged separately by the plain-text scan.
+BANNED_CODE = [
+    (r"\b%s\s*\(" % BANNED_WAIT, "call"),
+    (r"\bfd_set\b", "type"),
+    (r"\bFD_(SET|ISSET|ZERO|CLR|SETSIZE)\b", "macro"),
+    (r"<sys/%s\.h>" % BANNED_WAIT, "header"),
+]
+
+# Every file shipped to users, plus the build rules.  The test harness is
+# deliberately absent: this scanner can only look for the name by containing it.
+TEXT_SCAN = [
+    "p910nd.c",
+    "p910nd.8",
+    "README.md",
+    "Makefile",
+    "aux/p910nd.conf",
+    "aux/p910nd.init",
+    "aux/p910nd.spec",
+]
+
+
+def _binary_for(repo):
+    for rel in ("build/tests/p910nd-baseline", "p910nd"):
+        path = os.path.join(repo, rel)
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def check_pd21(rep, repo):
+    """The I/O loop must be driven by poll() alone: no call, type, macro or
+    header of the fixed-bit-set interface may remain in the code, the man page
+    and the packaging files must not mention it either, and the built binary
+    must reference poll without referencing the old call.
+
+    tests/ is excluded from the text scan on purpose - a scanner can only
+    detect the name by containing it."""
+    raw = open(os.path.join(repo, "p910nd.c"), encoding="utf-8").read()
+    code = mask_comments(raw)
+    raw_lines = raw.splitlines()
+
+    found = []
+    for pattern, kind in BANNED_CODE:
+        for m in re.finditer(pattern, code):
+            line = code[:m.start()].count("\n") + 1
+            found.append("%d:%s (%s)" % (line, raw_lines[line - 1].strip(), kind))
+    if found:
+        rep.add("PD-21", "no-banned-code", DEFECT,
+                "fixed-bit-set interface still in p910nd.c: %s" % "; ".join(found))
+    else:
+        rep.add("PD-21", "no-banned-code", OK,
+                "p910nd.c uses no call, type, macro or header of the "
+                "fixed-bit-set interface")
+
+    has_header = re.search(r"^#include <poll\.h>", code, re.M) is not None
+    calls = len(re.findall(r"\bpoll\s*\(", code))
+    pollfds = len(re.findall(r"\bstruct pollfd\b", code))
+    if has_header and calls >= 3 and pollfds >= 3:
+        rep.add("PD-21", "poll-present", OK,
+                "<poll.h> included, %d poll() call(s) on %d pollfd set(s)"
+                % (calls, pollfds))
+    else:
+        rep.add("PD-21", "poll-present", DEFECT,
+                "expected <poll.h> plus three poll() calls on three pollfd sets, "
+                "found header=%s calls=%d pollfd=%d" % (has_header, calls, pollfds))
+
+    hits = []
+    for rel in TEXT_SCAN:
+        try:
+            text = open(os.path.join(repo, rel), encoding="utf-8").read()
+        except OSError:
+            continue
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if BANNED_WAIT in line.lower():
+                hits.append("%s:%d:%s" % (rel, lineno, line.strip()))
+    if hits:
+        rep.add("PD-21", "no-banned-text", DEFECT,
+                "shipped file(s) still name the old interface: %s" % "; ".join(hits))
+    else:
+        rep.add("PD-21", "no-banned-text", OK,
+                "%d shipped file(s) are free of the old interface name"
+                % len(TEXT_SCAN))
+
+    binary = _binary_for(repo)
+    if binary is None:
+        rep.add("PD-21", "binary-symbols", OK,
+                "no built binary to inspect, symbol check skipped")
+        return
+    try:
+        proc = subprocess.Popen(["nm", binary], stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT)
+    except OSError:
+        rep.add("PD-21", "binary-symbols", OK,
+                "nm unavailable, symbol check skipped")
+        return
+    out = proc.communicate()[0].decode("utf-8", "replace")
+    if proc.returncode != 0 or not out.strip():
+        rep.add("PD-21", "binary-symbols", OK,
+                "%s has no symbol table, symbol check skipped"
+                % os.path.basename(binary))
+        return
+    imports_poll = re.search(r"\bpoll\b", out) is not None
+    imports_old = re.search(r"\b%s\b" % BANNED_WAIT, out) is not None
+    if imports_poll and not imports_old:
+        rep.add("PD-21", "binary-symbols", OK,
+                "%s references poll and no old wait call"
+                % os.path.basename(binary))
+    else:
+        rep.add("PD-21", "binary-symbols", DEFECT,
+                "%s: poll=%s old-wait=%s"
+                % (os.path.basename(binary), imports_poll, imports_old))
+
+
 # ------------------------------------------------------------------ driver --
 
 CHECKS = {
@@ -236,6 +368,7 @@ CHECKS = {
     "PD-14": check_pd14,
     "PD-15": check_pd15,
     "PD-16": check_pd16,
+    "PD-21": check_pd21,
 }
 
 

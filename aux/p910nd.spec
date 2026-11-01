@@ -14,7 +14,7 @@ Group: Networking
 %description
 p910nd implements the port 9100 network printer protocol which simply
 copies any incoming data on the port to the printer (and in the reverse
-direction, if bidirectional mode is selected). Both parallel and USB
+direction, if bidirectional mode is enabled). Both parallel and USB
 printers are supported. This protocol was used in HP's printers and is
 called JetDirect (probably TM). p910nd is particularly useful for
 diskless hosts and embedded devices because it does not require any disk
