@@ -696,11 +696,13 @@ static int open_printer_retry(int lpnumber, const struct timeval *connected_at,
 			if (left > budget - waited)
 				left = budget - waited;
 		}
-		/* V-openlog: report the first failure and then at most
-		 * one line every OPEN_PRINTER_RETRY_LOG_EVERY seconds.
-		 * A printer that is off for hours used to write one
-		 * LOG_ERR per job per retry interval and bury every
-		 * other message; -d still sees every attempt. */
+		/* V-openlog: report the first failure and then at most one
+		 * LOG_ERR every OPEN_PRINTER_RETRY_LOG_EVERY seconds.  A
+		 * printer that is off for hours used to bury every other
+		 * message.  -d still shows every attempt, but under a
+		 * separate wording: reusing the LOG_ERR text made a throttled
+		 * attempt indistinguishable from a real warning, so the
+		 * throttle could not be observed in the debug log at all. */
 		if (!logged || now.tv_sec - last_logged.tv_sec >=
 		                   (long)OPEN_PRINTER_RETRY_LOG_EVERY) {
 			dolog(LOGOPTS, "cannot open printer %s: %s, will keep retrying\n",
@@ -708,7 +710,9 @@ static int open_printer_retry(int lpnumber, const struct timeval *connected_at,
 			(void)mono_now(&last_logged);
 			logged = 1;
 		} else {
-			dolog(LOG_DEBUG, "cannot open printer %s: %s, will keep retrying\n",
+			dolog(LOG_DEBUG,
+			      "cannot open printer %s: %s, retrying "
+			      "(log throttled)\n",
 			      what, strerror(e));
 		}
 		/* Sleep in one-second slices so SIGTERM is noticed promptly. */
