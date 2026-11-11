@@ -1386,7 +1386,9 @@ static void wait_printer_idle(int lp) {
  * pause), then read what is left, bounded by BOTH a time cap and a byte cap.
  * The caps were enlarged because a large in-flight job can have far more than
  * 256KiB still sitting in the kernel receive buffer, so the old limits cut
- * the connection with RST and lost that data. */
+ * the connection with RST and lost that data.  The descriptor is
+ * non-blocking while the copy loop owns it (V5), so SO_RCVTIMEO alone cannot
+ * make read() wait: the flag is cleared here, before the final drain. */
 static void close_connection(int fd, int failure) {
 	struct timeval start;
 	struct timeval now;
@@ -1394,6 +1396,9 @@ static void close_connection(int fd, int failure) {
 	char drain[65536];
 	size_t total = 0;
 	ssize_t n;
+#ifdef O_NONBLOCK
+	int fl;
+#endif
 
 	/* V3: a failed job must be visible to the client.  A clean FIN would
 	 * let CUPS think the job printed and never retry, silently losing it.
@@ -1412,6 +1417,18 @@ static void close_connection(int fd, int failure) {
 	tv.tv_sec = 1;
 	tv.tv_usec = 0;
 	(void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#ifdef O_NONBLOCK
+	/* R4/V-drain: set_socket_options() made this socket non-blocking so a
+	 * stalled peer cannot pin the copy loop in write().  SO_RCVTIMEO is
+	 * ignored on a non-blocking descriptor, so the first read() below
+	 * returned EAGAIN immediately and the peer's in-flight bytes were
+	 * still unread when close() sent RST.  The descriptor belongs to this
+	 * job alone and is about to be closed, so clear the flag and let the
+	 * one second timeout give the client a chance to finish. */
+	fl = fcntl(fd, F_GETFL, 0);
+	if (fl >= 0 && (fl & O_NONBLOCK))
+		(void)fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
+#endif
 	if (shutdown(fd, SHUT_WR) < 0 && errno != ENOTCONN)
 		dolog(LOG_DEBUG, "shutdown: %s\n", strerror(errno));
 	mono_now(&start);
@@ -1421,6 +1438,8 @@ static void close_connection(int fd, int failure) {
 		    total >= DRAIN_MAX_BYTES)
 			break;
 		n = read(fd, drain, sizeof(drain));
+		if (n < 0 && errno == EINTR)
+			continue; /* A3: a signal is not the end of the stream */
 		if (n <= 0)
 			break;
 		total += (size_t)n;
