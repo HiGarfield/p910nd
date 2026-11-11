@@ -643,10 +643,14 @@ static int printer_open_is_permanent(int e) {
 static int open_printer_retry(int lpnumber, const struct timeval *connected_at,
                               const struct timeval *locked_at) {
 	struct timeval last_logged;
+	int logged = 0;
 
-	/* Zero, so the very first failure is always reported: every real
-	 * timestamp is further than OPEN_PRINTER_RETRY_LOG_EVERY away from it.
-	 */
+	/* V-openlog: last_logged is only meaningful once a line has actually
+	 * been emitted.  A zero timestamp stood in for "never logged" when the
+	 * clock was gettimeofday() (epoch seconds are large), but mono_now()
+	 * uses CLOCK_MONOTONIC: during the first
+	 * OPEN_PRINTER_RETRY_LOG_EVERY seconds after boot the very first
+	 * failure was throttled to LOG_DEBUG and vanished from syslog. */
 	last_logged.tv_sec = 0;
 	last_logged.tv_usec = 0;
 	for (;;) {
@@ -697,11 +701,12 @@ static int open_printer_retry(int lpnumber, const struct timeval *connected_at,
 		 * A printer that is off for hours used to write one
 		 * LOG_ERR per job per retry interval and bury every
 		 * other message; -d still sees every attempt. */
-		if (now.tv_sec - last_logged.tv_sec >=
-		    (long)OPEN_PRINTER_RETRY_LOG_EVERY) {
+		if (!logged || now.tv_sec - last_logged.tv_sec >=
+		                   (long)OPEN_PRINTER_RETRY_LOG_EVERY) {
 			dolog(LOGOPTS, "cannot open printer %s: %s, will keep retrying\n",
 			      what, strerror(e));
 			(void)mono_now(&last_logged);
+			logged = 1;
 		} else {
 			dolog(LOG_DEBUG, "cannot open printer %s: %s, will keep retrying\n",
 			      what, strerror(e));
