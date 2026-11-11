@@ -10,7 +10,8 @@
 # The case passes as long as every tool ran *and* still reports nothing: the
 # point of the baseline is that the number must stay at zero.  Every tool is
 # also asserted on its own, so one clean run cannot hide another tool's
-# diagnostics behind the aggregate count.
+# diagnostics behind the aggregate count, and the counter itself is exercised
+# with synthetic diagnostics so it cannot silently stop accumulating.
 
 set -u
 REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -22,10 +23,14 @@ SRC="$REPO_ROOT/p910nd.c"
 record() {
 	# record <label> <logfile> <status>
 	obs_kv "$1 exit status" "$3"
-	obs_kv "$1 diagnostics" "$(count_lines "$2" 'warning:\|error:')"
+	obs_kv "$1 diagnostics" "$(count_lines "$2" 'warning:\|error:\|style:')"
 	obs "$1 output:"
 	sed 's/^/    /' "$2" 2>/dev/null | head -40 | while read -r l; do obs "$l"; done
-	DIAG_TOTAL=$(($(DIAG_TOTAL) + $(count_lines "$2" 'warning:\|error:')))
+	# A command substitution of the counter name used to run here: it printed
+	# "DIAG_TOTAL: not found" and, because the substitution was empty, reset
+	# the counter to this tool's diagnostic count instead of adding it.  The
+	# last tool is normally clean, so warnings from earlier tools were hidden.
+	DIAG_TOTAL=$((DIAG_TOTAL + $(count_lines "$2" 'warning:\|error:\|style:')))
 }
 DIAG_TOTAL=0
 
@@ -83,6 +88,19 @@ obs ""
 obs "total diagnostics across every tool: $DIAG_TOTAL"
 assert_eq "$DIAG_TOTAL" "0" "the baseline stays at zero"
 obs "regression rule: this number must not grow in any later change."
+
+# Prove that the counter really accumulates.  Two synthetic logs (two
+# diagnostics, then none) must leave it two higher than the real tools did;
+# with the old per-tool reset the second record() left it at zero and this
+# assertion could never detect a regression.
+DIAG_BEFORE=$DIAG_TOTAL
+printf '%s\n' 'selfcheck.c:1:1: warning: synthetic one' \
+	'selfcheck.c:2:1: warning: synthetic two' >"$CASE_DIR/selfcheck.log"
+: >"$CASE_DIR/selfcheck-empty.log"
+record "selfcheck (2 synthetic diagnostics)" "$CASE_DIR/selfcheck.log" 0
+record "selfcheck (clean)" "$CASE_DIR/selfcheck-empty.log" 0
+assert_eq "$DIAG_TOTAL" "$((DIAG_BEFORE + 2))" \
+	"the diagnostic counter accumulates instead of being reset"
 
 kill_stray
 [ "$ASSERT_FAIL" -eq 0 ] || exit 1
