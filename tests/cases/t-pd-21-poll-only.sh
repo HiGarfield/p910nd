@@ -57,6 +57,8 @@ assert_contains "$REPO_ROOT/p910nd.c" 'poll(pfd, 2, 1000)' \
 	"the unidirectional loop keeps its 1 s idle tick"
 assert_contains "$REPO_ROOT/p910nd.c" 'poll(&pfd, 1, 100)' \
 	"the flush retry keeps its 100 ms tick"
+assert_contains "$REPO_ROOT/p910nd.c" 'poll(listenpfd' \
+	"the accept loop waits on every listening address with poll"
 
 # Link-time evidence: the symbol table must import poll and nothing of the old
 # family.  static_checks.py reviews the same binary; recording it here keeps the

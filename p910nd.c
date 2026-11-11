@@ -168,6 +168,11 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr,
 
 #define BUFFER_SIZE 8192
 
+/* getaddrinfo(AI_PASSIVE, PF_UNSPEC) may return an IPv4 and an IPv6 wildcard
+ * address.  Every one that binds has to be listened on, so the accept loop
+ * needs a descriptor for each and a poll() set to wait on them. */
+#define MAX_LISTEN_FDS 8
+
 /* Idle timeout in seconds.  A job is abandoned when neither direction has
  * moved data for this long, so a client that connects and never sends
  * anything cannot wedge the single threaded daemon (B1) and a slow printer
@@ -2307,8 +2312,14 @@ static void server(int lpnumber) {
 	int rc;
 	int terminating = 0;
 	struct addrinfo hints, *res, *ressave;
+	const struct addrinfo *tmp;
 	char service[16]; /* D7: sizeof(BASEPORT+...) was sizeof(int)+1 */
 	const int bufsiz = 65536;
+	int listenfds[MAX_LISTEN_FDS];
+	struct pollfd listenpfd[MAX_LISTEN_FDS];
+	int nlisten = 0;
+	int i;
+	int have_ipv4 = 0;
 
 #ifndef TESTING
 	if (!log_to_stdout) {
@@ -2390,6 +2401,12 @@ static void server(int lpnumber) {
 		exit(1);
 	}
 	ressave = res;
+	/* When an IPv4 candidate exists, the IPv6 socket must be v6-only so the
+	 * two wildcard binds do not fight over the same IPv4 port.  With no
+	 * IPv4 candidate, keep the IPv6 socket dual stack to serve both. */
+	for (tmp = ressave; tmp != 0; tmp = tmp->ai_next)
+		if (tmp->ai_family == AF_INET)
+			have_ipv4 = 1;
 	while (res) {
 #ifdef USE_GETPROTOBYNAME
 		proto = getprotobyname("tcp6");
@@ -2408,16 +2425,16 @@ static void server(int lpnumber) {
 			/* D13: nothing to close, socket() failed and returned
 			 * -1. */
 			dolog(LOGOPTS, "socket: %s\n", strerror(errno));
-			netfd = -1; /* V-bind: keep "nothing is listening" true */
 			res = res->ai_next;
 			continue;
 		}
 #ifdef IPV6_V6ONLY
 		if (res->ai_family == AF_INET6) {
 			/* R12: with net.ipv6.bindv6only=1 an IPv6 wildcard
-			 * socket refuses IPv4 clients, so ask for dual stack
-			 * explicitly. */
-			int v6only = 0;
+			 * socket refuses IPv4 clients.  When a separate IPv4
+			 * listener exists, keep this one v6-only so both can
+			 * bind; otherwise let it serve both families. */
+			int v6only = have_ipv4 ? 1 : 0;
 			if (setsockopt(netfd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only,
 			               sizeof(v6only)) < 0)
 				dolog(LOG_DEBUG, "setsockopt: IPV6_V6ONLY: %s\n",
@@ -2438,32 +2455,38 @@ static void server(int lpnumber) {
 		    0) {
 			dolog(LOGOPTS, "setsocketopt: SO_REUSEADDR: %s\n", strerror(errno));
 			close(netfd);
-			netfd = -1; /* V-bind */
 			res = res->ai_next;
 			continue;
 		}
 		if (bind(netfd, res->ai_addr, res->ai_addrlen) < 0) {
 			dolog(LOGOPTS, "bind: %s\n", strerror(errno));
 			close(netfd);
-			netfd = -1; /* V-bind */
 			res = res->ai_next;
 			continue;
 		}
 		if (listen(netfd, 30) < 0) {
 			dolog(LOGOPTS, "listen: %s\n", strerror(errno));
 			close(netfd);
-			netfd = -1; /* V-bind */
 			res = res->ai_next;
 			continue;
 		}
-		break;
+		/* Keep every address that worked.  Stopping at the first one
+		 * silently refused all clients of the other family, because
+		 * getaddrinfo() commonly returns IPv4 before IPv6. */
+		if (nlisten < MAX_LISTEN_FDS) {
+			listenfds[nlisten++] = netfd;
+		} else {
+			dolog(LOGOPTS, "too many listen addresses, dropping one\n");
+			(void)close(netfd);
+		}
+		res = res->ai_next;
 	}
 	freeaddrinfo(ressave);
 	/* V-bind: every candidate address failed.  Say so and leave, instead of
-	 * entering the accept loop with a descriptor that was closed on the way
+	 * entering the accept loop with descriptors that were closed on the way
 	 * out and reporting the resulting EBADF as if accept() were at fault.
 	 */
-	if (netfd < 0) {
+	if (nlisten == 0) {
 		dolog(LOGOPTS, "cannot listen on %s port %s: no address worked\n",
 		      bindaddr ? bindaddr : "*", service);
 		exit(1);
@@ -2486,14 +2509,13 @@ static void server(int lpnumber) {
 		if (got_term) {
 			dolog(LOG_NOTICE, "terminating on signal\n");
 			terminating = 1;
-			/* V8: close the listening socket now so new connection
+			/* V8: close every listening socket now so new connection
 			 * attempts are refused immediately (ECONNREFUSED)
 			 * instead of queuing behind a daemon that has already
 			 * stopped serving. */
-			if (netfd >= 0) {
-				(void)close(netfd);
-				netfd = -1;
-			}
+			for (i = 0; i < nlisten; i++)
+				(void)close(listenfds[i]);
+			nlisten = 0;
 			break;
 		}
 
@@ -2510,6 +2532,37 @@ static void server(int lpnumber) {
 			dolog(LOG_DEBUG, "%d job(s) in flight, deferring accept\n",
 			      (int)inflight_children);
 			(void)sleep(1);
+			continue;
+		}
+
+		/* Wait on every listening address instead of blocking in
+		 * accept() on the first one: a connection can arrive on any
+		 * family.  A short timeout also lets got_term and the child cap
+		 * be checked when nothing is connecting. */
+		for (i = 0; i < nlisten; i++) {
+			listenpfd[i].fd = listenfds[i];
+			listenpfd[i].events = POLLIN;
+			listenpfd[i].revents = 0;
+		}
+		rc = poll(listenpfd, (nfds_t)nlisten, 200);
+		if (rc < 0) {
+			if (errno == EINTR) /* A3 */
+				continue;
+			dolog(LOGOPTS, "poll: %s\n", strerror(errno));
+			break;
+		}
+		if (rc == 0)
+			continue;
+		netfd = -1;
+		for (i = 0; i < nlisten; i++) {
+			if (listenpfd[i].revents & (POLLIN | POLLERR | POLLHUP)) {
+				netfd = listenfds[i];
+				break;
+			}
+		}
+		if (netfd < 0) {
+			/* Only POLLNVAL: do not spin on a dead descriptor. */
+			sleep_us(NO_PROGRESS_USLEEP);
 			continue;
 		}
 
@@ -2602,7 +2655,8 @@ static void server(int lpnumber) {
 			continue;
 		}
 		if (pid == 0) { /* child */
-			(void)close(netfd);
+			for (i = 0; i < nlisten; i++)
+				(void)close(listenfds[i]);
 			/* U7: SIGCHLD was blocked above only to protect
 			 * record_child() in the parent.  The job child has to
 			 * run with the mask it was started with, otherwise it
@@ -2628,8 +2682,8 @@ static void server(int lpnumber) {
 		(void)record_child(pid);
 		sigprocmask(SIG_SETMASK, &chld_omask, NULL);
 	}
-	if (netfd >= 0)
-		(void)close(netfd);
+	for (i = 0; i < nlisten; i++)
+		(void)close(listenfds[i]);
 	reap_children_and_exit(terminating ? 0 : 1);
 }
 
