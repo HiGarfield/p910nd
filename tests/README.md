@@ -67,6 +67,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-30-retry-throttle.sh` | 节流日志文本 | 确定性时钟数出 1 条正式告警与 27 条被节流的调试行 |
 | `t-pd-31-ci-deps.sh` | CI 依赖缺失 | CI 必须声明 libwrap0-dev，且 USE_LIBWRAP 变体能编译 |
 | `t-pd-32-readme-index.sh` | 文档索引漂移 | 每个 case 文件都必须出现在本索引中，且索引行数相等 |
+| `t-pd-33-ignore-build-artifacts.sh` | 构建产物未忽略 | 独立检出里 `make` 之后 `git status` 必须干净 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 
