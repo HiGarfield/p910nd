@@ -99,13 +99,20 @@ ensure_shared_variants() {
 case_init() {
 	CASE_ID="$1"
 	CASE_NAME="$2"
-	ensure_shared_variants || obs "WARN: could not refresh the shared variants"
+	_variants_ok=1
+	ensure_shared_variants || _variants_ok=0
 	CASE_DIR="$BUILD_DIR/cases/$CASE_ID"
 	CASE_OBS="$OBS_DIR/$CASE_ID.txt"
 	rm -rf "$CASE_DIR"
 	mkdir -p "$CASE_DIR" "$OBS_DIR"
 	: >"$CASE_OBS"
 	obs_begin
+	# A broken source copy must fail the case, not silently reuse the last
+	# binary: that is how a mutation which no longer compiles can pass.
+	if [ "$_variants_ok" -eq 0 ]; then
+		obs "FATAL: could not refresh the shared variants"
+		assert_true 1 "the shared variants could be refreshed"
+	fi
 	say "--- $CASE_ID ($CASE_NAME)"
 }
 
