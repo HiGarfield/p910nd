@@ -1193,14 +1193,15 @@ static ssize_t readBuffer(Buffer_t *b) {
 			if (e == EINTR || e == EAGAIN || e == EWOULDBLOCK)
 				result = 0;
 			else if (e == ECONNRESET || e == ENOTCONN) {
-				/* U5: the peer forcibly closed (RST) or
-				 * vanished.  This is end-of-stream, not data
-				 * corruption, so mark EOF instead of READ_ERR -
-				 * otherwise a fully printed job would wrongly
-				 * be reported "Job incomplete" just because the
-				 * client hung up. */
-				if (b->detectEof)
-					b->eof_read = 1;
+				/* U5/PD-25: the peer forcibly closed (RST)
+				 * or vanished.  This is end-of-stream, not
+				 * data corruption, so mark EOF instead of
+				 * READ_ERR on BOTH directions: a fully
+				 * printed job must not become "Job
+				 * incomplete" because the client hung up,
+				 * and the printer->network direction must
+				 * stop polling a dead descriptor. */
+				b->eof_read = 1;
 				result = 0;
 			} else {
 				dolog(LOGOPTS, "read: %s\n",
