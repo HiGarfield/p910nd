@@ -2789,7 +2789,8 @@ static void reap_children_and_exit(int status) {
 
 static int is_standalone(void) {
 	struct sockaddr_storage bind_addr;
-	socklen_t ba_len;
+	struct stat st;
+	socklen_t ba_len = sizeof(bind_addr);
 
 	/*
 	 * Check to see if a socket was passed to us from (x)inetd.
@@ -2798,11 +2799,16 @@ static int is_standalone(void) {
 	 * (and thus we are probably a child of (x)inetd) or if it is instead
 	 * something else and we are running standalone.
 	 */
-	ba_len = sizeof(bind_addr);
 	if (getsockname(0, (struct sockaddr *)&bind_addr, &ba_len) == 0)
 		return (0);        /* under (x)inetd */
 	if (errno != ENOTSOCK) /* strange... */
 		dolog(LOGOPTS, "getsockname: %s\n", strerror(errno));
+	/* PD-37: getsockname() can fail with EINVAL/EBADF/ENOTCONN even when
+	 * fd 0 really is the socket (x)inetd handed over.  Trust the
+	 * descriptor type instead of the errno: starting a listener there
+	 * leaves the delivered connection unread and drops the job. */
+	if (fstat(0, &st) == 0 && S_ISSOCK(st.st_mode))
+		return (0);
 	return (1);
 }
 

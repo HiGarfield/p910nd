@@ -71,6 +71,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-34-argument-check.sh` | 参数校验不完整 | 非数字、多位、多余参数都必须打印 Usage；`0` 仍能启动 |
 | `t-pd-35-multi-address.sh` | 只监听首个地址 | 通配监听下 IPv4 与 IPv6 客户端都必须完成作业 |
 | `t-pd-36-flush-result.sh` | flush 结果被丢弃 | 探针断言 sink 丢弃字节被上报，三处调用都消费返回值 |
+| `t-pd-37-standalone-detect.sh` | inetd 误判 | `getsockname(0)` 失败时仍须服务 fd 0 上已交付的连接 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 
