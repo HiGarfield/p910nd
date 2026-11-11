@@ -655,7 +655,7 @@ static int open_printer_retry(int lpnumber, const struct timeval *connected_at,
 		struct timeval now;
 		long waited_total;
 		int e = 0;
-		const char *what = "(unknown)";
+		const char *what;
 
 		if (got_term) /* U6: stop promptly on shutdown */
 			return -1;

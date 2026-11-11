@@ -8,7 +8,9 @@
 # can prove it introduced no new diagnostics.
 #
 # The case passes as long as every tool ran *and* still reports nothing: the
-# point of the baseline is that the number must stay at zero.
+# point of the baseline is that the number must stay at zero.  Every tool is
+# also asserted on its own, so one clean run cannot hide another tool's
+# diagnostics behind the aggregate count.
 
 set -u
 REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -68,6 +70,14 @@ assert_eq "$(count_lines "$CASE_DIR/noclock.log" 'warning:\|error:')" "0" \
 record "gcc (monotonic)" "$CASE_DIR/clock.log" "$?"
 assert_eq "$(count_lines "$CASE_DIR/clock.log" 'warning:\|error:')" "0" \
 	"the default monotonic build builds warning free"
+
+# A dead store in the shipping source is a diagnostic even when the last tool
+# happens to be clean.  cppcheck reports its style findings with "style:", so
+# include that level in the per-tool count.
+for _tool in gcc analyzer cppcheck clangtidy noclock clock; do
+	assert_eq "$(count_lines "$CASE_DIR/$_tool.log" 'warning:\|error:\|style:')" \
+		"0" "$_tool reports no diagnostics on its own"
+done
 
 obs ""
 obs "total diagnostics across every tool: $DIAG_TOTAL"
