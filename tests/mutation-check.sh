@@ -16,6 +16,11 @@ REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 WORK="$BUILD_DIR/mutation"
 mkdir -p "$WORK"
 
+# Sticky failure flag: each mutation may report a missed detection, and a
+# later, successful mutation must not erase it.  RESULT used to be assigned in
+# both branches, so the last mutation decided the whole run.
+RESULT=0
+
 # revert <name> <sed-program> -- write a mutated copy and echo its path
 revert() {
 	_name=$1
@@ -42,7 +47,6 @@ if P910ND_SRC="$m" sh "$CASES_DIR/t-pd-05-bidir-read-error.sh" >"$WORK/pd05.log"
 	RESULT=1
 else
 	say "ok: the case fails without the fix"
-	RESULT=0
 fi
 
 say "2/3  PD-09: ask for the world writable lock file again"
@@ -52,7 +56,6 @@ if P910ND_SRC="$m" sh "$CASES_DIR/t-pd-09-lockfile-mode.sh" >"$WORK/pd09.log" 2>
 	RESULT=1
 else
 	say "ok: the case fails without the fix"
-	RESULT=0
 fi
 
 say "3/3  PD-07: force the wall clock in the default build"
@@ -62,7 +65,6 @@ if P910ND_SRC="$m" sh "$CASES_DIR/t-pd-07-wallclock-timeout.sh" >"$WORK/pd07.log
 	RESULT=1
 else
 	say "ok: the case fails without the fix"
-	RESULT=0
 fi
 
 kill_stray
