@@ -63,6 +63,30 @@ assert_str_contains "$stop_branch" '/proc/$p910nd_p/cmdline' \
 assert_str_contains "$stop_branch" 'case "$p910nd_p" in' \
 	"and the file content must be a number at all"
 
+# A pid can be recycled while "stop" waits out the shutdown grace period.
+# The TERM path revalidates /proc/PID/cmdline, but the KILL path used to
+# signal every collected number unconditionally, so an unrelated process
+# that reused a dead daemon's pid was killed.  Require a cmdline check
+# between the TERM and the KILL in the stop branch.
+"$PYTHON" - "$INIT" >"$CASE_DIR/kill-scan.out" 2>&1 <<'EOF'
+import re, sys
+s = open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r"^    stop\)\n(.*?)^[ \t]*;;", s, re.S | re.M)
+body = m.group(1) if m else ""
+terms = [x.start() for x in re.finditer(r"kill -TERM", body)]
+kills = [x.start() for x in re.finditer(r"kill -KILL", body)]
+checks = [x.start() for x in re.finditer(r"/proc/\$p910nd_p/cmdline", body)]
+guarded = bool(terms and kills and
+               any(terms[-1] < c < kills[0] for c in checks))
+print("terms=%d kills=%d cmdline_checks=%d guarded=%s" %
+      (len(terms), len(kills), len(checks), guarded))
+sys.exit(0 if guarded else 1)
+EOF
+assert_eq "$?" "0" \
+	"SIGKILL is preceded by a fresh check that the pid is still ours"
+assert_contains "$CASE_DIR/kill-scan.out" "guarded=True" \
+	"the revalidation really sits between TERM and KILL"
+
 say "the script is syntactically valid"
 # bash, not sh: the script uses array syntax that dash rejects, which predates
 # this fix and is not something to change here.

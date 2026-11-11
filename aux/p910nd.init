@@ -331,7 +331,16 @@ case "$1" in
 			p910nd_n=$((p910nd_n + 1))
 		done
 		for p910nd_p in $P910ND_PIDS; do
-			kill -KILL "$p910nd_p" 2>/dev/null
+			## A pid can be recycled during the grace wait.  Re-check
+			## the command line before SIGKILL: without this, an
+			## unrelated process that inherited the number would be
+			## killed (the TERM path already does this check).
+			test -d "/proc/$p910nd_p" || continue
+			p910nd_argv0=$(tr '\0' '\n' <"/proc/$p910nd_p/cmdline" 2>/dev/null | sed -n 1p)
+			case "${p910nd_argv0##*/}" in
+			p910[0-9]d)	kill -KILL "$p910nd_p" 2>/dev/null ;;
+			*)		continue ;;
+			esac
 		done
 		# shellcheck disable=SC2034
 		P910ND_OPTS="$P910ND_OPTS"
