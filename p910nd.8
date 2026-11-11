@@ -20,7 +20,9 @@ The \fB-f\fR option can be used to specify a different printer device,
 e.g. /dev/usblp0.
 .LP
 The \fB-i\fR option can be used to specify binding to one address instead
-of all interfaces which is the default.
+of all interfaces which is the default.  With no \fB-i\fR, every address
+returned by getaddrinfo(3) is listened on, so both IPv4 and IPv6 clients
+are served.
 .LP
 The \fB-b\fR option turns on bidirectional copying.  After the client half-closes,
 the connection is held only long enough for the printer's reply (status query
@@ -314,8 +316,11 @@ CLOCK_MONOTONIC.
 .B PRINTERFILE
 (\"/dev/lp%c\") the device template the printer number is substituted into.
 Set it to point somewhere else when there is no lp device, e.g.
-\fB-DPRINTERFILE='\"/dev/usblp%c\"'\fR.  The \fB-f\fR option overrides it at
-run time.
+\fB-DPRINTERFILE='\"/dev/usblp%c\"'\fR.  The template must contain exactly one
+\fB%c\fR conversion for the printer number: other conversions or extra
+placeholders are rejected at startup, and the expanded path must fit in 256
+bytes.  The \fB-f\fR option overrides the template at run time, so an unusual
+device path can always be given there instead.
 .SH COPYRIGHT
 .I p910nd
 is under the GNU Public License Version 2

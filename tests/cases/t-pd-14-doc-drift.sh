@@ -55,6 +55,11 @@ grep -n 'checkproc()' "$REPO_ROOT/aux/p910nd.init" | sed 's/^/    /' |
 assert_not_contains "$REPO_ROOT/aux/p910nd.init" "return status " \
 	"no branch calls a bare 'status'"
 
+# The daemon listens on every resolved address (PD-35); the -i description
+# used to promise only "all interfaces" without mentioning the families.
+assert_contains "$REPO_ROOT/p910nd.8" "both IPv4 and IPv6 clients" \
+	"the man page describes the multi-address listening behaviour"
+
 kill_stray
 [ "$ASSERT_FAIL" -eq 0 ] || exit 1
 exit 0

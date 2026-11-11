@@ -42,6 +42,12 @@ assert_contains "$REPO_ROOT/p910nd.c" 'static char lpname\[256\]' \
 	"the device path buffer no longer depends on the template length"
 assert_contains "$REPO_ROOT/p910nd.c" "(size_t)n >= sizeof(lpname)" \
 	"a truncated path is detected instead of being used"
+# The startup rejection is a build-time contract, so the man page must say
+# which templates are legal; otherwise an operator cannot explain the exit.
+assert_contains "$REPO_ROOT/p910nd.8" "exactly one" \
+	"the man page documents the single-conversion requirement"
+assert_contains "$REPO_ROOT/p910nd.8" "256" \
+	"and the expanded path length limit"
 
 # ---------------------------------------------------------------- part B ----
 say "B: a binary built with an invalid template refuses to start"
