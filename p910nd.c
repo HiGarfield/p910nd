@@ -1297,15 +1297,20 @@ static ssize_t writeBuffer(Buffer_t *b) {
  * error never discards data that was already received (C2/C5).
  * R1: bounded in time and safe on a non-blocking device - the old loop spun
  * on a blocking write() and hung the daemon forever.
- * Returns the number of bytes that could NOT be delivered (0 if all flushed).
+ * Returns the number of bytes that could NOT be delivered (0 if all flushed),
+ * including bytes consumed by a sink (outfd < 0) after the client vanished.
  * V6: on timeout the undelivered bytes are reported at LOG_ERR as discarded and
  * unrecoverable - they are never silently dropped without a trace. */
 static int flush_buffer(Buffer_t *b, int timeout_secs) {
 	struct timeval start;
 	struct timeval now;
+	int discarded = 0;
 
 	mono_now(&start);
 	while (b->bytes > 0 && !(b->err & WRITE_ERR)) {
+		/* A sink empties the ring without delivering anything. */
+		if (b->outfd < 0)
+			discarded += b->bytes;
 		if (writeBuffer(b) > 0) {
 			mono_now(&start); /* progress: keep going */
 			continue;
@@ -1346,7 +1351,8 @@ static int flush_buffer(Buffer_t *b, int timeout_secs) {
 			break;
 		}
 	}
-	return b->bytes; /* V6: undelivered byte count for the caller */
+	/* V6: undelivered plus discarded bytes, for the caller to report. */
+	return b->bytes + discarded;
 }
 
 /* R5/U8a: the 0.97 change log says the device stream may only be closed when
@@ -1514,6 +1520,8 @@ static int copy_stream(int fd, int lp) {
 		struct pollfd pfd[2];
 		long w; /* U4: reply window, set once it is needed */
 		unsigned long undelivered = 0;
+		int undelivered_print = 0;
+		int undelivered_reply = 0;
 		int print_ok = 0;
 		initBuffer(&printerToNetworkBuffer, lp, fd, printer_is_regular(lp));
 		mono_now(&last_activity);
@@ -1911,9 +1919,17 @@ static int copy_stream(int fd, int lp) {
 				sleep_us(NO_PROGRESS_USLEEP);
 		}
 		/* C5: deliver what was already received before giving up. */
-		flush_buffer(&networkToPrinterBuffer, PRINTER_FLUSH_TIMEOUT);
-		/* R4: and deliver the printer's answer as well */
-		flush_buffer(&printerToNetworkBuffer, PRINTER_FLUSH_TIMEOUT);
+		undelivered_print =
+		    flush_buffer(&networkToPrinterBuffer, PRINTER_FLUSH_TIMEOUT);
+		/* R4: and deliver the printer's answer as well.  V6: a reply
+		 * lost to a vanished client must be reported, not hidden. */
+		undelivered_reply =
+		    flush_buffer(&printerToNetworkBuffer, PRINTER_FLUSH_TIMEOUT);
+		if (undelivered_reply > 0)
+			dolog(LOG_NOTICE,
+			      "reply: %d bytes not delivered to the client, "
+			      "discarded\n",
+			      undelivered_reply);
 		/* U5/C6: a job succeeds iff the print direction delivered every
 		 * byte. A client that disconnected (EPIPE/ECONNRESET) only
 		 * affects the printer->network reply, which is discarded - it
@@ -1927,8 +1943,8 @@ static int copy_stream(int fd, int lp) {
 		 * is exact whether or not a wrap happened. */
 		undelivered =
 		    networkToPrinterBuffer.totalin - networkToPrinterBuffer.totalout;
-		print_ok =
-		    (undelivered == 0) && !(networkToPrinterBuffer.err & WRITE_ERR);
+		print_ok = (undelivered == 0) && (undelivered_print == 0) &&
+		           !(networkToPrinterBuffer.err & WRITE_ERR);
 		if (!print_ok) {
 			dolog(LOG_ERR,
 			      "Job incomplete: %lu/%lu bytes sent to printer, "
@@ -1957,6 +1973,7 @@ static int copy_stream(int fd, int lp) {
 		struct timeval job_start; /* V-jobmax: absolute ceiling on the job */
 		struct pollfd pfd[2];
 		unsigned long undelivered = 0;
+		int undelivered_print = 0;
 		int print_ok = 0;
 		int stall_extended =
 		    0; /* V4: give a slow-but-alive printer a 2nd window */
@@ -2160,7 +2177,8 @@ static int copy_stream(int fd, int lp) {
 		 * moment before the last bytes could be written must not be
 		 * reported as a permanent failure if the flush actually
 		 * delivered them. */
-		flush_buffer(&networkToPrinterBuffer, PRINTER_FLUSH_TIMEOUT);
+		undelivered_print =
+		    flush_buffer(&networkToPrinterBuffer, PRINTER_FLUSH_TIMEOUT);
 		/* U5/C6: success iff every byte reached the printer.  A stalled
 		 * or timed-out client that left data undelivered is reported as
 		 * a failure, never as a misleading "Finished job". */
@@ -2168,8 +2186,8 @@ static int copy_stream(int fd, int lp) {
 		 * count, not "totalout >= totalin". */
 		undelivered =
 		    networkToPrinterBuffer.totalin - networkToPrinterBuffer.totalout;
-		print_ok =
-		    (undelivered == 0) && !(networkToPrinterBuffer.err & WRITE_ERR);
+		print_ok = (undelivered == 0) && (undelivered_print == 0) &&
+		           !(networkToPrinterBuffer.err & WRITE_ERR);
 		if (!print_ok) {
 			dolog(LOG_ERR, "Job incomplete: %lu/%lu bytes sent to printer\n",
 			      networkToPrinterBuffer.totalout,
