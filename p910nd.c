@@ -1466,6 +1466,16 @@ static int printer_is_regular(int lp) {
 	return (fstat(lp, &st) == 0 && S_ISREG(st.st_mode));
 }
 
+/* C3: a client that vanished must not stop the print direction, so a failed
+ * write of the printer's reply only switches that direction to discard mode.
+ * PD-26: clear WRITE_ERR alone.  Clearing the whole err word also erased a
+ * READ_ERR raised on the same round, which disabled the read-error exit and
+ * left the job polling a dead printer until the reply window expired. */
+static void discard_printer_reply(Buffer_t *b) {
+	b->outfd = -1;
+	b->err &= ~WRITE_ERR;
+}
+
 /* Copy network data from file descriptor fd (network) to lp (printer) until EOS
  */
 /* If bidir, also copy data from printer (lp) to network (fd). */
@@ -1669,8 +1679,7 @@ static int copy_stream(int fd, int lp) {
 					/* C3: only the printer to network
 					 * direction stops, the job keeps going
 					 * to the printer. */
-					printerToNetworkBuffer.outfd = -1;
-					printerToNetworkBuffer.err = 0;
+					discard_printer_reply(&printerToNetworkBuffer);
 					dolog(LOG_INFO, "network write error, discarding "
 					                "further printer data\n"); /* D10
 					                                            */
