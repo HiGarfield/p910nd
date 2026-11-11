@@ -2776,12 +2776,19 @@ int main(int argc, char *argv[]) {
 	}
 	argc -= optind;
 	argv += optind;
+	/* The synopsis allows at most one printer number, 0, 1 or 2.  A
+	 * non-digit token, a multi-digit token or an extra argument used to
+	 * be silently ignored, so a typo started lp0 instead of telling the
+	 * operator what went wrong. */
+	if (argc > 1)
+		usage();
 	if (argc > 0) {
 		/* D14: isdigit() is only defined for EOF or an unsigned char
 		 * value, passing a plain (possibly negative) char is undefined.
 		 */
-		if (isdigit((unsigned char)argv[0][0]))
-			lpnumber = (int)(unsigned char)argv[0][0];
+		if (!isdigit((unsigned char)argv[0][0]) || argv[0][1] != '\0')
+			usage();
+		lpnumber = (int)(unsigned char)argv[0][0];
 		/* The usage line, the device template, the lock/pid file names
 		 * and BASEPORT+n all assume n is 0, 1 or 2.  Accepting 3..9
 		 * started a daemon for a printer that cannot exist and left the
