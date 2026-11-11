@@ -2411,6 +2411,7 @@ static void server(int lpnumber) {
 	int nlisten = 0;
 	int i;
 	int have_ipv4 = 0;
+	int invalid_rounds = 0; /* PD-41: consecutive POLLNVAL-only rounds */
 
 #ifndef TESTING
 	if (!log_to_stdout) {
@@ -2642,8 +2643,10 @@ static void server(int lpnumber) {
 			dolog(LOGOPTS, "poll: %s\n", strerror(errno));
 			break;
 		}
-		if (rc == 0)
+		if (rc == 0) {
+			invalid_rounds = 0;
 			continue;
+		}
 		netfd = -1;
 		for (i = 0; i < nlisten; i++) {
 			if (listenpfd[i].revents & (POLLIN | POLLERR | POLLHUP)) {
@@ -2652,10 +2655,19 @@ static void server(int lpnumber) {
 			}
 		}
 		if (netfd < 0) {
-			/* Only POLLNVAL: do not spin on a dead descriptor. */
+			/* Only POLLNVAL: every listening descriptor is gone.
+			 * Retry briefly, then stop serving instead of spinning
+			 * forever with no socket that could ever accept a
+			 * client.  A transient descriptor churn resets the
+			 * counter as soon as any listener becomes usable. */
+			if (++invalid_rounds >= 25) {
+				dolog(LOGOPTS, "poll: all listening sockets are invalid\n");
+				break;
+			}
 			sleep_us(NO_PROGRESS_USLEEP);
 			continue;
 		}
+		invalid_rounds = 0;
 
 		/* D4: accept() truncates clientlen, it has to be reset every
 		 * time, otherwise a shorter address (IPv4 after IPv6) is cut
