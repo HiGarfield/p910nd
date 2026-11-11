@@ -28,6 +28,10 @@ assert_contains "$CI" "strace" "CI still installs strace"
 assert_contains "$CI" "python3" "CI still installs python3"
 assert_contains "$CI" "cppcheck" "CI still installs cppcheck"
 assert_contains "$CI" "clang-tidy" "CI still installs clang-tidy"
+# The regression rule in DEFECT_REPORT.md includes the sensitivity check;
+# running only make test lets a case that can no longer fail pass CI.
+assert_contains "$CI" "tests/mutation-check.sh" \
+	"CI runs the mutation sensitivity check as part of the regression rule"
 
 # Integration half: the USE_LIBWRAP build PD-28 relies on must succeed.
 LOCKDIR="$CASE_DIR/lock"

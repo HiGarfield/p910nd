@@ -38,6 +38,7 @@ jobs:
         run: |
           set -euo pipefail
           make test
+          sh tests/mutation-check.sh
 
       - name: Require a warning free strict C89 build
         run: |
