@@ -81,7 +81,11 @@ for id in $CASE_LIST; do
 	lid=${lid#t-}
 	case_file=$(ls "$CASES_DIR/t-$lid"-*.sh 2>/dev/null | head -1)
 	if [ -z "$case_file" ]; then
-		SKIPPED="$SKIPPED $lid(no-case-file)"
+		# A requested case that does not exist is a broken suite, not a
+		# skip: counting it as skipped used to let `run-all.sh PD-99`
+		# (and a renamed or lost case file) exit 0 without running a
+		# single assertion.
+		FAILED="$FAILED $lid(no-case-file)"
 		say "?? $lid: no case file"
 		continue
 	fi
