@@ -2778,6 +2778,12 @@ int main(int argc, char *argv[]) {
 		 */
 		if (isdigit((unsigned char)argv[0][0]))
 			lpnumber = (int)(unsigned char)argv[0][0];
+		/* The usage line, the device template, the lock/pid file names
+		 * and BASEPORT+n all assume n is 0, 1 or 2.  Accepting 3..9
+		 * started a daemon for a printer that cannot exist and left the
+		 * operator with a silent, unusable service. */
+		if (lpnumber < '0' || lpnumber > '2')
+			usage();
 	}
 	/* change the n in argv[0] to match the port so ps will show that */
 	p = strstr(progname, "p910n");
