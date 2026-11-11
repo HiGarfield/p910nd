@@ -50,7 +50,10 @@ stop_branch=$(sed -n '/^    stop)/,/^    ;;/p' "$INIT")
 obs "stop branch:"
 printf '%s\n' "$stop_branch" | sed 's/^/    /' | while read -r l; do obs "$l"; done
 
-assert_contains "$INIT" "P910ND_PIDFILE" "the stop branch looks at a pid file"
+assert_eq "$(count_lines "$INIT" 'P910ND_PIDFILE')" "0" \
+	"the stop branch keeps no pid-file variable it never reads"
+assert_eq "$(count_lines "$INIT" 'P910ND_PID=')" "2" \
+	"the pid is declared once and assigned only where it is signalled"
 assert_str_contains "$stop_branch" "/var/run/p910[0-9]d.pid" "namely the one the daemon writes"
 assert_str_contains "$stop_branch" 'kill -TERM "$P910ND_PID"' "and signals that pid"
 assert_str_contains "$stop_branch" 'killproc -TERM $P910ND_BIN' \
