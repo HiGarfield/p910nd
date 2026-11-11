@@ -38,6 +38,25 @@ assert_not_contains "$README" "全部 21 个用例" \
 assert_contains "$README" "libwrap0-dev" \
 	"the environment section names the libwrap development package"
 
+# The defect report's live regression rule had the same problem: it still
+# demanded "17/17 in about 187 seconds" after the suite reached 36 cases.
+# Only the rule block is checked; the historical observations above it keep
+# their original numbers on purpose.
+REPORT="$REPO_ROOT/tests/DEFECT_REPORT.md"
+sed -n '/^## 回归规则/,/^静态分析基线/p' "$REPORT" >"$CASE_DIR/rules.txt"
+obs "regression rule:"
+sed 's/^/    /' "$CASE_DIR/rules.txt" | while read -r l; do obs "$l"; done
+assert_not_contains "$CASE_DIR/rules.txt" "17/17" \
+	"the live rule no longer hard-codes the old case count"
+assert_not_contains "$CASE_DIR/rules.txt" "约 187 秒" \
+	"the live rule no longer hard-codes the old runtime"
+assert_contains "$CASE_DIR/rules.txt" "make test" \
+	"the rule still requires the full suite"
+assert_contains "$CASE_DIR/rules.txt" "sh tests/mutation-check.sh" \
+	"and the sensitivity check"
+assert_contains "$CASE_DIR/rules.txt" "make && make CC=clang" \
+	"and the warning-free dual build"
+
 kill_stray
 [ "$ASSERT_FAIL" -eq 0 ] || exit 1
 exit 0

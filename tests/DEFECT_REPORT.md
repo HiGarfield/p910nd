@@ -617,7 +617,7 @@ PD-20  A the whole job reaches the printer (actual=4096 expected=8192)
 任何后续改动都必须满足：
 
 ```sh
-make test                     # 17/17 通过，且约 187 秒内完成
+make test                     # 全部用例通过（用例索引见 tests/README.md）
 sh tests/mutation-check.sh    # 三个变异必须全部被捕获
 make && make CC=clang          # 两者 0 警告
 ```
