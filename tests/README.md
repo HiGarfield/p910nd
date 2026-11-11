@@ -73,6 +73,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-36-flush-result.sh` | flush 结果被丢弃 | 探针断言 sink 丢弃字节被上报，三处调用都消费返回值 |
 | `t-pd-37-standalone-detect.sh` | inetd 误判 | `getsockname(0)` 失败时仍须服务 fd 0 上已交付的连接 |
 | `t-pd-38-child-cap-oom.sh` | OOM 子进程漏计 | OOM 时子进程仍计入 `inflight_children`，回收时无条件递减 |
+| `t-pd-39-printer-template.sh` | 设备模板未校验 | 非单个 `%c` 的模板启动时拒绝；路径缓冲固定并检查截断 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 

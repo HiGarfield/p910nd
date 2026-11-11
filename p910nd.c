@@ -591,18 +591,49 @@ static void sleep_us(long usec) {
 		;
 }
 
+/* PRINTERFILE is a build-time template and open_printer() passes a single
+ * int (the printer number) to snprintf().  Any conversion other than one
+ * %c would make snprintf() read that int as a pointer or as a missing
+ * argument, which is undefined behaviour.  Reject such templates up front.
+ */
+static int printer_template_ok(const char *tmpl) {
+	int conversions = 0;
+	const char *p;
+
+	for (p = tmpl; *p != '\0'; p++) {
+		if (*p != '%')
+			continue;
+		if (p[1] == '%') { /* a literal percent sign */
+			p++;
+			continue;
+		}
+		if (p[1] != 'c')
+			return (0);
+		conversions++;
+		p++;
+	}
+	return (conversions == 1);
+}
+
 static int open_printer(int lpnumber) {
 	int lp;
+	int n;
 	/* C7: static storage, the global device used to point into this frame.
-	 */
-	static char lpname[sizeof(PRINTERFILE)];
+	 * A fixed buffer is independent of the template's literal length, so
+	 * a long custom PRINTERFILE cannot be truncated into a wrong path. */
+	static char lpname[256];
 
 #ifdef TESTING
 	(void)lpnumber; /* the test build always uses /dev/tty */
-	(void)snprintf(lpname, sizeof(lpname), "/dev/tty");
+	n = snprintf(lpname, sizeof(lpname), "/dev/tty");
 #else
-	(void)snprintf(lpname, sizeof(lpname), PRINTERFILE, lpnumber);
+	n = snprintf(lpname, sizeof(lpname), PRINTERFILE, lpnumber);
 #endif
+	if (n < 0 || (size_t)n >= sizeof(lpname)) {
+		dolog(LOGOPTS, "printer device path is too long\n");
+		errno = ENAMETOOLONG;
+		return (-1);
+	}
 	if (device == 0)
 		device = lpname;
 	/* R1: never open the device blocking.  A blocking write() to a printer
@@ -2896,6 +2927,15 @@ int main(int argc, char *argv[]) {
 	 * configuration where the log is the only place the operator can look.
 	 */
 	openlog(p != NULL ? p : progname, LOG_PID, LOG_LPR);
+#ifndef TESTING
+	/* PD-39: a malformed PRINTERFILE would make snprintf() pass the
+	 * printer number to the wrong conversion.  Refuse to start unless -f
+	 * overrides the template entirely. */
+	if (device == 0 && !printer_template_ok(PRINTERFILE)) {
+		dolog(LOGOPTS, "PRINTERFILE must contain exactly one %%c\n");
+		exit(1);
+	}
+#endif
 	(void)atexit(cleanup_and_exit); /* D9: remove the pid file on any exit */
 
 	/* V-logfd: -d only decides *where the log goes*, never whether this
