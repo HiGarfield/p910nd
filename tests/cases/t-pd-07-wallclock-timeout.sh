@@ -136,7 +136,17 @@ assert_contains "$REPO_ROOT/p910nd.c" "P910ND_HAVE_MONOTONIC" "C the conditional
 assert_contains "$REPO_ROOT/p910nd.c" "NO_CLOCK_GETTIME" "C and can be forced off"
 assert_contains "$REPO_ROOT/p910nd.c" "clock_gettime(CLOCK_MONOTONIC, &ts)" "C the monotonic clock is used"
 assert_contains "$REPO_ROOT/p910nd.c" "(void)gettimeofday(tv, 0);" "C with a gettimeofday fallback"
-n_direct=$(count_lines "$REPO_ROOT/p910nd.c" 'gettimeofday(&')
+# mono_now() itself may consult gettimeofday() for its fallback and for the
+# wall-minus-monotonic offset; what matters is that no *deadline* outside that
+# function reads the wall clock directly.
+n_direct=$("$PYTHON" - "$REPO_ROOT/p910nd.c" <<'EOF'
+import re, sys
+s = open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r"static int mono_now\(.*?\n\}", s, re.S)
+outside = s[:m.start()] + s[m.end():] if m else s
+print(len(re.findall(r"gettimeofday\(&", outside)))
+EOF
+)
 obs_kv "C direct gettimeofday(&...) call sites outside mono_now" "$n_direct"
 assert_eq "$n_direct" "0" "C every deadline goes through mono_now()"
 assert_eq "$(count_lines "$REPO_ROOT/p910nd.c" 'time(0)')" "0" \

@@ -74,6 +74,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-37-standalone-detect.sh` | inetd 误判 | `getsockname(0)` 失败时仍须服务 fd 0 上已交付的连接 |
 | `t-pd-38-child-cap-oom.sh` | OOM 子进程漏计 | OOM 时子进程仍计入 `inflight_children`，回收时无条件递减 |
 | `t-pd-39-printer-template.sh` | 设备模板未校验 | 非单个 `%c` 的模板启动时拒绝；路径缓冲固定并检查截断 |
+| `t-pd-40-clock-base.sh` | 时钟基准混用 | 单调钟临时失败后三帧采样必须保持同一基准并继续推进 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 

@@ -565,15 +565,52 @@ static void dolog(int level, const char *msg, ...) {
 #endif
 
 /* The one place the program reads the clock.  Returns non-zero when the
- * monotonic clock is in use.  Never fails: a failing clock_gettime() falls
- * back to gettimeofday() just like a platform without it. */
+ * monotonic time base is in use.
+ *
+ * PD-40: the clock source is latched on the first call.  A transient
+ * clock_gettime() failure must not silently switch to gettimeofday(): the
+ * former counts seconds since boot, the latter seconds since the epoch, so
+ * every "now - start" difference would jump by decades and fire (or
+ * suppress) every deadline at once.  When that happens we keep the
+ * monotonic base by subtracting the wall-minus-monotonic offset captured
+ * at the first successful call. */
 static int mono_now(struct timeval *tv) {
 #ifdef P910ND_HAVE_MONOTONIC
 	struct timespec ts;
+	static int use_monotonic = -1; /* -1 undecided, 1 monotonic, 0 wall */
+	static long wall_offset = 0;   /* wall seconds minus monotonic seconds */
+	static int offset_known = 0;
+	static struct timeval last;
+	int ok = (clock_gettime(CLOCK_MONOTONIC, &ts) == 0);
 
-	if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
+	if (use_monotonic < 0)
+		use_monotonic = ok;
+	if (use_monotonic == 1 && ok) {
 		tv->tv_sec = ts.tv_sec;
 		tv->tv_usec = (suseconds_t)(ts.tv_nsec / 1000L);
+		if (!offset_known) {
+			struct timeval wall;
+
+			if (gettimeofday(&wall, 0) == 0) {
+				wall_offset = (long)(wall.tv_sec - ts.tv_sec);
+				offset_known = 1;
+			}
+		}
+		last = *tv;
+		return (1);
+	}
+	if (use_monotonic == 1 && offset_known) {
+		struct timeval wall;
+
+		if (gettimeofday(&wall, 0) == 0) {
+			tv->tv_sec = wall.tv_sec - wall_offset;
+			tv->tv_usec = wall.tv_usec;
+			last = *tv;
+			return (1);
+		}
+	}
+	if (use_monotonic == 1) {
+		*tv = last; /* both clocks failed: never invent a jump */
 		return (1);
 	}
 #endif
