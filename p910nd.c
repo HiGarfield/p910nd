@@ -2517,10 +2517,19 @@ static void server(int lpnumber) {
 				(void)sleep(1); /* brief backoff instead of a spin */
 				continue;
 			}
-			/* EBADF/ENOTSOCK/EINVAL: the listening socket is really
-			 * gone */
-			dolog(LOGOPTS, "accept: %s\n", strerror(e));
-			break;
+			/* Only these say the listening socket itself is gone.
+			 * Everything else is transient (a streams or network
+			 * error such as ENOSR/ENETDOWN): stopping there would
+			 * end all printing because of one failed connection. */
+			if (e == EBADF || e == ENOTSOCK || e == EINVAL) {
+				dolog(LOGOPTS, "accept: %s, listening socket is gone\n",
+				      strerror(e));
+				break;
+			}
+			dolog(LOGOPTS, "accept: %s, transient error, waiting\n",
+			      strerror(e));
+			(void)sleep(1);
+			continue;
 		}
 		/* B1/B2: bound the socket and detect dead peers before the job
 		 * starts */
