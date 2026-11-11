@@ -2253,6 +2253,23 @@ static void one_job(int lpnumber) {
 		dolog(LOG_NOTICE, "Connection from %s port %hu\n",
 		      get_ip_str((struct sockaddr *)&client, host, sizeof(host)),
 		      get_port((struct sockaddr *)&client));
+#ifdef USE_LIBWRAP
+	/* The standalone loop consults hosts_ctl() on every accepted socket.
+	 * Under (x)inetd the socket is handed over on fd 0 and this is the
+	 * only process that sees it, so the same check belongs here: without
+	 * it a build with USE_LIBWRAP silently had no tcpwrappers access
+	 * control at all in one-shot mode.  A refusal is a failed job (V3),
+	 * so close with RST rather than a clean FIN. */
+	if (hosts_ctl("p910nd", STRING_UNKNOWN,
+	              get_ip_str((struct sockaddr *)&client, host, sizeof(host)),
+	              STRING_UNKNOWN) == 0) {
+		dolog(LOGOPTS, "Connection from %s port %hu rejected\n",
+		      get_ip_str((struct sockaddr *)&client, host, sizeof(host)),
+		      get_port((struct sockaddr *)&client));
+		close_connection(0, 1);
+		return;
+	}
+#endif
 	/* queue = 1: under (x)inetd every connection is its own process, so
 	 * this byte is the only thing that serialises them and it must queue.
 	 */
