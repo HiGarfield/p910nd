@@ -32,7 +32,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends strace python3 cppcheck clang-tidy
+          sudo apt-get install -y --no-install-recommends strace python3 cppcheck clang-tidy libwrap0-dev
 
       - name: Run the defect regression suite
         run: |
