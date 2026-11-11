@@ -30,7 +30,13 @@ revert() {
 }
 
 say "1/3  PD-05: put the printer read-error exit back out"
-m=$(revert pd05 '/printerToNetworkBuffer.err & READ_ERR/d') || exit 1
+# The READ_ERR exit became a two-line if statement when the source was
+# clang-formatted, so deleting the matching line left a stray
+# "bytes == 0)" behind: the copy no longer compiled, the harness kept its
+# previous binary and the case passed vacuously.  Mask the flag test to a
+# value that can never be true instead - the copy still builds and only
+# the fix is disabled, which is what a mutation has to do.
+m=$(revert pd05 's/printerToNetworkBuffer.err & READ_ERR/printerToNetworkBuffer.err \& 0/') || exit 1
 if P910ND_SRC="$m" sh "$CASES_DIR/t-pd-05-bidir-read-error.sh" >"$WORK/pd05.log" 2>&1; then
 	say "FAIL: the case still passes with the fix reverted"
 	RESULT=1
