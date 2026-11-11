@@ -3,7 +3,7 @@
 `cases/` 里每个用例验证 `DEFECT_REPORT.md` 中的一条缺陷。**用例通过 = 该缺陷不复现**（修复后语义；修复前是反过来）。观测原始值写入 `build/tests/observations/<ID>.txt`，报告只引用不臆造。
 
 ```sh
-make test                          # 全部 21 个用例，约 250 秒
+make test                          # 全部用例（见下方用例索引，由 t-pd-32 校验）
 make test PD-01                    # 单条（ID 大小写皆可，可写 pd-01 或 t-pd-01）
 sh tests/cases/t-pd-05-*.sh        # 直接跑单个用例（变体会自动补建）
 sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必须失败
@@ -56,10 +56,21 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-19-job-children-capped.sh` | 无界 fork | `MAX_JOB_CHILDREN=2` 时最多两个作业子进程且无人被拒；对照构建会 fork 六个 |
 | `t-pd-20-bidir-silent-timeout.sh` | 双向无 SILENT_TIMEOUT | `-b` 下客户端中途暂停 6s 必须被容忍（8192 字节全到）；不发数据的客户端仍按短超时释放 |
 | `t-pd-21-poll-only.sh` | 等待接口可回退 | 代码/文档零遗留旧接口字样；三处 `poll()` 与 `<poll.h>` 必须在位，二进制符号级校验 |
+| `t-pd-22-close-drain.sh` | 关闭路径排空 | strace 证明收尾 `read()` 等待并读走客户端在途字节，而不是立刻 EAGAIN |
+| `t-pd-23-first-retry-log.sh` | 首条失败日志 | 单调时钟起点为 5 秒时，首次打开失败仍以 LOG_ERR 记录 |
+| `t-pd-24-child-table-signal-mask.sh` | 子进程表并发 | 关机路径只能在阻塞 SIGCHLD 的辅助函数里遍历 `child_pids` |
+| `t-pd-25-printer-reply-reset.sh` | 回程 RST | loopback RST 必须让 `readBuffer()` 标记该方向 EOF |
+| `t-pd-26-read-error-flag.sh` | 错误标志被清 | 网络写失败只清 WRITE_ERR；探针断言 READ_ERR 仍在 |
+| `t-pd-27-accept-transient.sh` | 临时 accept 错误 | 注入一次 ENOSR 后，下一个客户端仍被完整服务 |
+| `t-pd-28-inetd-libwrap.sh` | inetd 访问控制 | `hosts_ctl` 垫片记录调用；一次性模式必须做 libwrap 检查 |
+| `t-pd-29-printer-number-range.sh` | 编号越界 | `3` 立即打印 Usage，`0` 仍能启动监听 |
+| `t-pd-30-retry-throttle.sh` | 节流日志文本 | 确定性时钟数出 1 条正式告警与 27 条被节流的调试行 |
+| `t-pd-31-ci-deps.sh` | CI 依赖缺失 | CI 必须声明 libwrap0-dev，且 USE_LIBWRAP 变体能编译 |
+| `t-pd-32-readme-index.sh` | 文档索引漂移 | 每个 case 文件都必须出现在本索引中，且索引行数相等 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 
 ## 环境要求
 
-必需：`gcc`（或 `$CC_BIN`）、`python3`、`strace`、`setsid`、`timeout`、`make`。
-可选：`cppcheck`、`clang-tidy`（PD-00 会记录是否跳过）、`nm`（PD-07、PD-21 用）。
+必需：`gcc`（或 `$CC_BIN`）、`python3`、`strace`、`setsid`、`timeout`、`make`、`libwrap0-dev`（提供 `tcpd.h` 与 `libwrap.so`，PD-28 / PD-31 用）。
+可选：`cppcheck`、`clang-tidy` 与 `clang`（PD-00 会记录是否跳过）、`nm`（PD-07、PD-21 用）。
