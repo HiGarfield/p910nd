@@ -946,11 +946,13 @@ static void sigchld_handler(int sig) {
 		for (i = 0; i < child_pids_slots; i++) {
 			if (child_pids[i] == pid) {
 				child_pids[i] = 0;
-				if (inflight_children > 0)
-					inflight_children--;
 				break;
 			}
 		}
+		/* Every reaped child was counted at fork time, including one
+		 * that record_child() could not store (PD-38, OOM). */
+		if (inflight_children > 0)
+			inflight_children--;
 	}
 	errno = saved_errno;
 }
@@ -960,8 +962,9 @@ static void sigchld_handler(int sig) {
  * the number of accepted clients; a client is always served.
  * The caller MUST block SIGCHLD around this call: growing the table replaces
  * the array the handler scans, and that must not happen while it is walking
- * it.  Returns 0 only when memory is exhausted (the child then simply cannot
- * be tracked; it still runs to completion). */
+ * it.  Returns 0 only when memory is exhausted: the child cannot be tracked
+ * but still runs, so it must remain in the in-flight count or the
+ * MAX_JOB_CHILDREN cap would stop seeing it (PD-38). */
 static int record_child(pid_t pid) {
 	int i;
 
@@ -977,6 +980,7 @@ static int record_child(pid_t pid) {
 		if (child_pids == 0) {
 			dolog(LOG_ERR, "out of memory, cannot track job child %d\n",
 			      (int)pid);
+			inflight_children++;
 			return (0);
 		}
 		child_pids_slots = CHILD_PIDS_INITIAL;
@@ -988,6 +992,7 @@ static int record_child(pid_t pid) {
 		if (grown == 0) {
 			dolog(LOG_ERR, "out of memory, cannot track job child %d\n",
 			      (int)pid);
+			inflight_children++;
 			return (0);
 		}
 		child_pids = grown;
