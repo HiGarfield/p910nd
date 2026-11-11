@@ -2593,6 +2593,25 @@ static void server(int lpnumber) {
 	reap_children_and_exit(terminating ? 0 : 1);
 }
 
+/* T10b: sigchld_handler() clears child_pids[i] asynchronously, so the
+ * parent must block SIGCHLD while it walks the table.  The handler never
+ * runs with the signal blocked, which is what makes the plain pid_t array
+ * safe to share; record_child() is already called under the same block. */
+static void signal_job_children(int sig) {
+	sigset_t chld_mask;
+	sigset_t chld_omask;
+	int i;
+
+	(void)sigemptyset(&chld_mask);
+	(void)sigaddset(&chld_mask, SIGCHLD);
+	(void)sigprocmask(SIG_BLOCK, &chld_mask, &chld_omask);
+	for (i = 0; i < child_pids_slots; i++) {
+		if (child_pids[i] != 0)
+			(void)kill(child_pids[i], sig);
+	}
+	(void)sigprocmask(SIG_SETMASK, &chld_omask, 0);
+}
+
 /* T10b/U6: a daemon that exits must not leave printing children as orphans.
  * init would adopt them and the init script may unmount the device mid-job.
  * Signal every tracked child and wait a BOUNDED time for them to finish; the
@@ -2624,15 +2643,11 @@ static void reap_children_and_exit(int status) {
 	}
 	/* Force-terminate anything still running after the grace period. */
 	if (inflight_children > 0) {
-		int i;
 		dolog(LOG_NOTICE,
 		      "%d job(s) still running after grace period, sending "
 		      "SIGTERM\n",
 		      (int)inflight_children);
-		for (i = 0; i < child_pids_slots; i++) {
-			if (child_pids[i] != 0)
-				(void)kill(child_pids[i], SIGTERM);
-		}
+		signal_job_children(SIGTERM);
 		mono_now(&start);
 		while (inflight_children > 0) {
 			sleep_us(200000);
@@ -2645,10 +2660,7 @@ static void reap_children_and_exit(int status) {
 			      "%d job(s) still running after SIGTERM, sending "
 			      "SIGKILL\n",
 			      (int)inflight_children);
-			for (i = 0; i < child_pids_slots; i++) {
-				if (child_pids[i] != 0)
-					(void)kill(child_pids[i], SIGKILL);
-			}
+			signal_job_children(SIGKILL);
 			mono_now(&start);
 			while (inflight_children > 0) {
 				sleep_us(100000);
