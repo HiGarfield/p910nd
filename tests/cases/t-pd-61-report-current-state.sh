@@ -15,7 +15,8 @@
 #
 # A: no stale present-tense statements remain.
 # B: the current facts are stated and agree with p910nd.c.
-# C: the live regression-rule block is untouched.
+# C: every reported defect names its regression case (B-2/B-3/B-4).
+# D: the live regression-rule block is untouched.
 
 set -u
 REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -54,16 +55,35 @@ assert_contains "$SRC" "discarded += (int)n" \
 assert_contains "$REPORT" "用例清单见 `tests/README.md`" \
 	"B the case count is delegated to the living index"
 
-say "C: the live regression rule still exists"
+say "C: the reported-defect table has no untested or stale rows"
+# The report used to claim "16 defects / p910nd.c 2109 lines" in the
+# present tense, and three B-group rows listed "—" (no case) while A-4 only
+# said "existing cases".  A reader could not tell which fix was protected.
+assert_not_contains "$REPORT" "2109 行" \
+	"C the obsolete source line count is gone"
+assert_not_contains "$REPORT" "## 状态：16 条缺陷" \
+	"C the headline counts all reported defects, not just round one"
+assert_not_contains "$REPORT" '| — |' \
+	"C every reported fix names a regression case"
+assert_not_contains "$REPORT" '| 现有用例 |' \
+	"C and no row hides behind a vague 'existing cases'"
+assert_contains "$REPORT" "28 条缺陷" \
+	"C the headline states the current total"
+for cid in t-pd-80 t-pd-81 t-pd-82; do
+	assert_contains "$REPORT" "$cid" \
+		"C the second-round B-group cases are registered ($cid)"
+done
+
+say "D: the live regression rule still exists"
 sed -n '/^## 回归规则/,/^静态分析基线/p' "$REPORT" >"$CASE_DIR/rules.txt"
 obs "rules:"
 sed 's/^/    /' "$CASE_DIR/rules.txt" | while read -r l; do obs "$l"; done
 assert_contains "$CASE_DIR/rules.txt" "make test" \
-	"C the rule still requires the full suite"
+	"D the rule still requires the full suite"
 assert_contains "$CASE_DIR/rules.txt" "sh tests/mutation-check.sh" \
-	"C and the sensitivity check"
+	"D and the sensitivity check"
 assert_contains "$CASE_DIR/rules.txt" "make && make CC=clang" \
-	"C and the warning-free dual build"
+	"D and the warning-free dual build"
 
 kill_stray
 [ "$ASSERT_FAIL" -eq 0 ] || exit 1

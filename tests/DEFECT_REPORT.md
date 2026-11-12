@@ -1,10 +1,10 @@
 # p910nd 缺陷报告
 
-审查对象：`p910nd.c`（2109 行）、`Makefile`、`aux/p910nd.conf`、`aux/p910nd.init`、`aux/p910nd.spec`、`p910nd.8`、`README.md`、`.github/workflows/CI.yml`
+审查对象：基线提交 `da6685d` 的 `p910nd.c`、`Makefile`、`aux/p910nd.conf`、`aux/p910nd.init`、`aux/p910nd.spec`、`p910nd.8`、`README.md`、`.github/workflows/CI.yml`
 基线提交：`da6685d`　审查日期：2026-10-03　修复日期：2026-10-03
 验证环境：Linux 7.0.0-34-generic x86_64，gcc/clang、strace、python3、cppcheck、clang-tidy，非 root
 
-## 状态：16 条缺陷全部已修复并逐条测试通过
+## 状态：28 条缺陷（首轮 16 + 第二轮 A 组 7 + B 组 5）全部已修复并逐条测试通过
 
 `make test`（用例清单见 `tests/README.md`，数量随每次新增缺陷用例增长）现在**断言的是修复后的行为**：每个用例通过即表示该缺陷不再复现。首轮交付时为 17 个用例、连跑两轮约 187 秒；本文引用的历史数字全部来自当时的 `build/tests/observations/` 记录，不代表当前套件的规模或耗时。PD-61 校验本节的现状描述不与实现漂移。
 
@@ -85,7 +85,7 @@ all mutations were detected
 | `clang-tidy` | 0 | 0 |
 | `gcc -DNO_CLOCK_GETTIME=1 -Werror`（降级路径） | 0 | 0 |
 
-修复前这 16 条缺陷**一条都没有被任何工具发现**；修复后基线仍为 0，用例把"总数必须为 0"也断言了下来。
+首轮这 16 条缺陷修复前**一条都没有被任何工具发现**；修复后基线仍为 0，用例把"总数必须为 0"也断言了下来。
 
 ---
 
@@ -594,7 +594,7 @@ LSP `findReferences get_lock` 佐证：默认预处理下 `get_lock()` **只有�
 | A-1 | `take_lock()` 增加 `wait_seconds` 参数；`get_lock(lpnumber, queue)` 把实例锁（快速失败）与作业锁（排队）分开；inetd 下实例锁即作业锁，仍排队 | `t-pd-17` |
 | A-2/A-7 | 新增 `OPEN_PRINTER_MAX_WAIT`（默认 300s）兜住全部等待；永久失败预算改从"作业拿到锁"起算 | `t-pd-18` |
 | A-3 | 新增 `MAX_JOB_CHILDREN`（默认 64），达到上限时**不 accept**（连接留在 backlog）而不是拒绝 | `t-pd-19` |
-| A-4 | `openlog()` 无条件调用 | 现有用例 |
+| A-4 | `openlog()` 无条件调用；PD-71 补齐参数解析/版本诊断在 `openlog()` 之前的路径 | `t-pd-04`、`t-pd-71` |
 | A-5 | 新增 `OPEN_PRINTER_RETRY_LOG_EVERY`（默认 60s）节流重试日志 | `t-pd-18` 侧断言 |
 | A-6 | init 脚本按 argv[0] 精确匹配 `p910[0-9]d`，并遍历全部 pid 文件 | `t-pd-12` 侧断言 |
 | B-1 | 双向 idle 判定改为与单向一致的 `saw_data ? SILENT_TIMEOUT : IDLE_TIMEOUT` | `t-pd-20` |
