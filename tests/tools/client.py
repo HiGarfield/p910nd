@@ -9,6 +9,8 @@ that is what tells a caller whether a job succeeded or failed:
   rst      ConnectionResetError       -- the daemon sent RST, the client is told
                                           the job failed (CUPS retries)
   eof      orderly shutdown by peer
+  complete all --expect-reply bytes arrived while the peer stays open
+  no-read  no reply was requested
   timeout  neither happened within the deadline
 
 It also records how many bytes crossed in each direction, and can optionally
@@ -106,8 +108,13 @@ def main():
                 break
             chunks.append(buf)
             received += len(buf)
-        if args.expect_reply == 0 and how == "none":
-            how = "no-read"
+        if how == "none":
+            # PD-54: the loop also ends when every expected byte arrived
+            # while the peer still holds the connection open.  Leaving how
+            # as "none" reported an undocumented termination mode, so a
+            # case checking how= could not tell a complete reply from a
+            # broken one.
+            how = ("no-read" if args.expect_reply == 0 else "complete")
     except (BrokenPipeError, ConnectionResetError) as exc:
         how = "rst"
         print("%s: send failed: %s" % (args.label, exc))

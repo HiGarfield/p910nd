@@ -88,6 +88,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-51-devnode-clock.sh` | pty 设备墙钟期限 | 墙钟回拨后 pty master 仍须按时关闭 |
 | `t-pd-52-lockhold-clock.sh` | 锁持有者墙钟期限 | 墙钟回拨后 byte-1 作业锁仍须按时释放 |
 | `t-pd-53-kill-stray-scope.sh` | 清理函数误杀进程 | 仅提及构建路径的无关进程须存活，构建树内可执行文件仍被回收 |
+| `t-pd-54-client-complete-mode.sh` | 完整回复上报 none | 收满期望字节时须报 complete，短回复仍报 timeout |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 
