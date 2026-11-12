@@ -55,10 +55,20 @@ def main():
     args = ap.parse_args()
 
     payload = b""
-    if args.send is not None:
-        payload = args.send.encode("utf-8").decode("unicode_escape").encode("latin-1")
-    elif args.send_repeat:
-        payload = bytes([parse_byte(args.send_byte)]) * args.send_repeat
+    try:
+        if args.send is not None:
+            payload = (args.send.encode("utf-8")
+                       .decode("unicode_escape").encode("latin-1"))
+        elif args.send_repeat:
+            payload = bytes([parse_byte(args.send_byte)]) * args.send_repeat
+    except (UnicodeEncodeError, UnicodeDecodeError, ValueError) as exc:
+        # PD-88: --send accepts python escapes, but \uXXXX may decode to a
+        # code point above 255, and --send-byte may not be a number at all.
+        # Both used to raise out of main() before any socket work: no RESULT
+        # line, exit 1 looking like a failed print job (PD-48/PD-83).
+        print("%s: bad send argument: %s" % (args.label, exc))
+        print("RESULT how=connect-error:bad-send sent=0 received=0 elapsed=0.000")
+        return 2
 
     # monotonic: this tool must keep working even when a case preloads a shim
     # that fakes the wall clock
