@@ -127,6 +127,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-89-inetd-sim-bad-byte.sh` | 模拟器字节参数解析遗漏 | 非法 `--send-byte` 须输出 bad-send-byte 结果并返回 2 |
 | `t-pd-90-variant-src-leak.sh` | 变体构建失败残留临时目录 | 源码副本缺失时不得留下 `src.*`，正常构建亦须清理 |
 | `t-pd-91-empty-case-list.sh` | 零用例套件假绿 | 用例目录为空须非零退出，单用例运行仍正常通过 |
+| `t-pd-92-init-piddir-consistency.sh` | stop 漏清自定义 pid 目录 | 配置的 pid 目录下陈旧文件须被删除，其它文件不受影响 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 
