@@ -70,26 +70,39 @@ def do_pty(args):
 
 
 def do_drain(args):
+    # PD-108: a full disk (/dev/full) or a disappearing --out path used to
+    # escape as an uncaught OSError.  Worse, the finally block called
+    # out.close() BEFORE os.close(fd): close() re-raises the buffered write
+    # error, so the FIFO descriptor was never closed and the tool died with
+    # a traceback after printing "event=drain-end" (a case watching that
+    # line would think the drain succeeded).  Open --out inside the try,
+    # classify output errors, and always release fd last.
     fd = os.open(args.fifo, os.O_RDWR)
-    if args.out:
-        out = open(args.out, "wb")
-    else:
-        out = None
+    out = None
+    error = None
     t0 = time.monotonic()
     total = 0
     try:
+        if args.out:
+            out = open(args.out, "wb")
         while True:
             try:
                 buf = os.read(fd, 65536)
             except OSError as exc:
                 print("event=read-error errno=%s" % exc)
+                error = exc
                 break
             if not buf:
                 continue
             total += len(buf)
             if out:
-                out.write(buf)
-                out.flush()
+                try:
+                    out.write(buf)
+                    out.flush()
+                except OSError as exc:
+                    error = exc
+                    print("event=write-error errno=%s" % exc)
+                    break
             if args.verbose:
                 print("event=read t=%.3f bytes=%d total=%d"
                       % (time.monotonic() - t0, len(buf), total))
@@ -97,12 +110,17 @@ def do_drain(args):
     except KeyboardInterrupt:
         pass
     finally:
-        print("event=drain-end total=%d elapsed=%.3f" % (total, time.monotonic() - t0))
+        print("event=drain-end total=%d elapsed=%.3f"
+              % (total, time.monotonic() - t0))
         sys.stdout.flush()
         if out:
-            out.close()
+            try:
+                out.close()
+            except OSError as exc:
+                error = error or exc
+                print("event=out-close-error errno=%s" % exc)
         os.close(fd)
-    return 0
+    return 1 if error is not None else 0
 
 
 def do_repl(args):
