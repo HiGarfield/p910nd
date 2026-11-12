@@ -16,7 +16,8 @@ helper provides exactly those:
   repl  --fifo PATH --data TEXT --delay S [--repeat N]
                                  write TEXT to a FIFO, then sleep S, N times
 
-Every mode prints machine readable KEY=VALUE lines on stdout.
+Every mode prints machine readable KEY=VALUE lines on stdout.  The "t="
+values are elapsed monotonic seconds, not wall-clock timestamps.
 """
 
 import argparse
@@ -105,9 +106,14 @@ def do_drain(args):
 def do_repl(args):
     fd = os.open(args.fifo, os.O_WRONLY)
     payload = args.data.encode("utf-8").decode("unicode_escape").encode("latin-1")
+    # PD-62: drain and pty already use monotonic time. An absolute
+    # time.time() stamp jumps backwards under an NTP step / VM resume /
+    # the fake clock used by PD-07, so the "t=" values of a single repl
+    # run were neither ordered nor comparable with the drain log.
+    t0 = time.monotonic()
     for i in range(args.repeat):
         print("event=write t=%.3f index=%d bytes=%d"
-              % (time.time(), i, len(payload)))
+              % (time.monotonic() - t0, i, len(payload)))
         sys.stdout.flush()
         os.write(fd, payload)
         if i + 1 < args.repeat:
