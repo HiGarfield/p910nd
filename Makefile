@@ -81,6 +81,13 @@ $(PROG):	p910nd.c
 test:
 	sh $(TESTS_DIR)/run-all.sh
 
+# PD-63: GNU make does not forward extra goals to a recipe.  The documented
+# "make test PD-01" ran the whole suite and then failed with
+# "No rule to make target 'PD-01'".  Handle one case explicitly with CASE=.
+test-case:
+	@test -n "$(CASE)" || { echo "usage: make test-case CASE=PD-01" >&2; exit 2; }
+	sh $(TESTS_DIR)/run-all.sh $(CASE)
+
 check: test
 
 strip: $(PROG)
@@ -94,7 +101,7 @@ install: $(PROG) $(CONFIG) $(INITSCRIPT) $(MANPAGE)
 	$(INSTALL) $(INITSCRIPT) $(DESTDIR)$(SCRIPTDIR)/$(PROG)
 	$(INSTALL) -m 644 $(MANPAGE) $(DESTDIR)$(MANDIR)
 
-.PHONY: all install strip clean test check
+.PHONY: all install strip clean test test-case check
 clean:
 	rm -f *.o *.d $(PROG)
 	rm -rf build

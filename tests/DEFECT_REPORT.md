@@ -111,7 +111,7 @@ LSP `findReferences get_lock` 佐证：默认预处理下 `get_lock()` **只有�
 
 **修复方案（已实施）**：删掉 `#ifdef LOCKFILE_DIR` 守卫，`server()` 无条件取实例锁；`get_lock()` 在锁目录缺失时创建它（PD-02）。
 
-**修复后实测**（`make test PD-01`）：默认构建的 strace 中出现
+**修复后实测**（`sh tests/run-all.sh PD-01`）：默认构建的 strace 中出现
 `openat(AT_FDCWD, "/var/lock/subsys/p9100d", O_RDWR|O_CREAT|O_NOFOLLOW, 0644) = -1 EACCES`
 ——路径被访问了（守卫已消失），非 root 下取不到锁于是干净退出（exit 1）。两客户端并发的设备字节流切换 **1 次** / 600000 字节。
 
@@ -135,7 +135,7 @@ LSP `findReferences get_lock` 佐证：默认预处理下 `get_lock()` **只有�
 
 **修复方案（已实施）**：新增 `make_lock_dir()`，逐级 `mkdir(0755)`，`EEXIST` 视为成功；`get_lock()` 在 `errno == ENOENT` 时调用它并重试一次 `open()`。同时按方案 ① 的要求，锁目录不可创建时仍然致命（不再降级为无锁运行）。
 
-**修复后实测**（`make test PD-02`）：
+**修复后实测**（`sh tests/run-all.sh PD-02`）：
 
 | 段 | 场景 | 结果 |
 | --- | --- | --- |

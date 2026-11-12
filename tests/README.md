@@ -4,7 +4,8 @@
 
 ```sh
 make test                          # 全部用例（见下方用例索引，由 t-pd-32 校验）
-make test PD-01                    # 单条（ID 大小写皆可，可写 pd-01 或 t-pd-01）
+make test-case CASE=PD-01          # 单条（ID 大小写皆可，可写 pd-01 或 t-pd-01）
+sh tests/run-all.sh PD-01          # 等价的直接调用；make test PD-01 不成立（PD-63）
 sh tests/cases/t-pd-05-*.sh        # 直接跑单个用例（变体会自动补建）
 sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必须失败
 ```
@@ -97,6 +98,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-60-inetd-sim-complete.sh` | 完整回复误报超时 | 收满期望字节须报 complete，短回复仍报 timeout |
 | `t-pd-61-report-current-state.sh` | 缺陷报告现状描述漂移 | 报告中的时钟、缓冲与用例数描述须与源码一致 |
 | `t-pd-62-devnode-repl-clock.sh` | repl 事件墙钟时间戳 | 墙钟回拨后 t= 仍须为递增的单调经过时长 |
+| `t-pd-63-single-case-command.sh` | 单用例命令失效 | `make test-case CASE=` 须只跑指定用例，旧写法被拒 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 
