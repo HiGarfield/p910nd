@@ -244,6 +244,30 @@ else
     }
 fi
 
+# PD-49: main() rewrites argv[0] to p910<port>d, so name based
+# checkproc()/pidofproc() cannot find a running daemon; on systems without
+# /etc/rc.status the emulated checkproc() always returns "unknown" (4).
+# The stop branch already validates the pid files the daemon writes, so use
+# that same source of truth for status (and for try-restart, which asks
+# status).  P910ND_PIDDIR is a test hook and defaults to the runtime dir.
+P910ND_PIDDIR=${P910ND_PIDDIR:-/var/run}
+p910nd_running_pids() {
+    local p910nd_pf p910nd_p p910nd_argv0
+    for p910nd_pf in "$P910ND_PIDDIR"/p910[0-9]d.pid; do
+	test -f "$p910nd_pf" || continue
+	read p910nd_p <"$p910nd_pf" 2>/dev/null
+	case "$p910nd_p" in
+	''|*[!0-9]*)	continue ;;
+	esac
+	test -d "/proc/$p910nd_p" || continue
+	p910nd_argv0=$(tr '\0' '\n' <"/proc/$p910nd_p/cmdline" 2>/dev/null | sed -n 1p)
+	case "${p910nd_argv0##*/}" in
+	p910[0-9]d)	printf '%s\n' "$p910nd_p" ;;
+	*)		continue ;;
+	esac
+    done
+}
+
 # Reset status of this service
 rc_reset
 
@@ -423,8 +447,14 @@ case "$1" in
 	# 4 - service status unknown :-(
 	# 5--199 reserved (5--99 LSB, 100--149 distro, 150--199 appl.)
 	
-	# NOTE: checkproc returns LSB compliant status values.
-	checkproc $P910ND_BIN
+	# PD-49: a live daemon writes a pid file even though its argv[0]
+	# no longer names the binary.  Only fall back to checkproc when
+	# there is no such pid file (e.g. a foreground -d instance).
+	if test -n "$(p910nd_running_pids)"; then
+	    :
+	else
+	    checkproc $P910ND_BIN
+	fi
 	# NOTE: rc_status knows that we called this init script with
 	# "status" option and adapts its messages accordingly.
 	rc_status -v
