@@ -414,9 +414,13 @@ case "$1" in
 	if test "$1" = "condrestart"; then
 		echo "${attn} Use try-restart ${done}(LSB)${attn} rather than condrestart ${warn}(RH)${norm}"
 	fi
-	$0 status
+	## PD-76: $0 must be quoted.  An init script installed under a path
+	## containing spaces (a container bind mount, a vendor prefix) used to
+	## expand "$0 restart" into two words, so every recursive call failed
+	## with 127 and restart/try-restart/force-reload silently did nothing.
+	"$0" status
 	if test $? = 0; then
-		$0 restart
+		"$0" restart
 	else
 		rc_reset	# Not running is not a failure.
 	fi
@@ -426,8 +430,8 @@ case "$1" in
     restart)
 	## Stop the service and regardless of whether it was
 	## running or not, start it again.
-	$0 stop
-	$0 start
+	"$0" stop
+	"$0" start
 
 	# Remember status and be quiet
 	rc_status
@@ -445,7 +449,7 @@ case "$1" in
 	#rc_status -v
 
 	## Otherwise:
-	$0 try-restart
+	"$0" try-restart
 	rc_status
 	;;
     reload)
