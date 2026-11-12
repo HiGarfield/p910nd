@@ -90,6 +90,14 @@ PASSED=""
 FAILED=""
 SKIPPED=""
 
+# PD-102: "# case-timeout: N" used to be completely unbounded.  A typo such
+# as 999999 (or a stale copy of a legacy value) handed timeout(1) a wall clock
+# of days: a hung case wedged the whole CI job with no diagnostic at all.
+# Allow a case to ask for up to ten times the default budget -- the largest
+# declaration in this suite is 150s with a 45s default -- and clamp anything
+# beyond that, loudly.
+CASE_TIMEOUT_MAX=$((CASE_TIMEOUT * 10))
+
 for id in $CASE_LIST; do
 	# accept PD-01, pd-01 or t-pd-01 on the command line and from the scan
 	lid=$(printf '%s' "$id" | tr 'A-Z' 'a-z')
@@ -131,7 +139,12 @@ for id in $CASE_LIST; do
 	_extra=$(sed -n 's/^# case-timeout: \([0-9][0-9]*\)$/\1/p' \
 		"$case_file" | head -1)
 	if [ -n "$_extra" ] && [ "$_extra" -gt "$case_limit" ]; then
-		case_limit=$_extra
+		if [ "$_extra" -gt "$CASE_TIMEOUT_MAX" ]; then
+			say "?? $lid: case-timeout $_extra clamped to $CASE_TIMEOUT_MAX"
+			case_limit=$CASE_TIMEOUT_MAX
+		else
+			case_limit=$_extra
+		fi
 	fi
 	out=$(timeout "$case_limit" sh "$case_file" 2>&1)
 	status=$?
