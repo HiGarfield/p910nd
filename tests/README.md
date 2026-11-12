@@ -117,6 +117,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-79-daemon-stop-pgid-reuse.sh` | PGID 复用误杀无关进程 | 回收的进程组不得被信号，真实守护进程仍须正常停止 |
 | `t-pd-80-jobmax-ceiling.sh` | 报告 B-2 只修一半 | 作业绝对上限须真实生效，默认关闭语义与文档一致 |
 | `t-pd-81-stall-budget-reset.sh` | 报告 B-3 无回归保护 | 两处预算复位与实测日志须受守护，删一处即变红 |
+| `t-pd-82-child-sigmask-restore.sh` | 报告 B-4 无回归保护 | 作业子进程 `SigBlk` 不得阻塞 SIGCHLD，删除恢复调用即变红 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 
