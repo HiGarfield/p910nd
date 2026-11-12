@@ -16,8 +16,7 @@ case_init PD-32 readme-index
 
 README="$REPO_ROOT/tests/README.md"
 n_cases=0
-for id in $(ls "$CASES_DIR" |
-	sed -n 's/^t-pd-\([0-9][0-9]\)-.*\.sh$/\1/p' | sort -u); do
+for id in $(case_ids "$CASES_DIR"); do
 	n_cases=$((n_cases + 1))
 	if grep -q "t-pd-$id-" "$README"; then
 		obs "index: PD-$id present"
@@ -27,7 +26,7 @@ for id in $(ls "$CASES_DIR" |
 	fi
 done
 
-index_rows=$(grep -c '^| `t-pd-[0-9][0-9]-' "$README")
+index_rows=$(grep -c '^| `t-pd-[0-9][0-9]*-' "$README")
 obs_kv "case files" "$n_cases"
 obs_kv "README index rows" "$index_rows"
 assert_eq "$index_rows" "$n_cases" \

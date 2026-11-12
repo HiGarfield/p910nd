@@ -68,7 +68,7 @@ done
 if [ "$#" -gt 0 ]; then
 	CASE_LIST="$*"
 else
-	CASE_LIST=$(ls "$CASES_DIR" | sed -n 's/^\(t-pd-[0-9][0-9]\).*/\1/p' | sort -u)
+	CASE_LIST=$(case_ids "$CASES_DIR" | sed 's/^/t-pd-/')
 fi
 
 PASSED=""

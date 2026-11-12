@@ -95,6 +95,16 @@ ensure_shared_variants() {
 	return 0
 }
 
+# case_ids [dir] -- numeric ids of every t-pd-*.sh case, of ANY width.
+# The driver and the README index check used to carry their own copy of a
+# two-digit sed expression: a file named t-pd-100-*.sh was silently reduced
+# to "10" (or "t-pd-10"), so the new case was never run and the index check
+# never noticed.  Keep one implementation that both call sites share.
+case_ids() {
+	ls "${1:-$CASES_DIR}" 2>/dev/null |
+		sed -n 's/^t-pd-\([0-9][0-9]*\)-.*\.sh$/\1/p' | sort -u
+}
+
 # case_init <id> <slug> -- create the per-case scratch/observation files.
 case_init() {
 	CASE_ID="$1"
