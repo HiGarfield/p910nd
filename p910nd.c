@@ -303,6 +303,17 @@ extern int hosts_ctl(char *daemon, char *client_name, char *client_addr,
 #ifndef MAX_JOB_CHILDREN
 #define MAX_JOB_CHILDREN 64
 #endif
+/* PD-96: the accept loop deliberately leaves connections in the listen
+ * backlog once MAX_JOB_CHILDREN (default 64) is reached, so clients wait
+ * for a child slot instead of being refused.  A hard-coded backlog of 30
+ * was smaller than the cap: connections 31..64 fell out of the queue and
+ * had to be retransmitted or were refused.  Ask for the kernel maximum.
+ * The queue must be LARGER than the cap, not equal to it: with a small
+ * MAX_JOB_CHILDREN (e.g. 2 in PD-19) every waiting client still needs a
+ * slot in the queue. */
+#ifndef SOMAXCONN
+#define SOMAXCONN 128
+#endif
 /* R9/T2/U3: a client that connected but never sent a byte is released after
  * IDLE_TIMEOUT (a probe).  A client that has actually streamed data is a real
  * job that may legitimately pause (CUPS building pages, a slow link, a client
@@ -2598,7 +2609,7 @@ static void server(int lpnumber) {
 			res = res->ai_next;
 			continue;
 		}
-		if (listen(netfd, 30) < 0) {
+		if (listen(netfd, SOMAXCONN) < 0) {
 			dolog(LOGOPTS, "listen: %s\n", strerror(errno));
 			close(netfd);
 			res = res->ai_next;
