@@ -112,7 +112,9 @@ assert_true "$_b_rc" \
 	"status and stop now agree that the daemon is gone"
 
 say "C: static -- stop shares the status helper"
-stop_branch=$(sed -n '/^    stop)/,/^    ;;/p' "$INIT")
+# PD-94: the case terminator uses a TAB; /^    ;;/ never matched and this
+# slice included every later case branch.
+stop_branch=$(sed -n '/^    stop)/,/^[[:space:]]*;;/p' "$INIT")
 assert_str_contains "$stop_branch" "p910nd_running_pids" \
 	"C the stop branch uses the same pid source as status"
 assert_str_contains "$stop_branch" "PD-68: status()" \

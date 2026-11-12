@@ -46,7 +46,10 @@ assert_ge "$n_renamed" "1" "only under the new name"
 # ------------------------------------------------------------- the fix itself
 say "the init script stops the daemon through its pid file"
 INIT="$REPO_ROOT/aux/p910nd.init"
-stop_branch=$(sed -n '/^    stop)/,/^    ;;/p' "$INIT")
+# PD-94: case terminators are indented with a TAB, so /^    ;;/ never
+# matched and this slice ran all the way to EOF (185 lines instead of 95),
+# letting assertions match text from restart/status/reload branches.
+stop_branch=$(sed -n '/^    stop)/,/^[[:space:]]*;;/p' "$INIT")
 obs "stop branch:"
 printf '%s\n' "$stop_branch" | sed 's/^/    /' | while read -r l; do obs "$l"; done
 
