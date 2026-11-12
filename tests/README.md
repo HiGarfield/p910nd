@@ -1,6 +1,6 @@
 # p910nd 缺陷验证脚手架
 
-`cases/` 里每个用例验证 `DEFECT_REPORT.md` 中的一条缺陷。**用例通过 = 该缺陷不复现**（修复后语义；修复前是反过来）。观测原始值写入 `build/tests/observations/<ID>.txt`，报告只引用不臆造。
+`cases/` 里的用例分两类：`DEFECT_REPORT.md` 中已报告缺陷的回归断言，以及后续审查陆续发现的源码、构建、CI、脚手架和文档缺陷。**用例通过 = 该缺陷不复现**（修复后语义；修复前是反过来）。用例清单以本文件下方的索引为准（由 `t-pd-32` 校验，PD-65 校验本节描述）；`DEFECT_REPORT.md` 只记录首轮与次轮的 16 + 12 条，不是全部用例。观测原始值写入 `build/tests/observations/<ID>.txt`，报告只引用不臆造。
 
 ```sh
 make test                          # 全部用例（见下方用例索引，由 t-pd-32 校验）
@@ -14,7 +14,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 
 * **`p910nd.c` 永不被修改。** 需要换常量的用例构建源码副本（`mktemp -d` 到 `build/tests/`），用 `tools/patch_source.py` 打测试档补丁，编译完立刻删除副本。补丁对每个 needle 断言命中次数，匹配不上就报错退出，不会静默产出"看起来像出货版"的二进制。
 * `P910ND_SRC=<file>` 让所有变体改从该文件构建。`tests/mutation-check.sh` 用它把修复还原到副本里验证用例会红。`p910nd.c` 本身始终不动。
-* 打过补丁的变体把 `BASEPORT` 移到 19100，并按比例缩小墙钟超时（30s→3s、60s→6s、120s→6s、120s→12s）。**超时之间的比例保持不变**，只有绝对时长变。
+* 打过补丁的变体把 `BASEPORT` 移到 `TEST_PORT`（默认 19100，可用 `TEST_PORT=<port>` 覆盖），并按比例缩小墙钟超时（30s→3s、60s→6s、120s→6s、120s→12s）。**超时之间的比例保持不变**，只有绝对时长变。
 * 用例不需要 root。锁文件放在 `build/tests/` 下，守护进程一律 `-d` 启动（跳过守护化块因而不写 pid 文件）。
 * 守护进程用 `setsid sh -c 'echo $$ > pidfile; exec "$@"'` 启动——`setsid` 本身会 fork，`$!` 拿到的是短命的 setsid 进程而不是守护进程，因此让被 exec 的进程自报 PID。清理按进程组信号。
 * `daemon_start` 把 stdin 接到 `/dev/null`：p910nd 用 `getsockname(0)` 判断"是守护进程还是一次性服务"，继承来的 socket（IDE / CI runner 常见）会静默把它变成一次性服务。
@@ -100,6 +100,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-62-devnode-repl-clock.sh` | repl 事件墙钟时间戳 | 墙钟回拨后 t= 仍须为递增的单调经过时长 |
 | `t-pd-63-single-case-command.sh` | 单用例命令失效 | `make test-case CASE=` 须只跑指定用例，旧写法被拒 |
 | `t-pd-64-inetd-sim-exit-status.sh` | 模拟器失败仍返回 0 | RST/超时须非零退出，FIN/完整回复仍为零 |
+| `t-pd-65-harness-readme-current.sh` | 脚手架文档漂移 | 用例范围与 TEST_PORT 覆盖须与实现一致 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 
