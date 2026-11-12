@@ -35,7 +35,12 @@ cleanup() {
 	# any source copy still lying around is a bug in the harness, not a fixture
 	rm -rf "$BUILD_DIR"/src.* 2>/dev/null
 }
-trap 'cleanup; kill_stray' EXIT INT TERM
+# PD-74: a signal trap that only runs cleanup returns to the interrupted
+# command, so SIGTERM/SIGINT from a cancelled CI job did NOT stop the driver:
+# it kept building and running cases and could even exit 0.  Signal traps
+# must exit explicitly; EXIT still runs cleanup on every path.
+trap 'cleanup' EXIT
+trap 'exit 143' INT TERM
 
 # ------------------------------------------------------------------ build ----
 

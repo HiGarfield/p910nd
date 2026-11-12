@@ -109,6 +109,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-71-early-syslog-init.sh` | 早期诊断丢失 syslog 身份 | inetd 下无效参数与 -v 须先 `openlog(LOG_LPR\|LOG_PID)` 再 `vsyslog` |
 | `t-pd-72-harness-monotonic-wait.sh` | 测试框架墙钟等待挂起 | 墙钟回拨后两个有界等待须正常结束，正向路径仍成功 |
 | `t-pd-73-float-assert-numeric.sh` | 浮点断言空值假绿 | 空值/非数值操作数须被拒绝，合法浮点比较行为不变 |
+| `t-pd-74-runall-signal-exit.sh` | 驱动忽略取消信号 | SIGTERM 须以 143 立即退出，正常退出仍为 0 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 
