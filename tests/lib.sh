@@ -236,10 +236,34 @@ daemon_start() {
 	return 0
 }
 
+# PD-79: a process-group id is just a number and can be recycled as soon as
+# the daemon exits.  daemon_stop() used to send TERM and then an
+# unconditional KILL to "-$DAEMON_PGID" with no revalidation, so an unrelated
+# process group that inherited the number was killed.  aux/p910nd.init fixed
+# its own version of this in PD-12; the harness needs the same guard.
+# Only the leader we started (DAEMON_PID) can prove the group is still ours:
+# main() renames argv[0] to p910<port>d, or leaves the build-tree path when
+# the binary has a different name.
+daemon_group_is_ours() {
+	_dg_pid=${DAEMON_PID:-}
+	[ -n "$_dg_pid" ] || return 1
+	[ -d "/proc/$_dg_pid" ] || return 1
+	_dg_argv0=$( { tr '\0' '\n' <"/proc/$_dg_pid/cmdline"; } 2>/dev/null |
+		sed -n 1p)
+	[ -n "$_dg_argv0" ] || return 1
+	case "${_dg_argv0##*/}" in
+	p910[0-9]d) return 0 ;;
+	esac
+	case "$_dg_argv0" in
+	"$BUILD_DIR"/*) return 0 ;;
+	esac
+	return 1
+}
+
 # daemon_stop [signal] -- signal the whole daemon process group.
 daemon_stop() {
 	_sig=${1:-TERM}
-	if [ -n "$DAEMON_PGID" ]; then
+	if [ -n "$DAEMON_PGID" ] && daemon_group_is_ours; then
 		kill "-$_sig" "-$DAEMON_PGID" 2>/dev/null
 		_n=0
 		while [ "$_n" -lt 30 ]; do

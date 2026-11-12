@@ -114,6 +114,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-76-init-self-invoke-quoting.sh` | init 递归调用未引号 | 含空格路径下 restart 仍须执行 stop 与 start |
 | `t-pd-77-duplicate-case-id.sh` | 同编号用例被静默丢弃 | 重复编号须报失败且不执行，单一文件仍正常通过 |
 | `t-pd-78-init-path-quoting.sh` | init 二进制/配置路径拆词 | 含空格路径须通过存在性检查、加载配置并启动二进制 |
+| `t-pd-79-daemon-stop-pgid-reuse.sh` | PGID 复用误杀无关进程 | 回收的进程组不得被信号，真实守护进程仍须正常停止 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 
