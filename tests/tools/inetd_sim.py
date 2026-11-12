@@ -54,6 +54,16 @@ def main():
     args = ap.parse_args()
     send_byte = int(args.send_byte, 0) & 0xFF
 
+    # PD-85: an unusable --target is a harness configuration error, not a
+    # job outcome.  It used to be discovered only in the forked child, whose
+    # fd 2 IS the client socket (PD-66): the "exec failed" text was delivered
+    # as 49 reply bytes, RESULT said how=complete, and the helper exited 0
+    # even though the service never started.  Reject before forking.
+    if not (os.path.isfile(args.target) and os.access(args.target, os.X_OK)):
+        print("RESULT how=connect-error:target-not-executable:%s received=0"
+              % args.target)
+        return 2
+
     listener = socket.socket()
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind((args.host, args.port))
@@ -78,6 +88,11 @@ def main():
     finally:
         listener.close()
 
+    # PD-85: keep a copy of the real stderr for the race where the target
+    # passes the check above but execv() still fails (a bad shebang, the file
+    # disappearing between check and exec).  The child's fd 2 is the client
+    # socket, so diagnostics must never be written there.
+    saved_stderr = os.dup(2)
     pid = os.fork()
     if pid == 0:
         # child: become the service with the socket on fd 0, 1 and 2
@@ -89,9 +104,10 @@ def main():
                 conn.close()
             os.execv(args.target, [args.target] + args.argv)
         except Exception as exc:  # noqa: BLE001
-            os.write(2, ("exec failed: %s\n" % exc).encode())
+            os.write(saved_stderr, ("exec failed: %s\n" % exc).encode())
         os._exit(127)
 
+    os.close(saved_stderr)
     conn.close()
 
     sent = 0
@@ -205,6 +221,11 @@ def main():
     # Returning 0 let a case that only checks $? pass on a failed job --
     # client.py already classifies these as failures (PD-48).
     if how in ("rst", "connect-error", "timeout") or how.startswith("oserror:"):
+        return 1
+    # PD-85: 127 is the exec-failure status of the child.  Even if the
+    # connection looked clean, no service ever ran, so this cannot be a
+    # successful job.
+    if status == 127:
         return 1
     return 0
 

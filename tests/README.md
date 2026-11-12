@@ -120,6 +120,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-82-child-sigmask-restore.sh` | 报告 B-4 无回归保护 | 作业子进程 `SigBlk` 不得阻塞 SIGCHLD，删除恢复调用即变红 |
 | `t-pd-83-client-out-error.sh` | client.py 回复文件写入失败 | `--out` 不可写时仍须输出 RESULT、返回 2 且不泄漏连接 |
 | `t-pd-84-repl-broken-pipe.sh` | repl 谎报写入并抛异常 | 读者消失时须只记录真实写入、输出结束事件且不泄漏 fd |
+| `t-pd-85-inetd-target-missing.sh` | 服务未启动却报成功 | 无效目标须拒绝启动、诊断不注入客户端流、`exit=127` 判失败 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 
