@@ -317,7 +317,7 @@ so an NTP correction cannot disable the deadlines.
 .B P910ND_HAVE_MONOTONIC
 derived internally from \fBNO_CLOCK_GETTIME\fR and the platform's
 CLOCK_MONOTONIC support; it is not a tuning knob and should not be set by
-hand.  The code path selected when it is absent is the step-compensated
+hand.  The code path used when it is absent is the step-compensated
 fallback described above.
 .TP
 .B SOMAXCONN
