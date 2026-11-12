@@ -350,20 +350,30 @@ assert_lt() {
 }
 
 # Floating point comparisons, for durations.  awk keeps this dependency free.
+#
+# PD-73: awk silently coerces "" and other non-numeric strings to zero (and
+# compares a strnum with a pure string lexicographically), so a helper that
+# failed to produce a measurement used to make assert_f_lt "" 1.0 and
+# assert_f_ge "abc" 0.0 report PASS.  Both operands must look like a number
+# before any comparison is allowed; otherwise the assertion fails loudly.
 assert_f_ge() {
-	if awk -v a="$1" -v b="$2" 'BEGIN{exit !(a>=b)}'; then
+	if awk -v a="$1" -v b="$2" \
+		'BEGIN { exit !(a ~ /^-?[0-9]+([.][0-9]+)?$/ &&
+		                b ~ /^-?[0-9]+([.][0-9]+)?$/ && a >= b) }'; then
 		obs "ASSERT PASS  $3 (actual=$1 >= $2)"
 	else
-		obs "ASSERT FAIL  $3 (actual=$1 < $2)"
+		obs "ASSERT FAIL  $3 (actual=$1 < $2 or not numeric)"
 		ASSERT_FAIL=1
 	fi
 }
 
 assert_f_lt() {
-	if awk -v a="$1" -v b="$2" 'BEGIN{exit !(a<b)}'; then
+	if awk -v a="$1" -v b="$2" \
+		'BEGIN { exit !(a ~ /^-?[0-9]+([.][0-9]+)?$/ &&
+		                b ~ /^-?[0-9]+([.][0-9]+)?$/ && a < b) }'; then
 		obs "ASSERT PASS  $3 (actual=$1 < $2)"
 	else
-		obs "ASSERT FAIL  $3 (actual=$1 >= $2)"
+		obs "ASSERT FAIL  $3 (actual=$1 >= $2 or not numeric)"
 		ASSERT_FAIL=1
 	fi
 }
