@@ -10,7 +10,9 @@ This helper sets up exactly that fd layout and then reports, from the client's
 side:
 
   * how many bytes the service pushed back and what they look like
-  * how the connection ended: fin (clean close) / rst / timeout
+  * how the connection ended: fin (clean close) / rst / timeout /
+    complete (every expected byte arrived while the peer stays open) /
+    no-read (no reply bytes were requested)
   * whether the printer device actually received the job
 
 The client connection is established before the fork, so the process stays
@@ -138,7 +140,17 @@ def main():
                 break
             got += buf
         if how == "open":
-            how = "timeout"
+            # PD-60: the loop also ends when every expected byte arrived
+            # while the peer still holds the socket open.  Reporting that as
+            # "timeout" is wrong (measured: RESULT how=timeout received=8),
+            # and a case asserting on how= would fail on a perfectly good
+            # reply.  client.py uses the same modes (PD-54).
+            if args.expect_reply == 0:
+                how = "no-read"
+            elif len(got) >= args.expect_reply:
+                how = "complete"
+            else:
+                how = "timeout"
     except (BrokenPipeError, ConnectionResetError):
         how = "rst"
     except OSError as exc:
