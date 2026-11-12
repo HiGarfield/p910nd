@@ -165,9 +165,19 @@ for id in $CASE_LIST; do
 	out=$(timeout "$case_limit" sh "$case_file" 2>&1)
 	status=$?
 	printf '%s\n' "$out"
+	# PD-107: the observation record is authoritative.  A case that forgets
+	# its ASSERT_FAIL gate -- or reads a clobbered $? like PD-43/PD-105 did --
+	# can write "ASSERT FAIL" lines and still exit 0.  The driver used to
+	# print PASS and make the whole suite green.  Never trust exit 0 alone.
+	_obs_file="$OBS_DIR/$(printf '%s' "$lid" | tr 'a-z' 'A-Z').txt"
 	if [ "$status" -eq 0 ]; then
-		PASSED="$PASSED $lid"
-		say "PASS $lid"
+		if grep -q '^ASSERT FAIL' "$_obs_file" 2>/dev/null; then
+			FAILED="$FAILED $lid(vacuous-pass)"
+			say "FAIL $lid (exit 0 but assertions failed; see $_obs_file)"
+		else
+			PASSED="$PASSED $lid"
+			say "PASS $lid"
+		fi
 	elif [ "$status" -eq 124 ]; then
 		FAILED="$FAILED $lid(timeout)"
 		say "FAIL $lid (timed out after ${case_limit}s)"
