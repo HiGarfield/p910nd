@@ -76,6 +76,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-39-printer-template.sh` | 设备模板未校验 | 非单个 `%c` 的模板启动时拒绝；路径缓冲固定并检查截断 |
 | `t-pd-40-clock-base.sh` | 时钟基准混用 | 单调钟临时失败后三帧采样必须保持同一基准并继续推进 |
 | `t-pd-41-pollnval-exit.sh` | 监听 fd 失效空转 | POLLNVAL 垫片下守护进程须自行停机并说明原因 |
+| `t-pd-42-skip-is-failure.sh` | 跳过用例假绿 | 端口被占用导致跳过时整套测试必须非零退出并说明原因 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 

@@ -120,5 +120,15 @@ say "failed :${FAILED:- none}"
 say "skipped:${SKIPPED:- none}"
 say "observations: $OBS_DIR"
 
-[ -n "$FAILED" ] && exit 1
+# PD-42: a case skipped because the test port is busy ran zero assertions.
+# Exit 0 in that situation made `make test` (and CI) report a fully green
+# suite without running a single test, so a stray listener on TEST_PORT
+# silenced every regression check.  Skips are failures, just like missing
+# case files; the message names the port so the cause is obvious.
+if [ -n "$SKIPPED" ]; then
+	say "FAIL: skipped cases ran no assertions (TCP $TEST_PORT is busy)"
+fi
+if [ -n "$FAILED" ] || [ -n "$SKIPPED" ]; then
+	exit 1
+fi
 exit 0
