@@ -78,6 +78,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-41-pollnval-exit.sh` | 监听 fd 失效空转 | POLLNVAL 垫片下守护进程须自行停机并说明原因 |
 | `t-pd-42-skip-is-failure.sh` | 跳过用例假绿 | 端口被占用导致跳过时整套测试必须非零退出并说明原因 |
 | `t-pd-43-flush-sink-count.sh` | 环形缓冲重复计数 | 跨尾部的丢弃缓冲区须按实际消耗字节上报 |
+| `t-pd-44-ci-action-pins.sh` | CI Action 可变引用 | 全部 `uses:` 须固定到已发布版本标签且步骤不缺失 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 
