@@ -47,7 +47,9 @@ def main():
                     help="seconds to keep the connection open without half-closing")
     ap.add_argument("--expect-reply", type=int, default=0,
                     help="read up to this many reply bytes (0 = do not read)")
-    ap.add_argument("--read-timeout", type=float, default=8.0)
+    ap.add_argument("--read-timeout", type=float, default=8.0,
+                    help="seconds to wait for the reply, also honoured for "
+                         "short values (the socket timeout follows the deadline)")
     ap.add_argument("--out", default=None, help="write received bytes here")
     ap.add_argument("--label", default="client")
     args = ap.parse_args()
@@ -94,6 +96,12 @@ def main():
                 how = "timeout"
                 break
             try:
+                # PD-57: the fixed 1.0 s socket timeout made a short
+                # --read-timeout meaningless (0.2 s took 1.003 s). Wake up
+                # no later than the deadline, still capped at one second so
+                # a long read keeps polling the loop.
+                sock.settimeout(min(
+                    1.0, max(0.01, deadline - time.monotonic())))
                 buf = sock.recv(min(65536, args.expect_reply - received))
             except socket.timeout:
                 continue
