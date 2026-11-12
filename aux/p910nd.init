@@ -117,19 +117,24 @@
 
 # Check for missing binaries (stale symlinks should not happen)
 # Note: Special treatment of stop for LSB conformance
+# PD-78: P910ND_BIN and P910ND_CONFIG are single paths and must be quoted
+# everywhere.  A vendor prefix or bind mount containing spaces used to make
+# `test -x $P910ND_BIN` report "too many arguments" and exit 5 ("binary not
+# installed"), while `. $P910ND_CONFIG` failed to source the config at all.
+# P910ND_OPTS/NUM are deliberately left unquoted so the option list splits.
 P910ND_BIN=/usr/sbin/p910nd
-test -x $P910ND_BIN || { echo "$P910ND_BIN not installed"; 
+test -x "$P910ND_BIN" || { echo "$P910ND_BIN not installed"; 
 	if [ "$1" = "stop" ]; then exit 0;
 	else exit 5; fi; }
 
 # Check for existence of needed config file and read it
 P910ND_CONFIG=/etc/sysconfig/p910nd
-test -r $P910ND_CONFIG || { echo "$P910ND_CONFIG not found";
+test -r "$P910ND_CONFIG" || { echo "$P910ND_CONFIG not found";
 	if [ "$1" = "stop" ]; then exit 0;
 	else exit 6; fi; }
 
 # Read config	
-. $P910ND_CONFIG
+. "$P910ND_CONFIG"
 
 # Source LSB init functions
 # providing start_daemon, killproc, pidofproc, 
@@ -311,12 +316,12 @@ case "$1" in
 	## for the available starter and fall back to a plain invocation
 	## (p910nd daemonizes itself unless -d is given).
 	if test -x /sbin/start_daemon; then
-		start_daemon $P910ND_BIN $P910ND_OPTS $P910ND_NUM
+		start_daemon "$P910ND_BIN" $P910ND_OPTS $P910ND_NUM
 	elif test -x /sbin/start-stop-daemon; then
-		start-stop-daemon --start --quiet --exec $P910ND_BIN \
+		start-stop-daemon --start --quiet --exec "$P910ND_BIN" \
 			-- $P910ND_OPTS $P910ND_NUM
 	else
-		$P910ND_BIN $P910ND_OPTS $P910ND_NUM
+		"$P910ND_BIN" $P910ND_OPTS $P910ND_NUM
 	fi
 
 	# Remember status and be verbose
@@ -397,7 +402,7 @@ case "$1" in
 		# shellcheck disable=SC2034
 		P910ND_OPTS="$P910ND_OPTS"
 	else
-		killproc -TERM $P910ND_BIN
+		killproc -TERM "$P910ND_BIN"
 	fi
 
 	## Remove a leftover pid file, otherwise monitoring and the next
@@ -485,7 +490,7 @@ case "$1" in
 	if test -n "$(p910nd_running_pids)"; then
 	    :
 	else
-	    checkproc $P910ND_BIN
+	    checkproc "$P910ND_BIN"
 	fi
 	# NOTE: rc_status knows that we called this init script with
 	# "status" option and adapts its messages accordingly.

@@ -56,7 +56,8 @@ assert_eq "$(count_lines "$INIT" 'P910ND_PID=')" "2" \
 	"the pid is declared once and assigned only where it is signalled"
 assert_str_contains "$stop_branch" "/var/run/p910[0-9]d.pid" "namely the one the daemon writes"
 assert_str_contains "$stop_branch" 'kill -TERM "$P910ND_PID"' "and signals that pid"
-assert_str_contains "$stop_branch" 'killproc -TERM $P910ND_BIN' \
+# PD-78 quotes the binary path; the fallback lookup itself is unchanged.
+assert_str_contains "$stop_branch" 'killproc -TERM "$P910ND_BIN"' \
 	"with the old name-based lookup kept as a fallback"
 assert_str_contains "$stop_branch" '/proc/$p910nd_p/cmdline' \
 	"a stale pid file is not acted on: the pid is checked before use"
