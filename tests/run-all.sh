@@ -16,6 +16,22 @@ export REPO_ROOT
 TESTS_DIR="$REPO_ROOT/tests"
 . "$TESTS_DIR/lib.sh"
 
+# PD-104: CASE_TIMEOUT feeds timeout(1) and the PD-102 ceiling arithmetic.
+# It was used unchecked.  0 is the dangerous case: GNU timeout(1) treats 0
+# as "disable the timeout", so every case suddenly became unbounded and a
+# hung regression could wedge CI for ever.  A non-numeric value reached
+# $((CASE_TIMEOUT * 10)) and killed the driver with a bare "Illegal number"
+# only AFTER all four variants had been built.  Validate before any work.
+case "$CASE_TIMEOUT" in
+''|*[!0-9]*)
+	say "FATAL: CASE_TIMEOUT must be a positive integer (got '$CASE_TIMEOUT')"
+	exit 2 ;;
+esac
+if [ "$CASE_TIMEOUT" -lt 1 ]; then
+	say "FATAL: CASE_TIMEOUT must be at least 1 (got '$CASE_TIMEOUT')"
+	exit 2
+fi
+
 TEST_PORT=${TEST_PORT:-19100}
 LOCK_DIR_OK="$BUILD_DIR/lock-ok"
 LOCK_DIR_MISSING="$BUILD_DIR/lock-absent"
