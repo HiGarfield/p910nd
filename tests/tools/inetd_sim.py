@@ -14,6 +14,8 @@ side:
     complete (every expected byte arrived while the peer stays open) /
     no-read (no reply bytes were requested)
   * whether the printer device actually received the job
+  * an exit status that is non-zero whenever the job was NOT confirmed
+    (rst / timeout / OS error), matching client.py (PD-64)
 
 The client connection is established before the fork, so the process stays
 single threaded and the fork is safe.
@@ -190,6 +192,11 @@ def main():
     print("client_received=%d" % len(got))
     print("client_received_preview=%s" % printable)
     print("RESULT how=%s received=%d exit=%s" % (how, len(got), status))
+    # PD-64: an rst/timeout/OS error means the job was never confirmed.
+    # Returning 0 let a case that only checks $? pass on a failed job --
+    # client.py already classifies these as failures (PD-48).
+    if how in ("rst", "connect-error", "timeout") or how.startswith("oserror:"):
+        return 1
     return 0
 
 

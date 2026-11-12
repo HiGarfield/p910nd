@@ -61,7 +61,10 @@ timeout 20 env PYTHONPATH="$CASE_DIR" "$PYTHON" "$SIM" \
 a_rc=$?
 obs "A exit status: $a_rc"
 obs "A output: $(tr '\n' '|' <"$CASE_DIR/a.out")"
-assert_eq "$a_rc" "0" \
+# PD-64: the probe deliberately times out, and inetd_sim.py now reports an
+# unconfirmed job with exit 1.  What matters here is that it exits on its
+# own (not 124 from `timeout`), so 1 is the expected healthy result.
+assert_eq "$a_rc" "1" \
 	"A the helper exits on its own despite the wall clock step"
 assert_contains "$CASE_DIR/a.out" "RESULT how=timeout" \
 	"A the read deadline still fires and is reported"
@@ -77,7 +80,8 @@ timeout 20 "$PYTHON" "$SIM" \
 b_rc=$?
 obs "B exit status: $b_rc"
 obs "B output: $(tr '\n' '|' <"$CASE_DIR/b.out")"
-assert_eq "$b_rc" "0" "B the helper works normally without the clock step"
+assert_eq "$b_rc" "1" \
+	"B the control also reports its expected timeout as exit 1 (PD-64)"
 assert_contains "$CASE_DIR/b.out" "RESULT how=timeout" \
 	"B the same timeout is reported"
 kill_stray

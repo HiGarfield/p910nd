@@ -99,6 +99,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-61-report-current-state.sh` | 缺陷报告现状描述漂移 | 报告中的时钟、缓冲与用例数描述须与源码一致 |
 | `t-pd-62-devnode-repl-clock.sh` | repl 事件墙钟时间戳 | 墙钟回拨后 t= 仍须为递增的单调经过时长 |
 | `t-pd-63-single-case-command.sh` | 单用例命令失效 | `make test-case CASE=` 须只跑指定用例，旧写法被拒 |
+| `t-pd-64-inetd-sim-exit-status.sh` | 模拟器失败仍返回 0 | RST/超时须非零退出，FIN/完整回复仍为零 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 
