@@ -29,9 +29,13 @@ def take_lock(path, byte_offset, seconds):
     sys.stdout.write("LOCKED file=%s byte=%d fd=%d mode=%s\n"
                      % (path, byte_offset, fd, oct(os.fstat(fd).st_mode & 0o7777)))
     sys.stdout.flush()
-    deadline = time.time() + seconds if seconds > 0 else None
+    # PD-52: a backwards wall-clock step (NTP, VM resume, the fake clock
+    # shim PD-07 loads) makes "now >= deadline" false for hours, so the
+    # holder never releases byte 1 and every later job waits forever.
+    # --seconds is an elapsed duration, not an absolute point in time.
+    deadline = time.monotonic() + seconds if seconds > 0 else None
     while True:
-        if deadline is not None and time.time() >= deadline:
+        if deadline is not None and time.monotonic() >= deadline:
             break
         time.sleep(0.2)
     return 0
