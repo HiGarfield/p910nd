@@ -44,10 +44,14 @@ insserv -r /etc/init.d/p910nd
 rm -fr %{buildroot}
 
 %files
-%defattr(755, root, root)
+# %defattr applies to every listed file without an explicit %attr, so 755
+# used to make the config file and the compressed man page world executable.
+# Default regular files to 0644 (directories to 0755) and mark only the two
+# real executables as 0755.
+%defattr(644, root, root, 755)
 /etc/sysconfig/p910nd
-/etc/init.d/p910nd
-/usr/sbin/p910nd
+%attr(755, root, root) /etc/init.d/p910nd
+%attr(755, root, root) /usr/sbin/p910nd
 %{_mandir}/man8/p910nd.8.gz
 
 %changelog
