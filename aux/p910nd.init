@@ -260,7 +260,7 @@ p910nd_running_pids() {
 	''|*[!0-9]*)	continue ;;
 	esac
 	test -d "/proc/$p910nd_p" || continue
-	p910nd_argv0=$(tr '\0' '\n' <"/proc/$p910nd_p/cmdline" 2>/dev/null | sed -n 1p)
+	p910nd_argv0=$( { tr '\0' '\n' <"/proc/$p910nd_p/cmdline"; } 2>/dev/null | sed -n 1p)
 	case "${p910nd_argv0##*/}" in
 	p910[0-9]d)	printf '%s\n' "$p910nd_p" ;;
 	*)		continue ;;
@@ -273,7 +273,10 @@ p910nd_running_pids() {
     for p910nd_proc in /proc/[0-9]*/cmdline; do
 	p910nd_p=${p910nd_proc#/proc/}
 	p910nd_p=${p910nd_p%/cmdline}
-	p910nd_argv0=$(tr '\0' '\n' <"$p910nd_proc" 2>/dev/null | sed -n 1p)
+	# PD-69: a process can disappear between the glob and this read.  The
+	# shell reports a failed input redirection on stderr before tr even
+	# runs, so tr's own 2>/dev/null is not enough; redirect the group.
+	p910nd_argv0=$( { tr '\0' '\n' <"$p910nd_proc"; } 2>/dev/null | sed -n 1p)
 	case "${p910nd_argv0##*/}" in
 	p910[0-9]d)	printf '%s\n' "$p910nd_p" ;;
 	*)		continue ;;
@@ -342,7 +345,7 @@ case "$1" in
 		## that exactly.  A looser "contains p910" test would also match an
 		## unrelated process whose command line happens to mention p910 --
 		## an editor sitting on p910nd.c, for instance.
-		p910nd_argv0=$(tr '\0' '\n' <"/proc/$p910nd_p/cmdline" 2>/dev/null | sed -n 1p)
+		p910nd_argv0=$( { tr '\0' '\n' <"/proc/$p910nd_p/cmdline"; } 2>/dev/null | sed -n 1p)
 		case "${p910nd_argv0##*/}" in
 		p910[0-9]d)	;;
 		*)	continue ;;
@@ -385,7 +388,7 @@ case "$1" in
 			## unrelated process that inherited the number would be
 			## killed (the TERM path already does this check).
 			test -d "/proc/$p910nd_p" || continue
-			p910nd_argv0=$(tr '\0' '\n' <"/proc/$p910nd_p/cmdline" 2>/dev/null | sed -n 1p)
+			p910nd_argv0=$( { tr '\0' '\n' <"/proc/$p910nd_p/cmdline"; } 2>/dev/null | sed -n 1p)
 			case "${p910nd_argv0##*/}" in
 			p910[0-9]d)	kill -KILL "$p910nd_p" 2>/dev/null ;;
 			*)		continue ;;
