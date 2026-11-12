@@ -2266,13 +2266,14 @@ static int copy_stream(int fd, int lp) {
 			if (networkToPrinterBuffer.eof_sent &&
 			    networkToPrinterBuffer.bytes == 0)
 				break;
-			/* V-jobmax: an absolute ceiling on one job, the only
-			 * deadline that cannot be switched off.  Without it a
-			 * configuration such as -DPRINTER_STALL_TIMEOUT=0 has
-			 * nothing that ends a job waiting on a printer that
-			 * never recovers - and such a job holds the byte-1 job
-			 * lock, so every later job for that printer waits too.
-			 */
+			/* V-jobmax: an opt-in absolute ceiling on one job.  The
+			 * default 0 disables it, so -DPRINTER_STALL_TIMEOUT=0
+			 * really is unbounded unless this knob is set; p910nd.8
+			 * documents that explicitly.  When enabled it also ends
+			 * a job waiting on a printer that never recovers - and
+			 * such a job holds the byte-1 job lock, so every later
+			 * job for that printer queues behind it.  PD-80 guards
+			 * both the enabled and the disabled behaviour. */
 			if (JOB_MAX_DURATION > 0 &&
 			    now.tv_sec - job_start.tv_sec >= (long)JOB_MAX_DURATION) {
 				dolog(LOG_ERR,
