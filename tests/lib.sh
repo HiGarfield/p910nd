@@ -80,18 +80,27 @@ obs_kv() {
 # ------------------------------------------------------------ case scratch ---
 
 # ensure_shared_variants -- (re)build the variants the cases share, when they are
-# missing or when P910ND_SRC points somewhere other than the last build.  Without
-# this a case that is run on its own would silently use whatever a previous
-# `make test` left behind, and P910ND_SRC would have no effect on it.
+# missing, when P910ND_SRC points somewhere else, or when the source CONTENTS
+# changed.  Without this a case that is run on its own would silently use
+# whatever a previous `make test` left behind, and P910ND_SRC would have no
+# effect on it.
+#
+# PD-75: the stamp used to contain only the source path.  Editing p910nd.c
+# (or overwriting a mutation fixture at the same path) left the stamp valid,
+# so a single-case run compiled nothing and tested the previous binary --
+# a silent false green right after a source change.  Include a checksum of
+# the actual bytes in the stamp.
 ensure_shared_variants() {
 	_stamp="$BUILD_DIR/.variants.stamp"
-	if [ -f "$_stamp" ] && [ "$(cat "$_stamp" 2>/dev/null)" = "$P910ND_SRC" ] &&
+	_sig=$(cksum <"$P910ND_SRC" 2>/dev/null) || return 1
+	_want="$P910ND_SRC|$_sig"
+	if [ -f "$_stamp" ] && [ "$(cat "$_stamp" 2>/dev/null)" = "$_want" ] &&
 	   [ -x "$BUILD_DIR/test" ]; then
 		return 0
 	fi
 	build_baseline >/dev/null 2>&1 || return 1
 	build_variant test "-DLOCKFILE_DIR=\"$LOCK_DIR_OK\"" >/dev/null 2>&1 || return 1
-	printf '%s\n' "$P910ND_SRC" >"$_stamp"
+	printf '%s\n' "$_want" >"$_stamp"
 	return 0
 }
 
