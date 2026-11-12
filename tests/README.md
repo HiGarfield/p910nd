@@ -82,6 +82,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-45-spec-file-modes.sh` | RPM 文件权限 | spec 的配置与 man 页须为 0644，仅程序为 0755 |
 | `t-pd-46-case-id-width.sh` | 用例编号位数截断 | 两位正则会把 PD-100 折叠成 PD-10；共享枚举须支持任意位数 |
 | `t-pd-47-inetd-sim-clock.sh` | inetd 模拟器墙钟超时 | 墙钟回拨一小时，读写/回收两个超时仍须按时触发 |
+| `t-pd-48-client-timeout-status.sh` | 客户端超时被判成功 | 无确认的超时/OS 错误须非零退出，干净 FIN 仍为零 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 

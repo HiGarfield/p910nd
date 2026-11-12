@@ -125,7 +125,11 @@ def main():
     print("%s: sent=%d received=%d" % (args.label, sent, received))
     print("RESULT how=%s sent=%d received=%d elapsed=%.3f"
           % (how, sent, received, time.monotonic() - started))
-    if how in ("rst", "connect-error"):
+    # A timeout or an OS error means the daemon never confirmed the job:
+    # reporting success (exit 0) lets a case that checks only the exit
+    # status pass without a single byte of confirmation.  Only a clean FIN,
+    # an orderly EOF or "no read requested" are successes (PD-48).
+    if how in ("rst", "connect-error", "timeout") or how.startswith("oserror:"):
         return 1
     return 0
 
