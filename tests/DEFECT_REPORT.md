@@ -6,7 +6,7 @@
 
 ## 状态：16 条缺陷全部已修复并逐条测试通过
 
-`make test`（17 个用例，连跑两轮全绿，约 187 秒）现在**断言的是修复后的行为**：每个用例通过即表示该缺陷不再复现。原始观测值落在 `build/tests/observations/`，本文引用的数字全部来自这些文件。
+`make test`（用例清单见 `tests/README.md`，数量随每次新增缺陷用例增长）现在**断言的是修复后的行为**：每个用例通过即表示该缺陷不再复现。首轮交付时为 17 个用例、连跑两轮约 187 秒；本文引用的历史数字全部来自当时的 `build/tests/observations/` 记录，不代表当前套件的规模或耗时。PD-61 校验本节的现状描述不与实现漂移。
 
 修复前的证据保留在各条的「修复前」引用块里作为回归对照，修复后的对应观测值列在「修复后实测」。
 
@@ -51,8 +51,8 @@ all mutations were detected
 - glibc ≥ 2.17 与 musl/uClibc/BSD/macOS：走 `clock_gettime(CLOCK_MONOTONIC)`，无需额外链接。
 - glibc < 2.17（`clock_gettime` 在 librt 里）：自动降级为 `gettimeofday()`；`Makefile` 留了 `#override LIBS += -lrt` 注释行，取消注释即可启用。
 - 任何平台都可用 `-DNO_CLOCK_GETTIME=1` 强制降级。
-- `mono_now()` 从不失败：`clock_gettime()` 失败时内部退回 `gettimeofday()`。
-- 全部 36 处计时点与 2 处 `time(0)` 已改走 `mono_now()`；用例断言"源码中 `gettimeofday(&` 与 `time(0)` 均为 0 处"，并用 `nm` 确认两个构建的符号差异。
+- `mono_now()` 在首次调用时**锁定时钟源**（PD-40）。单调钟偶发失败时，用首次成功时采集的 `wall - monotonic` 偏移把 `gettimeofday()` 换算回同一时间基准；两个钟都不可用时复用上一采样值，绝不制造时间跳变。因此"失败即直接退回墙钟"的旧描述已不再成立。
+- 所有计时点已改走 `mono_now()`；用例断言 `mono_now()` **之外**没有直接读取墙钟的 `gettimeofday(&...)` 或 `time(0)` 调用，并用 `nm` 确认两个构建的符号差异。计时点数量随代码演进，不在本报告中写死。
 
 ## 总表
 
@@ -275,7 +275,7 @@ LSP `findReferences get_lock` 佐证：默认预处理下 `get_lock()` **只有�
 
 **缺陷 ID**：PD-07　**严重程度**：中　**行为变更**：是　**状态**：已修复（条件编译 + 降级）
 
-**位置**：`p910nd.c:445-520`（新增 `P910ND_HAVE_MONOTONIC` 门控与 `mono_now()`）、全部 36 处计时点、`Makefile:16-24`
+**位置**：`p910nd.c`（新增 `P910ND_HAVE_MONOTONIC` 门控与 `mono_now()`）、全部计时点、`Makefile`
 
 **根因**：所有 `now - start` 都取自 `CLOCK_REALTIME`。NTP 校正、手动改表、VM 从挂起恢复都会让差值变负，`>= limit` 恒假，**IDLE_TIMEOUT / SILENT_TIMEOUT / PRINTER_STALL_TIMEOUT / PRINTER_REPLY_WINDOW / SHUTDOWN_GRACE / 永久失败预算全部同时失效**；前跳则相反，超时同时到期并丢弃正在打印的作业。
 
@@ -547,9 +547,9 @@ LSP `findReferences get_lock` 佐证：默认预处理下 `get_lock()` **只有�
 
 以下点本次逐条核对过，确认正确，未作改动：
 
-- **固定缓冲尺寸全部够用**：`pidfilename[21]` vs 展开 20、`lockname[25]` vs 24、`lpname[13]` vs 9、`service[16]`、`host[INET6_ADDRSTRLEN]`。
+- **固定缓冲尺寸全部够用**：`pidfilename[sizeof(PIDFILE)]`、`lockname[sizeof(LOCKFILE)]`（模板中的 `%c` 展开为 1 字符，缓冲区恒多 1 字节）、`lpname[256]`（PD-39 起对 `snprintf` 结果做截断检查）、`service[16]`、`host[INET6_ADDRSTRLEN]`。
 - **全部 `dolog()` 格式串与实参类型逐条核对**，无 `-Wformat` 问题。
-- **环形缓冲区不变量自洽**；`totalin`/`totalout` 用无符号差值判断未送达量，跨回绕精确。
+- **环形缓冲区不变量自洽**；`totalin`/`totalout` 用无符号差值判断未送达量，跨回绕精确。`flush_buffer()` 的丢弃字节按每轮实际消耗量累加（PD-43），跨尾部环形缓冲不再重复计数。
 - **作业成败判定只看打印方向**，客户端 hangup 不会被误判为失败，不会造成 CUPS 重复打印。
 - **`getaddrinfo` 路径无泄漏**，`clientlen` 每次 accept 前重置。
 - **fork 前 `fflush(NULL)`** 与子进程 `_exit` 前的 flush 正确。
