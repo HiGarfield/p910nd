@@ -94,6 +94,17 @@ for id in $CASE_LIST; do
 		say "?? $lid: no case file"
 		continue
 	fi
+	# PD-77: case_ids() returns unique numeric ids and `ls | head -1` picks
+	# ONE file for an id.  A second file with the same number was therefore
+	# never executed while the driver still printed PASS for that id: a
+	# silently dropped regression test.  Two files sharing an id is a
+	# broken suite -- fail loudly instead of choosing one arbitrarily.
+	n_matches=$(ls "$CASES_DIR/t-$lid"-*.sh 2>/dev/null | wc -l | tr -d ' ')
+	if [ "$n_matches" -gt 1 ]; then
+		FAILED="$FAILED $lid(duplicate-case-id)"
+		say "?? $lid: DUPLICATE case id ($n_matches case files)"
+		continue
+	fi
 	kill_stray
 	sleep 0.2
 	if ! port_is_free "$TEST_PORT"; then

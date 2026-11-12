@@ -112,6 +112,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-74-runall-signal-exit.sh` | 驱动忽略取消信号 | SIGTERM 须以 143 立即退出，正常退出仍为 0 |
 | `t-pd-75-variant-stamp-content.sh` | 源码改动不触发重建 | 同路径内容变化须重建共享变体，未变化则复用缓存 |
 | `t-pd-76-init-self-invoke-quoting.sh` | init 递归调用未引号 | 含空格路径下 restart 仍须执行 stop 与 start |
+| `t-pd-77-duplicate-case-id.sh` | 同编号用例被静默丢弃 | 重复编号须报失败且不执行，单一文件仍正常通过 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 
