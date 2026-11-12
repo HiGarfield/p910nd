@@ -93,6 +93,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-56-libwrap-reject-rst.sh` | 拒绝连接误报成功 | 独立模式 libwrap 拒绝须以 RST 结束，允许时仍为 FIN |
 | `t-pd-57-client-read-timeout.sh` | 读超时被放大 | 0.1 秒读超时须在 0.6 秒内结束，1.4 秒仍生效 |
 | `t-pd-58-case-timeout-budget.sh` | 静态分析假超时 | 用例可声明更大墙钟预算，默认预算不得被放宽 |
+| `t-pd-59-init-status-no-pidfile.sh` | pid 文件丢失误判 | 无 pid 文件时仍须按 argv[0] 识别存活守护进程 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 

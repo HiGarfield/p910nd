@@ -266,6 +266,19 @@ p910nd_running_pids() {
 	*)		continue ;;
 	esac
     done
+    # PD-59: a pid file can be missing (a foreground -d instance, a TESTING
+    # build, or /var/run cleaned while the daemon lived).  Do not report a
+    # live daemon as dead just because the file is gone: main() names the
+    # process p910<port>d, so scan argv[0] as a second source of truth.
+    for p910nd_proc in /proc/[0-9]*/cmdline; do
+	p910nd_p=${p910nd_proc#/proc/}
+	p910nd_p=${p910nd_p%/cmdline}
+	p910nd_argv0=$(tr '\0' '\n' <"$p910nd_proc" 2>/dev/null | sed -n 1p)
+	case "${p910nd_argv0##*/}" in
+	p910[0-9]d)	printf '%s\n' "$p910nd_p" ;;
+	*)		continue ;;
+	esac
+    done
 }
 
 # Reset status of this service

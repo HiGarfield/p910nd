@@ -66,13 +66,18 @@ assert_eq "$STATUS_RC" "0" \
 assert_contains "$CASE_DIR/running.out" "running" \
 	"A and prints the LSB 'running' message"
 
-say "B: no pid file"
+say "B: neither a pid file nor a live daemon"
 rm -f "$PIDDIR/p9100d.pid"
+# PD-59 added a /proc argv[0] fallback: the fake daemon from A must be
+# gone too, otherwise status would correctly see it by name.
+kill -TERM "$FAKE_PID" 2>/dev/null
+wait "$FAKE_PID" 2>/dev/null
+FAKE_PID=
 run_status absent
 [ "$STATUS_RC" -ne 0 ]
 _b_rc=$?
 assert_true "$_b_rc" \
-	"B with no daemon pid file status does not claim it is running"
+	"B with no pid file and no daemon status does not claim it is running"
 
 say "C: pid file naming an unrelated live process"
 "$PYTHON" -c 'import os
@@ -86,8 +91,7 @@ _c_rc=$?
 assert_true "$_c_rc" \
 	"C a recycled/unrelated pid is not mistaken for our daemon"
 
-kill -TERM "$FAKE_PID" "$OTHER_PID" 2>/dev/null
-wait "$FAKE_PID" 2>/dev/null
+kill -TERM "$OTHER_PID" 2>/dev/null
 wait "$OTHER_PID" 2>/dev/null
 
 say "D: static -- status shares the pid-file source of truth"
