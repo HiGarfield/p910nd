@@ -831,6 +831,13 @@ static int take_lock(int fd, off_t start, long wait_seconds) {
 	lplock.l_len = 1;
 	lplock.l_pid = getpid();
 	for (;;) {
+		/* PD-50: got_term may already be set before this call (SIGTERM
+		 * arrived while the job was starting).  F_SETLKW would then
+		 * block with no new signal to produce EINTR, so the EINTR
+		 * check below never runs and shutdown waits forever on a lock
+		 * held by a wedged job.  Honour the flag before every wait. */
+		if (got_term)
+			return (0);
 		if (wait_seconds < 0) {
 			if (fcntl(fd, F_SETLKW, &lplock) == 0)
 				return (1);

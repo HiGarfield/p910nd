@@ -84,6 +84,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-47-inetd-sim-clock.sh` | inetd 模拟器墙钟超时 | 墙钟回拨一小时，读写/回收两个超时仍须按时触发 |
 | `t-pd-48-client-timeout-status.sh` | 客户端超时被判成功 | 无确认的超时/OS 错误须非零退出，干净 FIN 仍为零 |
 | `t-pd-49-init-status.sh` | init status 误判 | 运行中守护进程的 argv[0] 已改名，status 须据 pid 文件识别 |
+| `t-pd-50-lock-wait-sigterm.sh` | 关闭时锁等待挂死 | got_term 已置位时 F_SETLKW 等待须立即放弃 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 
