@@ -599,7 +599,7 @@ LSP `findReferences get_lock` 佐证：默认预处理下 `get_lock()` **只有�
 | A-6 | init 脚本按 argv[0] 精确匹配 `p910[0-9]d`，并遍历全部 pid 文件 | `t-pd-12` 侧断言 |
 | B-1 | 双向 idle 判定改为与单向一致的 `saw_data ? SILENT_TIMEOUT : IDLE_TIMEOUT` | `t-pd-20` |
 | B-2 | 新增 `JOB_MAX_DURATION`（默认 0 = 无上界）作为**可选**绝对上限，必须显式设置才生效；修正源码/本报告把它写成"不可关闭"的错误措辞（PD-80） | `t-pd-80` |
-| B-3 | `stall_extended` 随进度复位；日志改打实测秒数 | — |
+| B-3 | `stall_extended` 随进度复位；日志改打实测秒数；两处复位与实测日志由 PD-81 守护（含自变异验证） | `t-pd-81` |
 | B-4 | 子进程 fork 后恢复信号掩码 | — |
 | B-5 | 归一化改为先拆秒与余量再一次进位 | `t-pd-11` |
 
