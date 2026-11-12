@@ -613,6 +613,14 @@ static void show_version(void) {
  * ignore. */
 static int mono_now(struct timeval *tv) {
 	static struct timeval last; /* zero-initialised fallback */
+#ifndef P910ND_HAVE_MONOTONIC
+	/* PD-97: with no monotonic source the wall clock is all we have.  Keep
+	 * the total backwards step seen so far; on a step the returned time
+	 * freezes for one sample and then keeps advancing from the corrected
+	 * base, so "now - start >= limit" can never be turned permanently false
+	 * by an NTP correction or a VM resuming from suspend. */
+	static long wall_correction;
+#endif
 #ifdef P910ND_HAVE_MONOTONIC
 	struct timespec ts;
 	static int use_monotonic = -1; /* -1 undecided, 1 monotonic, 0 wall */
@@ -651,10 +659,19 @@ static int mono_now(struct timeval *tv) {
 		return (1);
 	}
 #endif
-	if (gettimeofday(tv, 0) != 0)
+	if (gettimeofday(tv, 0) != 0) {
 		*tv = last; /* never hand the caller its own uninitialised value */
-	else
-		last = *tv;
+		return (0);
+	}
+#ifndef P910ND_HAVE_MONOTONIC
+	tv->tv_sec += wall_correction;
+	if (tv->tv_sec < last.tv_sec ||
+	    (tv->tv_sec == last.tv_sec && tv->tv_usec < last.tv_usec)) {
+		wall_correction += (long)(last.tv_sec - tv->tv_sec);
+		*tv = last;
+	}
+#endif
+	last = *tv;
 	return (0);
 }
 

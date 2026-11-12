@@ -10,8 +10,8 @@
 # CLOCK_MONOTONIC where the platform has it.
 #
 # A: with the monotonic clock, stepping the wall clock changes nothing
-# B: the documented -DNO_CLOCK_GETTIME fallback still shows the old behaviour,
-#    which proves both that the shim works and that the fallback is real
+# B: PD-97 made the -DNO_CLOCK_GETTIME fallback step-compensated, so it now
+#    times out on schedule too; the shim still proves the step really happened
 # C: static, both code paths are present and nothing bypasses mono_now()
 #
 # The clock is driven with an LD_PRELOAD shim, because a real clock step needs
@@ -113,19 +113,17 @@ assert_contains "$CASE_DIR/a.daemon.log" "no data transferred" \
 	"A the daemon logged the idle timeout"
 
 # ---------------------------------------------------------------- part B ----
-say "B: -DNO_CLOCK_GETTIME=1 build (the documented fallback)"
+say "B: -DNO_CLOCK_GETTIME=1 build (PD-97 step-compensated fallback)"
 probe_job b "$fb"
-if [ "${STUCK_b:-1}" -eq 0 ]; then
-	assert_eq "${EARLY_b:-1}" "0" \
-		"B the fallback build really does depend on the wall clock"
-	b_how=$(sed -n 's/.*RESULT how=\([a-z-]*\).*/\1/p' "$CASE_DIR/b.client" 2>/dev/null)
-	assert_eq "$b_how" "fin" \
-		"B restoring the wall clock makes the overdue timeout fire at once"
-	assert_contains "$CASE_DIR/b.daemon.log" "no data transferred" \
-		"B and the daemon then logs the timeout it had been missing"
-else
-	assert_true 1 "B the fallback build really does depend on the wall clock"
-fi
+assert_eq "${STUCK_b:-0}" "1" \
+	"B the fallback closes the probe despite the wall-clock step"
+assert_ge "${EARLY_b:-0}" "1" \
+	"B and the idle timeout fires while the clock is still behind"
+b_how=$(sed -n 's/.*RESULT how=\([a-z-]*\).*/\1/p' "$CASE_DIR/b.client" 2>/dev/null)
+assert_eq "$b_how" "fin" \
+	"B with a clean FIN, i.e. the job ended normally"
+assert_contains "$CASE_DIR/b.daemon.log" "no data transferred" \
+	"B the daemon logged the idle timeout"
 
 # ---------------------------------------------------------------- part C ----
 say "C: static -- the source really has both paths"
