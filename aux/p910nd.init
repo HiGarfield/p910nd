@@ -351,6 +351,18 @@ case "$1" in
 		## run one daemon per printer and "stop" has to stop all of them.
 		P910ND_PIDS="$P910ND_PIDS $p910nd_p"
 	done
+	## PD-68: status() also recognises a daemon with no pid file (foreground
+	## -d, a TESTING build, or /var/run cleaned while it lived) via argv[0].
+	## Use the same helper here, otherwise "stop" reports success while
+	## leaving that daemon alive and try-restart tries to start a second
+	## instance.  The pid-file loop above is kept for its explicit
+	## validation; this only adds pids it did not already collect.
+	for p910nd_p in $(p910nd_running_pids | sort -u); do
+		case " $P910ND_PIDS " in
+		*" $p910nd_p "*)	continue ;;
+		esac
+		P910ND_PIDS="$P910ND_PIDS $p910nd_p"
+	done
 	if test -n "$P910ND_PIDS"; then
 		for p910nd_p in $P910ND_PIDS; do
 			P910ND_PID=$p910nd_p
