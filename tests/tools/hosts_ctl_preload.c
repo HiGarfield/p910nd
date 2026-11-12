@@ -7,7 +7,10 @@
  * "was the access check made at all?", which is what one_job() used to miss
  * in (x)inetd mode.
  *
- * The shim is inert without the environment variable.
+ * P910ND_HOSTS_CTL_DENY=1 makes the check refuse the connection instead,
+ * so the standalone close path can be observed from the client's side.
+ *
+ * The shim is inert without an environment variable.
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -17,6 +20,7 @@ int hosts_ctl(char *daemon, char *client_name, char *client_addr,
               char *client_user)
 {
 	const char *path = getenv("P910ND_HOSTS_CTL_LOG");
+	const char *deny = getenv("P910ND_HOSTS_CTL_DENY");
 	FILE *fp;
 
 	(void)client_name;
@@ -28,5 +32,5 @@ int hosts_ctl(char *daemon, char *client_name, char *client_addr,
 			fclose(fp);
 		}
 	}
-	return 1; /* allow */
+	return (deny != NULL && *deny == '1') ? 0 : 1;
 }

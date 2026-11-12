@@ -2731,7 +2731,10 @@ static void server(int lpnumber) {
 			dolog(LOGOPTS, "Connection from %s port %hu rejected\n",
 			      get_ip_str((struct sockaddr *)&client, host, sizeof(host)),
 			      get_port((struct sockaddr *)&client));
-			close(fd);
+			/* PD-56: a bare close() hands a rejected client a clean FIN,
+			 * which makes CUPS believe the job printed and never retry.
+			 * one_job() already refuses with RST; do the same here. */
+			close_connection(fd, 1);
 			continue;
 		}
 #endif

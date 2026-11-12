@@ -90,6 +90,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-53-kill-stray-scope.sh` | 清理函数误杀进程 | 仅提及构建路径的无关进程须存活，构建树内可执行文件仍被回收 |
 | `t-pd-54-client-complete-mode.sh` | 完整回复上报 none | 收满期望字节时须报 complete，短回复仍报 timeout |
 | `t-pd-55-static-check-not-vacuous.sh` | 静态检查永不失败 | 强制覆盖锁目录须报 DEFECT，且无双 OK 分支 |
+| `t-pd-56-libwrap-reject-rst.sh` | 拒绝连接误报成功 | 独立模式 libwrap 拒绝须以 RST 结束，允许时仍为 FIN |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 
