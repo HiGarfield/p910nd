@@ -38,7 +38,12 @@ PATCH_LOG=""
 # drop_source() on it.
 patched_source() {
 	_dir=$(mktemp -d "$BUILD_DIR/src.XXXXXX") || return 1
-	cp "$P910ND_SRC" "$_dir/p910nd.c" || return 1
+	# PD-90: a missing/unreadable P910ND_SRC used to leave the freshly
+	# created scratch directory behind.  The driver's EXIT cleanup only
+	# runs at the end of a whole suite, so single-case runs accumulated
+	# empty src.* directories (and a later P910ND_SRC could never rely on
+	# a clean build tree).
+	cp "$P910ND_SRC" "$_dir/p910nd.c" || { rm -rf "$_dir"; return 1; }
 	if ! "$PYTHON" "$TOOLS_DIR/patch_source.py" --profile fast \
 		--port "$TEST_PORT" --log "${PATCH_LOG:-/dev/null}" \
 		"$_dir/p910nd.c" >>"${PATCH_LOG:-/dev/null}" 2>&1; then
