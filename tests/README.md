@@ -105,6 +105,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-67-mono-now-clock-failure.sh` | 双时钟失败返回未定义值 | 两个钟都失败时须回退到零值，墙钟/单调钟正常路径不变 |
 | `t-pd-68-init-stop-no-pidfile.sh` | stop 漏停无 pid 文件进程 | status 能发现的守护进程 stop 必须同样能停止 |
 | `t-pd-69-init-proc-scan-race.sh` | /proc 扫描竞态报错 | 进程在扫描间退出时 stderr 须为空且有效项仍被发现 |
+| `t-pd-70-inetd-sim-read-timeout.sh` | 模拟器读超时被放大 | 0.1 秒须在 0.4 秒内结束，1.2 秒仍生效并记录耗时 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 

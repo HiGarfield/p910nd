@@ -67,6 +67,7 @@ def main():
         print("RESULT how=connect-error:%s" % exc)
         return 2
     client.settimeout(0.5)
+    read_started = time.monotonic()
 
     listener.settimeout(10.0)
     try:
@@ -125,9 +126,15 @@ def main():
         # time.time() a backwards clock step (NTP, suspend/resume, the fake
         # clock shim used by PD-07) makes "now < deadline" true for hours,
         # so the helper hangs instead of reporting a timeout.
-        deadline = time.monotonic() + args.read_timeout
+        read_started = time.monotonic()
+        deadline = read_started + args.read_timeout
         while len(got) < args.expect_reply and time.monotonic() < deadline:
             try:
+                # PD-70: a fixed 0.5 s socket timeout made a short
+                # --read-timeout meaningless (0.1 s waited 0.5 s). Wake up
+                # no later than the deadline, still capped at half a second.
+                client.settimeout(min(
+                    0.5, max(0.01, deadline - time.monotonic())))
                 buf = client.recv(65536)
             except socket.timeout:
                 continue
@@ -158,6 +165,7 @@ def main():
     except OSError as exc:
         how = "oserror:%s" % exc
     finally:
+        read_elapsed = time.monotonic() - read_started
         try:
             client.close()
         except OSError:
@@ -191,7 +199,8 @@ def main():
     print("client_sent=%d" % sent)
     print("client_received=%d" % len(got))
     print("client_received_preview=%s" % printable)
-    print("RESULT how=%s received=%d exit=%s" % (how, len(got), status))
+    print("RESULT how=%s received=%d exit=%s elapsed=%.3f"
+          % (how, len(got), status, read_elapsed))
     # PD-64: an rst/timeout/OS error means the job was never confirmed.
     # Returning 0 let a case that only checks $? pass on a failed job --
     # client.py already classifies these as failures (PD-48).

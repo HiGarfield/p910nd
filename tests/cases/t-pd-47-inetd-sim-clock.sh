@@ -89,8 +89,14 @@ kill_stray
 say "C: static -- both deadlines use the monotonic clock"
 assert_eq "$(count_lines "$SIM" 'deadline = time.time()')" "0" \
 	"C no wall-clock deadline expression remains"
-assert_eq "$(count_lines "$SIM" 'deadline = time.monotonic()')" "2" \
-	"C both deadlines use the monotonic clock"
+# PD-70 derives the read deadline from read_started = time.monotonic(), so
+# only the child-reap deadline is spelled as "deadline = time.monotonic()".
+assert_eq "$(count_lines "$SIM" 'deadline = time.monotonic()')" "1" \
+	"C the child-reap deadline still uses the monotonic clock"
+assert_contains "$SIM" 'read_started = time.monotonic()' \
+	"C and the read deadline has a monotonic origin"
+assert_contains "$SIM" 'deadline = read_started + args.read_timeout' \
+	"C derived from that origin, never from time.time()"
 
 kill_stray
 [ "$ASSERT_FAIL" -eq 0 ] || exit 1
