@@ -1559,6 +1559,7 @@ static void close_connection(int fd, int failure) {
 	char drain[65536];
 	size_t total = 0;
 	ssize_t n;
+	int timed_out = 0; /* PD-109 */
 #ifdef O_NONBLOCK
 	int fl;
 #endif
@@ -1597,8 +1598,14 @@ static void close_connection(int fd, int failure) {
 	mono_now(&start);
 	for (;;) {
 		mono_now(&now);
-		if (now.tv_sec - start.tv_sec >= DRAIN_TIMEOUT ||
-		    total >= DRAIN_MAX_BYTES)
+		/* PD-109: the byte cap used to be the only exit that logged a
+		 * reason.  Hitting the time cap also leaves unread data behind,
+		 * so close() can still send RST; report it symmetrically. */
+		if (now.tv_sec - start.tv_sec >= DRAIN_TIMEOUT) {
+			timed_out = 1;
+			break;
+		}
+		if (total >= DRAIN_MAX_BYTES)
 			break;
 		n = read(fd, drain, sizeof(drain));
 		if (n < 0 && errno == EINTR)
@@ -1612,6 +1619,11 @@ static void close_connection(int fd, int failure) {
 		      "close: %lu bytes still unread after draining, sending "
 		      "RST\n",
 		      (unsigned long)total);
+	else if (timed_out)
+		dolog(LOG_NOTICE,
+		      "close: drain timed out after %d seconds with %lu bytes "
+		      "left (RST possible)\n",
+		      (int)DRAIN_TIMEOUT, (unsigned long)total);
 	(void)close(fd);
 }
 
