@@ -52,7 +52,15 @@ def main():
     ap.add_argument("--extra-send", type=int, default=1)
     ap.add_argument("argv", nargs="*", help="arguments after -- for the target")
     args = ap.parse_args()
-    send_byte = int(args.send_byte, 0) & 0xFF
+    try:
+        send_byte = int(args.send_byte, 0) & 0xFF
+    except ValueError as exc:
+        # PD-89: client.py got this guard in PD-88, the simulator did not.
+        # An invalid byte raised before any socket work: stdout had no RESULT
+        # line and exit 1 looked like a failed print job (PD-48/PD-64).
+        print("bad --send-byte value: %s" % exc)
+        print("RESULT how=connect-error:bad-send-byte received=0")
+        return 2
 
     # PD-85: an unusable --target is a harness configuration error, not a
     # job outcome.  It used to be discovered only in the forked child, whose

@@ -124,6 +124,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-86-init-return-command.sh` | init 辅助函数从不执行包装命令 | `checkproc`/`start_daemon`/`rc_check` 须真正调用并传递返回码 |
 | `t-pd-87-spec-arch-pin.sh` | RPM spec 排除非 x86 架构 | 不得硬编码架构列表，CI 交叉编译矩阵须全部可用 |
 | `t-pd-88-client-bad-send.sh` | client.py 非法发送参数抛异常 | `\u` 越界与非数值 `--send-byte` 须输出 bad-send 结果并返回 2 |
+| `t-pd-89-inetd-sim-bad-byte.sh` | 模拟器字节参数解析遗漏 | 非法 `--send-byte` 须输出 bad-send-byte 结果并返回 2 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 
