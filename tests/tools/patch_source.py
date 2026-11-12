@@ -43,6 +43,23 @@ PROFILES = {
 }
 
 
+def validate_port(port):
+    """Reject a TEST_PORT that cannot be used as a TCP listening port.
+
+    PD-101: --port used to be an unchecked int.  server() builds its service
+    string from (unsigned short)(BASEPORT + lpnumber - '0') with lpnumber in
+    '0'..'2', so -1, 0, 65536 and 99999 all compiled cleanly (the cast hides
+    the wrap) but made the variant listen on 65535, 0, 0 or 34463 instead of
+    TEST_PORT.  Every case then died in wait_for_port() with no hint that the
+    build, not the daemon, was wrong.  Leave two ports for lp1/lp2 as well.
+    """
+    if port < 1 or port > 65535 - 2:
+        raise SystemExit(
+            "--port must be in 1..%d (BASEPORT + 2 must fit in a TCP port), "
+            "got %d" % (65535 - 2, port))
+    return port
+
+
 def apply_profile(text, profile, port):
     if profile not in PROFILES:
         raise SystemExit("unknown profile %r" % profile)
@@ -68,6 +85,9 @@ def main():
     ap.add_argument("--port", type=int, default=19100)
     ap.add_argument("--log", default=None)
     args = ap.parse_args()
+    # PD-101: validate before touching the source copy, so a bad TEST_PORT
+    # leaves the throw-away file pristine instead of half-patched.
+    validate_port(args.port)
 
     with open(args.source, "r", encoding="utf-8") as fh:
         text = fh.read()
