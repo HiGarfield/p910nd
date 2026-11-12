@@ -26,15 +26,28 @@ SRC="$REPO_ROOT/p910nd.c"
 
 record() {
 	# record <label> <logfile> <status>
+	_diag=$(count_lines "$2" 'warning:\|error:\|style:')
 	obs_kv "$1 exit status" "$3"
-	obs_kv "$1 diagnostics" "$(count_lines "$2" 'warning:\|error:\|style:')"
+	obs_kv "$1 diagnostics" "$_diag"
 	obs "$1 output:"
 	sed 's/^/    /' "$2" 2>/dev/null | head -40 | while read -r l; do obs "$l"; done
+	# The observation file is not part of the CI log.  Print a failing
+	# tool's output so a linter upgrade never shows up as a bare exit 1.
+	# The selfcheck lines are deliberate synthetic diagnostics; keep them
+	# out of the log so a green run stays quiet.
+	case "$1" in
+	selfcheck*) ;;
+	*)
+		if [ "$_diag" -gt 0 ] 2>/dev/null; then
+			say "DIAGNOSTICS from $1 ($_diag):"
+			sed 's/^/    /' "$2" 2>/dev/null | head -40
+		fi ;;
+	esac
 	# A command substitution of the counter name used to run here: it printed
 	# "DIAG_TOTAL: not found" and, because the substitution was empty, reset
 	# the counter to this tool's diagnostic count instead of adding it.  The
 	# last tool is normally clean, so warnings from earlier tools were hidden.
-	DIAG_TOTAL=$((DIAG_TOTAL + $(count_lines "$2" 'warning:\|error:\|style:')))
+	DIAG_TOTAL=$((DIAG_TOTAL + _diag))
 }
 DIAG_TOTAL=0
 
@@ -64,8 +77,16 @@ else
 fi
 
 say "4/5  clang-tidy"
+# clang-tidy 21 added clang-analyzer-security.ArrayBound to its default
+# set and reports a false positive on record_child()'s realloc(): the write
+# is at index child_pids_slots, inside the freshly doubled allocation.
+# Pin the check set so the baseline does not drift with the installed
+# linter.  Compiler diagnostics and the analyzer still run, while GCC
+# -fanalyzer and cppcheck analyse the same source independently.
 if command -v clang-tidy >/dev/null 2>&1 && command -v clang >/dev/null 2>&1; then
-	clang-tidy "$SRC" -- -std=c89 -I"$REPO_ROOT" \
+	clang-tidy \
+		-checks='-*,clang-diagnostic-*,clang-analyzer-*,-clang-analyzer-security.ArrayBound' \
+		"$SRC" -- -std=c89 -I"$REPO_ROOT" \
 		>"$CASE_DIR/clangtidy.log" 2>&1
 	record "clang-tidy" "$CASE_DIR/clangtidy.log" "$?"
 else

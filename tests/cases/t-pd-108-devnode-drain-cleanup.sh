@@ -14,6 +14,11 @@
 # B: an injected close() failure still releases the FIFO descriptor.
 # C: control -- a healthy --out still records every byte and exits 0.
 # D: static -- cleanup order and error propagation.
+#
+# case-timeout: 150
+# Two drain processes, two writers and an AST probe exceed the 45 s default
+# on a loaded CI runner (PD-58).  Every wait below is bounded and can kill
+# its child, so the larger budget never hides a hang.
 
 set -u
 REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -32,7 +37,7 @@ mkdir -p "$D" || exit 1
 write_chunk() {
 	"$PYTHON" - "$1" <<'EOF'
 import errno, os, sys, time
-deadline = time.monotonic() + 5.0
+deadline = time.monotonic() + 8.0
 while True:
     try:
         fd = os.open(sys.argv[1], os.O_WRONLY | os.O_NONBLOCK)
@@ -48,27 +53,62 @@ finally:
 EOF
 }
 
+# A zombie still answers kill -0, so inspect /proc before waiting: otherwise
+# a drain that already exited would cost the whole polling window.  The
+# bounded wait and the SIGKILL fallback keep wait(2) from wedging the case
+# when a signal is ignored (the CI timeout(1) wrapper used to be relied on
+# for that, and its behaviour is not portable across coreutils builds).
+drain_exited() {
+	[ -d "/proc/$1" ] || return 0
+	[ "$(awk '{print $3}' "/proc/$1/stat" 2>/dev/null)" = "Z" ]
+}
+
+wait_for_drain() {
+	# wait_for_drain <pid> <label>; sets WFD_RC to wait(2)'s status
+	_wfd_pid=$1
+	_n=0
+	while [ "$_n" -lt 80 ]; do
+		drain_exited "$_wfd_pid" && break
+		sleep 0.1
+		_n=$((_n + 1))
+	done
+	if ! drain_exited "$_wfd_pid"; then
+		kill -KILL "$_wfd_pid" 2>/dev/null
+		obs "$2 did not exit in 8 s; sent SIGKILL"
+	fi
+	wait "$_wfd_pid" 2>/dev/null
+	WFD_RC=$?
+}
+
+# A background job started by a non-interactive shell inherits SIGINT set
+# to SIG_IGN, so kill -INT on the drain would do nothing.  Restore the
+# default Python handler in this one process: do_drain() then catches
+# KeyboardInterrupt and reaches its finally block.  No coreutils timeout
+# wrapper is needed, so the case does not depend on its signal behaviour.
+start_drain() {
+	# start_drain <fifo> <out> <logfile>; the caller reads $!
+	"$PYTHON" -c '
+import runpy, signal, sys
+signal.signal(signal.SIGINT, signal.default_int_handler)
+sys.argv = [sys.argv[1], "drain", "--fifo", sys.argv[2], "--out", sys.argv[3]]
+runpy.run_path(sys.argv[0], run_name="__main__")
+' "$TOOL" "$1" "$2" >"$3" 2>&1 &
+}
+
 say "A: a full output device is reported, not raised"
 "$PYTHON" "$TOOL" fifo "$D/lp0" >"$CASE_DIR/mk0.out" 2>&1
-timeout 10 "$PYTHON" "$TOOL" drain --fifo "$D/lp0" --out /dev/full \
-	>"$CASE_DIR/full.out" 2>&1 &
+start_drain "$D/lp0" /dev/full "$CASE_DIR/full.out"
 FULL_PID=$!
 sleep 0.4
-write_chunk "$D/lp0" >/dev/null 2>&1
-FULL_RC=124
-_n=0
-while [ "$_n" -lt 40 ]; do
-	kill -0 "$FULL_PID" 2>/dev/null || break
-	sleep 0.1
-	_n=$((_n + 1))
-done
-if ! kill -0 "$FULL_PID" 2>/dev/null; then
-	wait "$FULL_PID" 2>/dev/null
-	FULL_RC=$?
-else
-	kill -KILL "$FULL_PID" 2>/dev/null
-	wait "$FULL_PID" 2>/dev/null
+write_chunk "$D/lp0" >"$CASE_DIR/writer-full.log" 2>&1
+full_writer_rc=$?
+obs "A writer exit: $full_writer_rc"
+if [ "$full_writer_rc" -ne 0 ]; then
+	say "A writer failed: $(tr '\n' '|' <"$CASE_DIR/writer-full.log")"
 fi
+assert_eq "$full_writer_rc" "0" "A the writer delivered the chunk"
+wait_for_drain "$FULL_PID" "A /dev/full drain"
+FULL_RC=$WFD_RC
 obs "full-device exit: $FULL_RC"
 obs "full-device output: $(tr '\n' '|' <"$CASE_DIR/full.out")"
 assert_eq "$FULL_RC" "1" \
@@ -121,15 +161,32 @@ assert_str_contains "$(cat "$CASE_DIR/b.out")" "released=True" \
 
 say "C: control -- a healthy output still works"
 "$PYTHON" "$TOOL" fifo "$D/lp1" >"$CASE_DIR/mk1.out" 2>&1
-timeout 10 "$PYTHON" "$TOOL" drain --fifo "$D/lp1" \
-	--out "$D/stream.bin" >"$CASE_DIR/ok.out" 2>&1 &
+start_drain "$D/lp1" "$D/stream.bin" "$CASE_DIR/ok.out"
 OK_PID=$!
 sleep 0.4
-write_chunk "$D/lp1" >/dev/null 2>&1
-sleep 0.3
+write_chunk "$D/lp1" >"$CASE_DIR/writer-ok.log" 2>&1
+ok_writer_rc=$?
+obs "C writer exit: $ok_writer_rc"
+if [ "$ok_writer_rc" -ne 0 ]; then
+	say "C writer failed: $(tr '\n' '|' <"$CASE_DIR/writer-ok.log")"
+fi
+assert_eq "$ok_writer_rc" "0" "C the writer delivered the chunk"
+# Wait until the drain has actually flushed the chunk before interrupting
+# it; a fixed sleep made the byte-count assertion timing dependent.
+_n=0
+while [ "$_n" -lt 40 ]; do
+	if [ -f "$D/stream.bin" ]; then
+		_size=$(wc -c <"$D/stream.bin" | tr -d ' ')
+	else
+		_size=0
+	fi
+	[ "$_size" = "128" ] && break
+	sleep 0.1
+	_n=$((_n + 1))
+done
 kill -INT "$OK_PID" 2>/dev/null
-wait "$OK_PID" 2>/dev/null
-OK_RC=$?
+wait_for_drain "$OK_PID" "C healthy drain"
+OK_RC=$WFD_RC
 obs "healthy exit: $OK_RC output: $(tr '\n' '|' <"$CASE_DIR/ok.out")"
 assert_eq "$OK_RC" "0" \
 	"C a healthy drain exits 0"
