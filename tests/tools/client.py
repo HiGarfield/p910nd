@@ -67,6 +67,7 @@ def main():
     received = 0
     how = "none"
     chunks = []
+    out_error = None
 
     try:
         sock = socket.create_connection((args.host, args.port), args.connect_timeout)
@@ -129,17 +130,33 @@ def main():
     except OSError as exc:
         how = "oserror:%s" % exc
     finally:
-        if args.out is not None:
-            with open(args.out, "wb") as fh:
-                fh.write(b"".join(chunks))
+        # PD-83: close the socket FIRST.  Writing --out used to be the first
+        # statement here; an unwritable path raised straight out of the
+        # finally block, so no RESULT line was printed, the exit status was
+        # indistinguishable from a failed print job, and the connection was
+        # leaked.
         try:
             sock.close()
         except OSError:
             pass
 
+    if args.out is not None:
+        try:
+            with open(args.out, "wb") as fh:
+                fh.write(b"".join(chunks))
+        except OSError as exc:
+            out_error = "%s: cannot write --out %s: %s" % (
+                args.label, args.out, exc)
+            print(out_error)
+
     print("%s: sent=%d received=%d" % (args.label, sent, received))
     print("RESULT how=%s sent=%d received=%d elapsed=%.3f"
           % (how, sent, received, time.monotonic() - started))
+    # PD-83: a tool that could not save the reply is not a failed print job.
+    # Give it a distinct status (as connect-error already has) so a case
+    # cannot silently pass on a missing file; RESULT is printed either way.
+    if out_error is not None:
+        return 2
     # A timeout or an OS error means the daemon never confirmed the job:
     # reporting success (exit 0) lets a case that checks only the exit
     # status pass without a single byte of confirmation.  Only a clean FIN,
