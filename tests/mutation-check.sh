@@ -16,6 +16,18 @@ REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 WORK="$BUILD_DIR/mutation"
 mkdir -p "$WORK"
 
+# PD-105: run the mutated cases in a throw-away copy of the tree.  Every
+# case's case_init() truncates $OBS_DIR/<id>.txt and rebuilds
+# $BUILD_DIR/cases/<id>/, so running them in the live tree overwrote the
+# observations of the last `make test` with deliberately failing mutations:
+# after a fully green suite PD-05/PD-07/PD-09 contained ASSERT FAIL lines.
+# CI archiving build/tests/ then reported failures that never happened.
+TREE="$WORK/tree"
+rm -rf "$TREE"
+mkdir -p "$TREE" || exit 1
+(cd "$REPO_ROOT" && tar cf - --exclude=.git --exclude=build .) |
+	(cd "$TREE" && tar xf -) || exit 1
+
 # Sticky failure flag: each mutation may report a missed detection, and a
 # later, successful mutation must not erase it.  RESULT used to be assigned in
 # both branches, so the last mutation decided the whole run.
@@ -42,7 +54,7 @@ say "1/3  PD-05: put the printer read-error exit back out"
 # value that can never be true instead - the copy still builds and only
 # the fix is disabled, which is what a mutation has to do.
 m=$(revert pd05 's/printerToNetworkBuffer.err & READ_ERR/printerToNetworkBuffer.err \& 0/') || exit 1
-if P910ND_SRC="$m" sh "$CASES_DIR/t-pd-05-bidir-read-error.sh" >"$WORK/pd05.log" 2>&1; then
+if (cd "$TREE" && P910ND_SRC="$m" sh tests/cases/t-pd-05-bidir-read-error.sh) >"$WORK/pd05.log" 2>&1; then
 	say "FAIL: the case still passes with the fix reverted"
 	RESULT=1
 else
@@ -51,7 +63,7 @@ fi
 
 say "2/3  PD-09: ask for the world writable lock file again"
 m=$(revert pd09 's/O_RDWR | O_NOFOLLOW, 0644/O_RDWR | O_NOFOLLOW, 0666/') || exit 1
-if P910ND_SRC="$m" sh "$CASES_DIR/t-pd-09-lockfile-mode.sh" >"$WORK/pd09.log" 2>&1; then
+if (cd "$TREE" && P910ND_SRC="$m" sh tests/cases/t-pd-09-lockfile-mode.sh) >"$WORK/pd09.log" 2>&1; then
 	say "FAIL: the case still passes with the fix reverted"
 	RESULT=1
 else
@@ -60,7 +72,7 @@ fi
 
 say "3/3  PD-07: force the wall clock in the default build"
 m=$(revert pd07 's/^#if !defined(NO_CLOCK_GETTIME)/#if 0 \&\& !defined(NO_CLOCK_GETTIME)/') || exit 1
-if P910ND_SRC="$m" sh "$CASES_DIR/t-pd-07-wallclock-timeout.sh" >"$WORK/pd07.log" 2>&1; then
+if (cd "$TREE" && P910ND_SRC="$m" sh tests/cases/t-pd-07-wallclock-timeout.sh) >"$WORK/pd07.log" 2>&1; then
 	say "FAIL: the case still passes with the fix reverted"
 	RESULT=1
 else
@@ -68,6 +80,8 @@ else
 fi
 
 kill_stray
+# Also sweep the isolated tree's process group namespace.
+(cd "$TREE" && REPO_ROOT="$TREE" . ./tests/lib.sh && kill_stray)
 say ""
 [ "$RESULT" -eq 0 ] && say "all mutations were detected" || say "at least one mutation went unnoticed"
 exit "$RESULT"
