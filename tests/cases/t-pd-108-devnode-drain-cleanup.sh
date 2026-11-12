@@ -25,6 +25,10 @@ TOOL="$TOOLS_DIR/devnode.py"
 D="$CASE_DIR/devices"
 mkdir -p "$D" || exit 1
 
+# A FIFO with no reader yet makes a plain O_WRONLY open block for ever,
+# which wedged this case on a loaded CI runner.  Open non-blocking, retry
+# ENXIO for a bounded period, and always release fd even if the reader
+# disappears between open() and write().
 write_chunk() {
 	"$PYTHON" - "$1" <<'EOF'
 import errno, os, sys, time
@@ -37,8 +41,10 @@ while True:
         if e.errno != errno.ENXIO or time.monotonic() >= deadline:
             raise
         time.sleep(0.05)
-os.write(fd, b"X" * 128)
-os.close(fd)
+try:
+    os.write(fd, b"X" * 128)
+finally:
+    os.close(fd)
 EOF
 }
 

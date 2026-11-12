@@ -49,6 +49,11 @@ say "2/5  gcc -fanalyzer"
 record "gcc -fanalyzer" "$CASE_DIR/analyzer.log" "$?"
 
 say "3/5  cppcheck"
+# cppcheck explores both sides of #ifdef on its own.  Without an explicit
+# definition it expands LOCKFILE into a bare LOCKFILE_DIR identifier
+# followed by a string, and older releases report a spurious syntax error
+# at the lockname declaration.  Pin the macro to the value the shipping
+# build uses, so the analysis is deterministic across cppcheck versions.
 if command -v cppcheck >/dev/null 2>&1; then
 	cppcheck --enable=warning,style,performance,portability --quiet \
 		--std=c89 -DLOCKFILE_DIR=\"/var/lock/subsys\" \

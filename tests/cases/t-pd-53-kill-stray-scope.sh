@@ -22,11 +22,14 @@ case_init PD-53 kill-stray-scope
 LIB="$TESTS_DIR/lib.sh"
 
 # B's "leftover daemon": an executable file inside the build tree.
+# A copied /bin/sleep is not portable: on a coreutils multicall host the
+# renamed binary dispatches on argv[0] and dies with "unknown program".
+# A shell wrapper would leave an orphaned `sleep 30` child behind when
+# kill_stray() reaps the wrapper, so use one self-contained Python process
+# whose argv still names an executable inside the build tree.
 FAKE="$CASE_DIR/fake-daemon"
-cat >"$FAKE" <<'EOF'
-#!/bin/sh
-sleep 30
-EOF
+printf '#!%s\nimport time\ntime.sleep(30)\n' \
+	"$(command -v "$PYTHON")" >"$FAKE"
 chmod +x "$FAKE"
 
 "$FAKE" 30 &

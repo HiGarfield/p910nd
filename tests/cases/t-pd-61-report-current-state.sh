@@ -52,7 +52,7 @@ assert_contains "$REPORT" "PD-43" \
 	"B the sink-buffer double-count fix is reflected"
 assert_contains "$SRC" "discarded += (int)n" \
 	"B and its per-pass accounting is in the source"
-assert_contains "$REPORT" "用例清单见 `tests/README.md`" \
+assert_contains "$REPORT" '`tests/README.md`' \
 	"B the case count is delegated to the living index"
 
 say "C: the reported-defect table has no untested or stale rows"
