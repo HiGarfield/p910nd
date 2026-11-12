@@ -127,6 +127,12 @@ case_init() {
 }
 
 # ------------------------------------------------------------- tcp helpers ---
+#
+# PD-72: both bounded waits below use time.monotonic().  With a wall clock
+# (time.time) a backwards step (NTP correction, suspend/resume, the
+# sitecustomize clock shim used by PD-72) pushed the deadline an hour into
+# the future and wedged the harness itself -- exactly the failure mode PD-07
+# fixed in the daemon and PD-47 fixed in inetd_sim.py.
 
 port_is_free() {
 	"$PYTHON" - "$1" <<'EOF'
@@ -149,8 +155,8 @@ wait_for_port() {
 	# wait_for_port <host> <port> <seconds>
 	"$PYTHON" - "$1" "$2" "$3" <<'EOF'
 import socket, sys, time
-host, port, deadline = sys.argv[1], int(sys.argv[2]), time.time() + float(sys.argv[3])
-while time.time() < deadline:
+host, port, deadline = sys.argv[1], int(sys.argv[2]), time.monotonic() + float(sys.argv[3])
+while time.monotonic() < deadline:
     try:
         s = socket.create_connection((host, port), 0.25)
         s.close()
@@ -165,8 +171,8 @@ wait_for_gone() {
 	# wait_for_gone <host> <port> <seconds>
 	"$PYTHON" - "$1" "$2" "$3" <<'EOF'
 import socket, sys, time
-host, port, deadline = sys.argv[1], int(sys.argv[2]), time.time() + float(sys.argv[3])
-while time.time() < deadline:
+host, port, deadline = sys.argv[1], int(sys.argv[2]), time.monotonic() + float(sys.argv[3])
+while time.monotonic() < deadline:
     try:
         s = socket.create_connection((host, port), 0.25)
         s.close()
