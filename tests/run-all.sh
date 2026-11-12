@@ -96,7 +96,18 @@ for id in $CASE_LIST; do
 		say "?? $lid: SKIPPED, TCP $TEST_PORT is already in use"
 		continue
 	fi
-	out=$(timeout "$CASE_TIMEOUT" sh "$case_file" 2>&1)
+	# PD-58: a case may ask for a larger wall-clock budget by declaring
+	# "# case-timeout: N" (N > the default).  Static-analysis cases run
+	# several external tools and can exceed CASE_TIMEOUT on a loaded CI
+	# runner; being killed there is a false failure, not a defect.  The
+	# declaration never shortens the default budget.
+	case_limit=$CASE_TIMEOUT
+	_extra=$(sed -n 's/^# case-timeout: \([0-9][0-9]*\)$/\1/p' \
+		"$case_file" | head -1)
+	if [ -n "$_extra" ] && [ "$_extra" -gt "$case_limit" ]; then
+		case_limit=$_extra
+	fi
+	out=$(timeout "$case_limit" sh "$case_file" 2>&1)
 	status=$?
 	printf '%s\n' "$out"
 	if [ "$status" -eq 0 ]; then
@@ -104,7 +115,7 @@ for id in $CASE_LIST; do
 		say "PASS $lid"
 	elif [ "$status" -eq 124 ]; then
 		FAILED="$FAILED $lid(timeout)"
-		say "FAIL $lid (timed out after ${CASE_TIMEOUT}s)"
+		say "FAIL $lid (timed out after ${case_limit}s)"
 	else
 		FAILED="$FAILED $lid(exit-$status)"
 		say "FAIL $lid (exit $status)"

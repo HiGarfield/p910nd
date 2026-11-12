@@ -7,6 +7,10 @@
 # defects rather than something a tool would have caught, and so any later change
 # can prove it introduced no new diagnostics.
 #
+# case-timeout: 120
+# gcc -fanalyzer, cppcheck and clang-tidy together exceed the 45 s default
+# on a loaded CI runner; that timeout would be a false failure (PD-58).
+#
 # The case passes as long as every tool ran *and* still reports nothing: the
 # point of the baseline is that the number must stay at zero.  Every tool is
 # also asserted on its own, so one clean run cannot hide another tool's
