@@ -311,7 +311,20 @@ older clean-FIN behaviour.
 .TP
 .B NO_CLOCK_GETTIME
 unset; define it to measure every timeout with gettimeofday(3) instead of
-CLOCK_MONOTONIC.
+CLOCK_MONOTONIC.  That fallback still compensates backwards wall-clock steps,
+so an NTP correction cannot disable the deadlines.
+.TP
+.B P910ND_HAVE_MONOTONIC
+derived internally from \fBNO_CLOCK_GETTIME\fR and the platform's
+CLOCK_MONOTONIC support; it is not a tuning knob and should not be set by
+hand.  The code path selected when it is absent is the step-compensated
+fallback described above.
+.TP
+.B SOMAXCONN
+(128 when the system headers do not define it) the listen backlog requested
+from the kernel.  Connections wait in that queue once \fBMAX_JOB_CHILDREN\fR
+is reached, so it must be larger than the child cap, not equal to it; the
+kernel clamps the request to its own somaxconn limit.
 .TP
 .B PRINTERFILE
 (\"/dev/lp%c\") the device template the printer number is substituted into.

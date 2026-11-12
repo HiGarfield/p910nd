@@ -133,6 +133,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-95-spec-install-destdir.sh` | RPM 安装未进 buildroot | `%install` 须显式传 `DESTDIR`，四个文件须落在私有 buildroot 下 |
 | `t-pd-96-listen-backlog-cap.sh` | listen backlog 小于作业上限 | 实测 backlog 须大于作业上限，小上限时队列不得缩小 |
 | `t-pd-97-fallback-clock-step.sh` | 降级构建墙钟回拨使超时失效 | 连续两次回拨后 idle 超时仍须按时触发，单调路径不受影响 |
+| `t-pd-98-new-knobs-documented.sh` | 新增构建守卫未文档化 | 每个 `#ifndef` 都须在 man page 有 `.B` 条目与语义说明 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 
