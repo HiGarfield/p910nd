@@ -137,6 +137,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-100-man-banned-wording.sh` | 新增手册措辞触发禁用词检查 | TUNING 章节不得含旧等待接口名，PD-21 四项须全 OK |
 | `t-pd-101-patch-source-port.sh` | 变体端口未校验导致静默换行 | 非法 `TEST_PORT` 须被拒绝且不污染源码副本，合法值仍正确补丁 |
 | `t-pd-102-case-timeout-ceiling.sh` | 用例超时声明无上界可挂死 CI | 超大声明须钳制到默认 10 倍并打印诊断，现有声明不受影响 |
+| `t-pd-103-inetd-sim-bad-port.sh` | 模拟器非法端口抛未捕获异常 | 非法端口须输出分类 RESULT、exit 2，正常端口不受影响 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 

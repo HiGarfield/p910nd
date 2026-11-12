@@ -72,6 +72,16 @@ def main():
               % args.target)
         return 2
 
+    # PD-103: --port was an unchecked int.  bind() raises OverflowError for
+    # -1/65536/99999, which escaped as a traceback with NO RESULT line and
+    # exit 1 -- the same misclassification PD-85 fixed for --target and
+    # PD-89 for --send-byte.  Port 0 lets the kernel pick a port the client
+    # cannot know, so it is invalid here too.  client.py deliberately keeps
+    # its own behaviour: for a client, a bad port IS a connect error.
+    if args.port < 1 or args.port > 65535:
+        print("RESULT how=connect-error:bad-port:%d received=0" % args.port)
+        return 2
+
     listener = socket.socket()
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind((args.host, args.port))
