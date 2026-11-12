@@ -190,7 +190,8 @@ else
 		log_failure_msg "  [${_SMSG[${_RC_RV}]}] "
 	    fi
 	}
-	# TODO: Add checking for lockfiles
+	# PD-110: lock/pid-file checking now lives in the status branch,
+	# where the LSB return codes are decided (see below).
 	checkproc() { pidofproc ${1+"$@"} >/dev/null 2>&1; }
     elif test -e /etc/init.d/functions; then
 	# RHAT
@@ -258,6 +259,10 @@ fi
 # that same source of truth for status (and for try-restart, which asks
 # status).  P910ND_PIDDIR is a test hook and defaults to the runtime dir.
 P910ND_PIDDIR=${P910ND_PIDDIR:-/var/run}
+# PD-110: the daemon's instance/job lock lives in LOCKDIR (see
+# p910nd.c).  status() needs it to report LSB code 2, and the hook keeps
+# the check testable without a real /var/lock/subsys.
+P910ND_LOCKDIR=${P910ND_LOCKDIR:-/var/lock/subsys}
 p910nd_running_pids() {
     local p910nd_pf p910nd_p p910nd_argv0
     for p910nd_pf in "$P910ND_PIDDIR"/p910[0-9]d.pid; do
@@ -500,9 +505,30 @@ case "$1" in
 	# no longer names the binary.  Only fall back to checkproc when
 	# there is no such pid file (e.g. a foreground -d instance).
 	if test -n "$(p910nd_running_pids)"; then
-	    :
+	    rc_reset
 	else
-	    checkproc "$P910ND_BIN"
+	    # PD-110: implement the LSB codes this template documents.  A stale
+	    # pid file is 1, a stale lock file is 2, a genuinely stopped service
+	    # is 3.  Delegating all three to checkproc() (a name lookup only)
+	    # returned a generic failure/unknown and left the old TODO open.
+	    if checkproc "$P910ND_BIN"; then
+		rc_reset
+	    else
+		_status_rc=3
+		for _pf in "$P910ND_PIDDIR"/p910[0-9]d.pid; do
+		    test -f "$_pf" || continue
+		    _status_rc=1
+		    break
+		done
+		if test "$_status_rc" -eq 3; then
+		    for _lf in "$P910ND_LOCKDIR"/p910[0-9]d; do
+		        test -f "$_lf" || continue
+		        _status_rc=2
+		        break
+		    done
+		fi
+		(exit "$_status_rc")
+	    fi
 	fi
 	# NOTE: rc_status knows that we called this init script with
 	# "status" option and adapts its messages accordingly.

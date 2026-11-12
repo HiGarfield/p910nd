@@ -144,6 +144,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-107-observation-authoritative.sh` | 断言失败但 `exit 0` 仍被判 PASS | 驱动须以观测记录兜底，干净用例不受影响 |
 | `t-pd-108-devnode-drain-cleanup.sh` | 输出写失败导致 fd 泄漏与 traceback | `/dev/full` 须被分类、fd 仍释放、正常输出不受影响 |
 | `t-pd-109-drain-timeout-log.sh` | drain 命中时间上限时静默 | 时间上限须记 `LOG_NOTICE`，默认路径与字节上限路径不回归 |
+| `t-pd-110-init-status-lsb-codes.sh` | status 未实现文档承诺的 LSB 1/2/3 | 陈旧 pid/锁文件、真正停止、运行中须分别返回 1/2/3/0 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 
