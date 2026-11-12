@@ -2954,6 +2954,13 @@ int main(int argc, char *argv[]) {
 			progname = p + 1;
 	}
 	setup_signals(); /* A1/D9: before any socket or printer work */
+	/* PD-71: getopt/usage()/show_version() can exit before the openlog()
+	 * call below is reached.  Under (x)inetd their diagnostics go through
+	 * dolog() -> vsyslog(), so without this early call they were logged
+	 * with the default ident, no LOG_PID and LOG_USER instead of LOG_LPR.
+	 * The later call keeps the port-specific ident after argv[0] is
+	 * rewritten; openlog() may be called more than once. */
+	openlog(progname, LOG_PID, LOG_LPR);
 	/* PD-66: getopt() writes its own "invalid option" line to stderr,
 	 * which under inetd is the client's print stream.  Report it through
 	 * dolog() (syslog in that configuration) instead. */
