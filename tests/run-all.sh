@@ -76,6 +76,16 @@ else
 	CASE_LIST=$(case_ids "$CASES_DIR" | sed 's/^/t-pd-/')
 fi
 
+# PD-91: an empty/missing/renamed cases directory made case_ids() return
+# nothing, so the loop ran zero assertions while FAILED and SKIPPED stayed
+# empty and the driver exited 0 -- a completely green "make test" that
+# tested nothing.  Same false-green class as PD-42/PD-99, but on the
+# default no-argument path.
+if [ -z "$CASE_LIST" ]; then
+	say "FATAL: no test cases found in $CASES_DIR"
+	exit 1
+fi
+
 PASSED=""
 FAILED=""
 SKIPPED=""
