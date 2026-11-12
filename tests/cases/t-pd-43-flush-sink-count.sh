@@ -44,8 +44,12 @@ PD36_PROBE="$CASE_DIR/flush_probe"
 	>"$CASE_DIR/pd36.build.log" 2>&1
 assert_eq "$?" "0" "the existing flush-result probe still builds"
 "$PD36_PROBE" >"$CASE_DIR/pd36.out" 2>&1
+pd36_rc=$?
+# PD-106: save the probe's status before logging.  obs() is a printf, so
+# "$?" here used to be 0 no matter how the probe exited -- an assertion that
+# could never fail.
 obs "PD-36 probe output: $(tr '\n' '|' <"$CASE_DIR/pd36.out")"
-assert_eq "$?" "0" \
+assert_eq "$pd36_rc" "0" \
 	"the normal flush still reports 0 delivered-left and 7 discarded"
 assert_contains "$CASE_DIR/pd36.out" "sink_left=7 delivered_left=0" \
 	"and the byte counts are unchanged for the non-wrapped path"
