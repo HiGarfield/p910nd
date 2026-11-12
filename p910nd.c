@@ -494,30 +494,28 @@ static unsigned short get_port(const struct sockaddr *sa) {
 	return port;
 }
 
-static void usage(void) {
-	fprintf(stderr, "%s %s %s\n", progname, version, copyright);
-	fprintf(stderr, "Usage: %s [-f device] [-i bindaddr] [-bvd] [0|1|2]\n",
-	        progname);
-	exit(1);
-}
-
-static void show_version(void) {
-	fprintf(stdout, "%s %s\n", progname, version);
-}
-
 /* V-logfd: under (x)inetd the accepted socket is on fd 0, 1 *and* 2, so
  * log_to_stdout would write the log into the client's own byte stream (PD-04).
  * Detect that case and fall back to syslog.  fstat() rather than a remembered
  * descriptor number, because it is the identity of the open file that matters,
- * not which number it happens to have. */
-static int stdout_is_the_client_socket(void) {
-	struct stat s1;
+ * not which number it happens to have.
+ *
+ * PD-66: fd 1 and fd 2 are BOTH the client socket under inetd, and
+ * usage()/show_version() used to fprintf() straight into them.  Check the
+ * descriptor that is about to be written, not just stdout.  These helpers
+ * therefore live above usage()/show_version(). */
+static int fd_is_the_client_socket(int fd) {
+	struct stat s;
 	struct stat s0;
 
-	if (fstat(1, &s1) != 0 || fstat(0, &s0) != 0)
+	if (fstat(fd, &s) != 0 || fstat(0, &s0) != 0)
 		return (0);
-	return S_ISSOCK(s1.st_mode) && s1.st_dev == s0.st_dev &&
-	       s1.st_ino == s0.st_ino;
+	return S_ISSOCK(s.st_mode) && s.st_dev == s0.st_dev &&
+	       s.st_ino == s0.st_ino;
+}
+
+static int stdout_is_the_client_socket(void) {
+	return fd_is_the_client_socket(1);
 }
 
 /* The format string is never modified: taking it as const char * keeps every
@@ -531,6 +529,29 @@ static void dolog(int level, const char *msg, ...) {
 	else if (level != LOG_DEBUG)
 		vsyslog(level, msg, argp);
 	va_end(argp);
+}
+
+static void usage(void) {
+	/* PD-66: under inetd stderr is the client's print stream.  A bad
+	 * argument must not inject the usage text into somebody's job. */
+	if (fd_is_the_client_socket(2)) {
+		dolog(LOGOPTS,
+		      "usage: %s [-f device] [-i bindaddr] "
+		      "[-bvd] [0|1|2]\n",
+		      progname);
+	} else {
+		fprintf(stderr, "%s %s %s\n", progname, version, copyright);
+		fprintf(stderr, "Usage: %s [-f device] [-i bindaddr] [-bvd] [0|1|2]\n",
+		        progname);
+	}
+	exit(1);
+}
+
+static void show_version(void) {
+	if (stdout_is_the_client_socket())
+		dolog(LOG_NOTICE, "%s %s\n", progname, version);
+	else
+		fprintf(stdout, "%s %s\n", progname, version);
 }
 
 /* V-time: every deadline in this program goes through mono_now().  All of them
@@ -2925,6 +2946,10 @@ int main(int argc, char *argv[]) {
 			progname = p + 1;
 	}
 	setup_signals(); /* A1/D9: before any socket or printer work */
+	/* PD-66: getopt() writes its own "invalid option" line to stderr,
+	 * which under inetd is the client's print stream.  Report it through
+	 * dolog() (syslog in that configuration) instead. */
+	opterr = 0;
 	for (;;) {
 		int c = getopt(argc, argv, "bdi:f:v");
 
@@ -2948,6 +2973,12 @@ int main(int argc, char *argv[]) {
 			exit(0); /* D5: -v must not start the daemon */
 			break;
 		default:
+			if (fd_is_the_client_socket(2))
+				dolog(LOGOPTS, "invalid option -- '%c'\n",
+				      optopt ? optopt : '?');
+			else
+				fprintf(stderr, "invalid option -- '%c'\n",
+				        optopt ? optopt : '?');
 			usage();
 			break;
 		}

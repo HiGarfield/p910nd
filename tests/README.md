@@ -101,6 +101,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-63-single-case-command.sh` | 单用例命令失效 | `make test-case CASE=` 须只跑指定用例，旧写法被拒 |
 | `t-pd-64-inetd-sim-exit-status.sh` | 模拟器失败仍返回 0 | RST/超时须非零退出，FIN/完整回复仍为零 |
 | `t-pd-65-harness-readme-current.sh` | 脚手架文档漂移 | 用例范围与 TEST_PORT 覆盖须与实现一致 |
+| `t-pd-66-inetd-diagnostic-output.sh` | inetd 诊断注入打印流 | `-Z`/`-v` 下客户端须收到 0 字节，命令行输出保持 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 
