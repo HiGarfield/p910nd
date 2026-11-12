@@ -33,7 +33,14 @@ rm -fr %{buildroot}
 make
 
 %install
-%makeinstall
+# PD-95: the legacy macro WITHOUT an underscore (as opposed to %make_install)
+# expands to a long list of lowercase prefix/bindir/... variables and does
+# not pass DESTDIR.  This Makefile installs through $(DESTDIR)$(BINDIR) etc.,
+# so that macro left DESTDIR empty and wrote to the build host's real
+# /usr/sbin (or failed as an unprivileged user) while %files found nothing
+# under the buildroot.  Spell out what modern %make_install expands to; the
+# explicit form also works on rpm < 4.10.
+make install DESTDIR=%{buildroot}
 
 %post
 insserv /etc/init.d/p910nd

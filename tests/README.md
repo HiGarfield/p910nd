@@ -130,6 +130,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-92-init-piddir-consistency.sh` | stop 漏清自定义 pid 目录 | 配置的 pid 目录下陈旧文件须被删除，其它文件不受影响 |
 | `t-pd-93-init-killproc-fallback.sh` | 停止未运行服务报选项错误 | 无守护进程时须静默成功，不得再调用不兼容的 killproc 回退 |
 | `t-pd-94-init-case-slice.sh` | 静态断言切片溢出到其它分支 | `stop` 分支切片须精确到 tab 缩进的 `;;`，不得含其它 case 标签 |
+| `t-pd-95-spec-install-destdir.sh` | RPM 安装未进 buildroot | `%install` 须显式传 `DESTDIR`，四个文件须落在私有 buildroot 下 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 
