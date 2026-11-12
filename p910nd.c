@@ -1381,10 +1381,15 @@ static int flush_buffer(Buffer_t *b, int timeout_secs) {
 
 	mono_now(&start);
 	while (b->bytes > 0 && !(b->err & WRITE_ERR)) {
-		/* A sink empties the ring without delivering anything. */
-		if (b->outfd < 0)
-			discarded += b->bytes;
-		if (writeBuffer(b) > 0) {
+		ssize_t n = writeBuffer(b);
+		/* PD-43: count only the bytes this pass actually removed.
+		 * writeBuffer() drains one contiguous run at a time, so a
+		 * wrapped ring needs two passes; adding b->bytes before each
+		 * one counted the tail twice and made the "reply: N bytes not
+		 * delivered" log over-report the loss. */
+		if (b->outfd < 0 && n > 0)
+			discarded += (int)n;
+		if (n > 0) {
 			mono_now(&start); /* progress: keep going */
 			continue;
 		}
