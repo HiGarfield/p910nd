@@ -78,8 +78,14 @@ def check_pd01(rep, repo):
     mk = open(os.path.join(repo, "Makefile"), encoding="utf-8").read()
     active = re.search(r"^\s*override CFLAGS \+= -DLOCKFILE_DIR", mk, re.M)
     if active:
-        rep.add("PD-01", "makefile-lockdir-optional", OK,
-                "the Makefile sets -DLOCKFILE_DIR by default")
+        line = mk[:active.start()].count("\n") + 1
+        # PD-55: both branches used to report OK, so this check could never
+        # fail.  Forcing -DLOCKFILE_DIR on every build hard-codes a lock
+        # directory that the daemon may not be able to create (unwritable
+        # /var/log on an embedded box) and breaks the lock-path cases.
+        rep.add("PD-01", "makefile-lockdir-optional", DEFECT,
+                "the Makefile forces -DLOCKFILE_DIR for every build at line "
+                "%d; the override must stay optional" % line)
     else:
         rep.add("PD-01", "makefile-lockdir-optional", OK,
                 "the Makefile still ships -DLOCKFILE_DIR commented out, which is "
