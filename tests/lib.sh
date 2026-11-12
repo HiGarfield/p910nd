@@ -239,14 +239,39 @@ daemon_stop() {
 }
 
 # kill_stray -- belt and braces sweep of any daemon left behind by a failed
-# case.  Matching is done on the build directory inside /proc/*/cmdline
-# because the daemon renames its own argv[0].
+# case.  The daemon renames its own argv[0], so match on an ARGV ENTRY that
+# names an executable file inside the build tree, not on a plain substring of
+# the whole command line: a substring match SIGKILLs any unrelated process
+# that merely mentions the path (an editor, another worktree's helper, or
+# kill_stray's own grep child), which silently corrupts the test run.
+# Script helpers started from the case directory are executable files too,
+# so they are still reaped.
 kill_stray() {
 	for _p in /proc/[0-9]*/cmdline; do
 		_pid=${_p#/proc/}
 		_pid=${_pid%/cmdline}
 		[ "$_pid" = "$$" ] && continue
-		if tr '\0' ' ' <"$_p" 2>/dev/null | grep -q "$BUILD_DIR/"; then
+		_args=$(tr '\0' '\n' <"$_p" 2>/dev/null)
+		case "$_args" in
+		*"$BUILD_DIR/"*) ;;
+		*) continue ;;
+		esac
+		_hit=0
+		_oldifs=$IFS
+		IFS='
+'
+		# shellcheck disable=SC2086
+		for _arg in $_args; do
+			case "$_arg" in
+			"$BUILD_DIR"/*)
+				if [ -f "$_arg" ] && [ -x "$_arg" ]; then
+					_hit=1
+					break
+				fi ;;
+			esac
+		done
+		IFS=$_oldifs
+		if [ "$_hit" -eq 1 ]; then
 			kill -KILL "$_pid" 2>/dev/null
 		fi
 	done 2>/dev/null
