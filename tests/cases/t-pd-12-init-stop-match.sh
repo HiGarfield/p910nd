@@ -58,9 +58,12 @@ assert_eq "$(count_lines "$INIT" 'P910ND_PID=')" "2" \
 assert_str_contains "$stop_branch" '"$P910ND_PIDDIR"/p910[0-9]d.pid' \
 	"namely the pid files the daemon writes, in the configured dir"
 assert_str_contains "$stop_branch" 'kill -TERM "$P910ND_PID"' "and signals that pid"
-# PD-78 quotes the binary path; the fallback lookup itself is unchanged.
-assert_str_contains "$stop_branch" 'killproc -TERM "$P910ND_BIN"' \
-	"with the old name-based lookup kept as a fallback"
+# PD-93: the name-based fallback is redundant now that stop uses the same
+# pid helper as status, and LSB's killproc() rejects its signal option.
+assert_not_contains "$stop_branch" 'killproc -TERM' \
+	"the broken name-based fallback is gone"
+assert_str_contains "$stop_branch" "PD-93: p910nd_running_pids()" \
+	"stopping an absent service is a silent LSB success"
 assert_str_contains "$stop_branch" '/proc/$p910nd_p/cmdline' \
 	"a stale pid file is not acted on: the pid is checked before use"
 assert_str_contains "$stop_branch" 'case "$p910nd_p" in' \

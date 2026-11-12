@@ -408,7 +408,13 @@ case "$1" in
 		# shellcheck disable=SC2034
 		P910ND_OPTS="$P910ND_OPTS"
 	else
-		killproc -TERM "$P910ND_BIN"
+		## PD-93: p910nd_running_pids() already scans pid files AND argv[0],
+		## so an empty P910ND_PIDS means the service is not running.  LSB
+		## requires a silent success here.  The old fallback invoked the
+		## helper with a leading signal option; LSB's killproc() rejects it
+		## with four "illegal option -- T/E/R/M" messages, and the SUSE
+		## binary does not exist on those hosts at all.
+		:
 	fi
 
 	## Remove a leftover pid file, otherwise monitoring and the next
