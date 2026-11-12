@@ -2,3 +2,7 @@ build/
 *.o
 *.d
 /p910nd
+# Python helpers in tests/tools/ and their import caches (sitecustomize in
+# PD-47, py_compile during a developer check) must not dirty the tree.
+__pycache__/
+*.py[cod]
