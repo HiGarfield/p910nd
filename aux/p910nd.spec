@@ -7,7 +7,10 @@ Vendor: Ken Yap
 License: GPL v2
 # Upstream tarballs stop at 0.97; build from the git checkout instead.
 Source0: %{name}-%{version}.tar.gz
-BuildArchitectures: i386 x86_64
+# PD-87: do not hard-code BuildArchitectures.  rpmbuild infers the target
+# architecture from the build host; pinning i386 x86_64 here made an RPM for
+# any other target impossible even though the CI matrix cross-builds
+# aarch64, arm, mips, powerpc, riscv64, s390x and more.
 BuildRoot: %{_tmppath}/%{name}-%{version}-build
 Group: Networking
 

@@ -122,6 +122,7 @@ sh tests/mutation-check.sh         # 灵敏度自检：还原修复，用例必�
 | `t-pd-84-repl-broken-pipe.sh` | repl 谎报写入并抛异常 | 读者消失时须只记录真实写入、输出结束事件且不泄漏 fd |
 | `t-pd-85-inetd-target-missing.sh` | 服务未启动却报成功 | 无效目标须拒绝启动、诊断不注入客户端流、`exit=127` 判失败 |
 | `t-pd-86-init-return-command.sh` | init 辅助函数从不执行包装命令 | `checkproc`/`start_daemon`/`rc_check` 须真正调用并传递返回码 |
+| `t-pd-87-spec-arch-pin.sh` | RPM spec 排除非 x86 架构 | 不得硬编码架构列表，CI 交叉编译矩阵须全部可用 |
 
 `t-pd-13` 起的静态类用例通过 `tools/static_checks.py` 判定，它的判定词是 `OK`（属性成立）/ `DEFECT`（缺陷仍在）。
 
