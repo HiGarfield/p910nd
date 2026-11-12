@@ -191,7 +191,7 @@ else
 	    fi
 	}
 	# TODO: Add checking for lockfiles
-	checkproc() { return pidofproc ${1+"$@"} >/dev/null 2>&1; }
+	checkproc() { pidofproc ${1+"$@"} >/dev/null 2>&1; }
     elif test -e /etc/init.d/functions; then
 	# RHAT
 	. /etc/init.d/functions
@@ -207,8 +207,8 @@ else
 	# PD-14: this called a command called "status" with no argument, which
 	# does not exist; status(1) from /etc/init.d/functions needs -p <pidfile>
 	# or -x <name>.  pidofproc answers the same question here.
-	checkproc() { return pidofproc ${1+"$@"} >/dev/null 2>&1; }
-	start_daemon() { return daemon ${1+"$@"}; }
+	checkproc() { pidofproc ${1+"$@"} >/dev/null 2>&1; }
+	start_daemon() { daemon ${1+"$@"}; }
     else
 	# emulate it
 	echo_rc() { echo "  [${_SMSG[${_RC_RV}]}] "; }
@@ -228,7 +228,9 @@ else
     }
     rc_check()
     {
-	return rc_failed $?
+	# PD-86: "return rc_failed $?" never ran rc_failed;
+	# return takes only a number, so this returned 2 instead.
+	rc_failed $?
     }	
     rc_status()
     {
