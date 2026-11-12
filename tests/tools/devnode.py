@@ -50,14 +50,18 @@ def do_pty(args):
     sys.stdout.flush()
     if args.hold:
         time.sleep(args.hold)
+    # PD-51: a backwards wall-clock step (NTP, VM resume, the fake clock
+    # shim used by PD-07) makes "now < deadline" true for hours, so the
+    # master is never closed and every read() on the slave keeps succeeding
+    # instead of failing with EIO.  Deadlines are elapsed durations.
     if args.close_after is not None:
-        deadline = time.time() + args.close_after
-        while time.time() < deadline:
+        deadline = time.monotonic() + args.close_after
+        while time.monotonic() < deadline:
             time.sleep(0.05)
         print("event=master-closed", flush=True)
         os.close(master)
-    deadline = time.time() + (args.hold_after or 30.0)
-    while time.time() < deadline:
+    deadline = time.monotonic() + (args.hold_after or 30.0)
+    while time.monotonic() < deadline:
         time.sleep(0.1)
     return 0
 
@@ -68,7 +72,7 @@ def do_drain(args):
         out = open(args.out, "wb")
     else:
         out = None
-    t0 = time.time()
+    t0 = time.monotonic()
     total = 0
     try:
         while True:
@@ -85,12 +89,12 @@ def do_drain(args):
                 out.flush()
             if args.verbose:
                 print("event=read t=%.3f bytes=%d total=%d"
-                      % (time.time() - t0, len(buf), total))
+                      % (time.monotonic() - t0, len(buf), total))
                 sys.stdout.flush()
     except KeyboardInterrupt:
         pass
     finally:
-        print("event=drain-end total=%d elapsed=%.3f" % (total, time.time() - t0))
+        print("event=drain-end total=%d elapsed=%.3f" % (total, time.monotonic() - t0))
         sys.stdout.flush()
         if out:
             out.close()
