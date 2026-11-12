@@ -23,7 +23,10 @@ LIB="$TESTS_DIR/lib.sh"
 
 # B's "leftover daemon": an executable file inside the build tree.
 FAKE="$CASE_DIR/fake-daemon"
-cp /bin/sleep "$FAKE" || true
+cat >"$FAKE" <<'EOF'
+#!/bin/sh
+sleep 30
+EOF
 chmod +x "$FAKE"
 
 "$FAKE" 30 &
