@@ -117,8 +117,12 @@ def main():
                 print("extra_connect=sent")
             except OSError as exc:
                 print("extra_connect=failed %s" % exc)
-        deadline = time.time() + args.read_timeout
-        while len(got) < args.expect_reply and time.time() < deadline:
+        # PD-47: client.py already uses a monotonic deadline. With
+        # time.time() a backwards clock step (NTP, suspend/resume, the fake
+        # clock shim used by PD-07) makes "now < deadline" true for hours,
+        # so the helper hangs instead of reporting a timeout.
+        deadline = time.monotonic() + args.read_timeout
+        while len(got) < args.expect_reply and time.monotonic() < deadline:
             try:
                 buf = client.recv(65536)
             except socket.timeout:
@@ -146,8 +150,10 @@ def main():
             pass
 
     status = None
-    deadline = time.time() + 5.0
-    while time.time() < deadline:
+    # Same reason as the read deadline above: a wall-clock step must not
+    # turn the bounded child reap into an unbounded wait (PD-47).
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
         wpid, wstatus = os.waitpid(pid, os.WNOHANG)
         if wpid == pid:
             status = os.waitstatus_to_exitcode(wstatus)
