@@ -594,14 +594,19 @@ static void show_version(void) {
  * every "now - start" difference would jump by decades and fire (or
  * suppress) every deadline at once.  When that happens we keep the
  * monotonic base by subtracting the wall-minus-monotonic offset captured
- * at the first successful call. */
+ * at the first successful call.
+ *
+ * PD-67: the function must always leave a defined timeval behind.  Keeping
+ * the last good sample (zero before the first success) also covers the case
+ * where gettimeofday() itself fails, which the wall-clock path used to
+ * ignore. */
 static int mono_now(struct timeval *tv) {
+	static struct timeval last; /* zero-initialised fallback */
 #ifdef P910ND_HAVE_MONOTONIC
 	struct timespec ts;
 	static int use_monotonic = -1; /* -1 undecided, 1 monotonic, 0 wall */
 	static long wall_offset = 0;   /* wall seconds minus monotonic seconds */
 	static int offset_known = 0;
-	static struct timeval last;
 	int ok = (clock_gettime(CLOCK_MONOTONIC, &ts) == 0);
 
 	if (use_monotonic < 0)
@@ -635,7 +640,10 @@ static int mono_now(struct timeval *tv) {
 		return (1);
 	}
 #endif
-	(void)gettimeofday(tv, 0);
+	if (gettimeofday(tv, 0) != 0)
+		*tv = last; /* never hand the caller its own uninitialised value */
+	else
+		last = *tv;
 	return (0);
 }
 

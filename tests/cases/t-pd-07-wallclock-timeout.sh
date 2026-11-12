@@ -135,7 +135,10 @@ grep -n 'clock_gettime\|(void)gettimeofday' "$REPO_ROOT/p910nd.c" | sed 's/^/   
 assert_contains "$REPO_ROOT/p910nd.c" "P910ND_HAVE_MONOTONIC" "C the conditional gate exists"
 assert_contains "$REPO_ROOT/p910nd.c" "NO_CLOCK_GETTIME" "C and can be forced off"
 assert_contains "$REPO_ROOT/p910nd.c" "clock_gettime(CLOCK_MONOTONIC, &ts)" "C the monotonic clock is used"
-assert_contains "$REPO_ROOT/p910nd.c" "(void)gettimeofday(tv, 0);" "C with a gettimeofday fallback"
+# PD-67 now checks gettimeofday()'s return value instead of casting it to
+# void; the assertion must name the fallback call, not its exact spelling.
+assert_contains "$REPO_ROOT/p910nd.c" "gettimeofday(tv, 0)" \
+	"C with a gettimeofday fallback"
 # mono_now() itself may consult gettimeofday() for its fallback and for the
 # wall-minus-monotonic offset; what matters is that no *deadline* outside that
 # function reads the wall clock directly.
