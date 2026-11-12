@@ -14,7 +14,9 @@ helper provides exactly those:
                                  neither blocks on open nor sees EOF) and log
                                  the byte stream with timestamps
   repl  --fifo PATH --data TEXT --delay S [--repeat N]
-                                 write TEXT to a FIFO, then sleep S, N times
+                                 write TEXT to a FIFO, then sleep S, N times;
+                                 emits event=repl-end and a non-zero status if
+                                 the reader disappears mid-run (PD-84)
 
 Every mode prints machine readable KEY=VALUE lines on stdout.  The "t="
 values are elapsed monotonic seconds, not wall-clock timestamps.
@@ -111,15 +113,32 @@ def do_repl(args):
     # the fake clock used by PD-07, so the "t=" values of a single repl
     # run were neither ordered nor comparable with the drain log.
     t0 = time.monotonic()
-    for i in range(args.repeat):
-        print("event=write t=%.3f index=%d bytes=%d"
-              % (time.monotonic() - t0, i, len(payload)))
-        sys.stdout.flush()
-        os.write(fd, payload)
-        if i + 1 < args.repeat:
-            time.sleep(args.delay)
-    os.close(fd)
-    return 0
+    written = 0
+    error = None
+    try:
+        for i in range(args.repeat):
+            # PD-84: log a write only AFTER it succeeded.  Printing first
+            # claimed a chunk was delivered even when the reader had gone
+            # away; the resulting BrokenPipeError then escaped uncaught,
+            # leaving no end event and leaking the FIFO descriptor.
+            try:
+                os.write(fd, payload)
+            except OSError as exc:
+                error = exc
+                print("event=write-error t=%.3f index=%d errno=%s"
+                      % (time.monotonic() - t0, i, exc.strerror))
+                break
+            written += 1
+            print("event=write t=%.3f index=%d bytes=%d"
+                  % (time.monotonic() - t0, i, len(payload)))
+            sys.stdout.flush()
+            if i + 1 < args.repeat:
+                time.sleep(args.delay)
+    finally:
+        os.close(fd)
+    print("event=repl-end written=%d requested=%d"
+          % (written, args.repeat), flush=True)
+    return 1 if error is not None else 0
 
 
 def main():
