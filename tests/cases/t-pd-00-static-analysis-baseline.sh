@@ -51,7 +51,8 @@ record "gcc -fanalyzer" "$CASE_DIR/analyzer.log" "$?"
 say "3/5  cppcheck"
 if command -v cppcheck >/dev/null 2>&1; then
 	cppcheck --enable=warning,style,performance,portability --quiet \
-		--std=c89 "$SRC" >"$CASE_DIR/cppcheck.log" 2>&1
+		--std=c89 -DLOCKFILE_DIR=\"/var/lock/subsys\" \
+		"$SRC" >"$CASE_DIR/cppcheck.log" 2>&1
 	record "cppcheck" "$CASE_DIR/cppcheck.log" "$?"
 else
 	obs "cppcheck not installed"

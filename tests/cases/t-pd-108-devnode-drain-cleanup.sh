@@ -27,8 +27,16 @@ mkdir -p "$D" || exit 1
 
 write_chunk() {
 	"$PYTHON" - "$1" <<'EOF'
-import os, sys
-fd = os.open(sys.argv[1], os.O_WRONLY)
+import errno, os, sys, time
+deadline = time.monotonic() + 5.0
+while True:
+    try:
+        fd = os.open(sys.argv[1], os.O_WRONLY | os.O_NONBLOCK)
+        break
+    except OSError as e:
+        if e.errno != errno.ENXIO or time.monotonic() >= deadline:
+            raise
+        time.sleep(0.05)
 os.write(fd, b"X" * 128)
 os.close(fd)
 EOF
